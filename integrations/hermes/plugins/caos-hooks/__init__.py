@@ -216,13 +216,8 @@ def _llm_step_arg(profile_env: dict[str, str]) -> Optional[str]:
 
 
 def _base_args() -> list[str]:
-<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
-    """What a NEW conversation starts from, as `--base:@@=<locator>`:
-    softmax-universe/caos-session at its current main tip. `caos mcp` reads no
-=======
     """What a NEW session starts from, as `--base:@@=<locator>`:
-    Metta-AI/caos-session at its current main tip. `caos mcp` reads no
->>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
+    softmax-universe/caos-session at its current main tip. `caos mcp` reads no
     checkout, so the server fetches this commit itself; a prompt can still
     name another with a leading `/caos-session-start-from <locator>` line."""
     session_sha = _session_sha()

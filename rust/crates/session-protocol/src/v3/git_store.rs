@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -41,9 +42,25 @@ pub struct GitStore {
     legacy_reads: RefCell<std::collections::HashMap<String, Oid>>,
     batch: RefCell<Option<BatchReader>>,
     batch_dirty: Cell<bool>,
+    /// How a missing object is read when set: ONE object, by hash. Without it
+    /// a missing object is a `git fetch` of that hash, which brings its whole
+    /// closure -- for a commit its history, for a tree every file under it --
+    /// to answer a read of one object.
+    object_fetcher: RefCell<Option<ObjectFetcher>>,
+    /// Objects `object_fetcher` supplied: present, their closure not.
+    /// `ensure_local` fetches the closure of one of these before git walks it.
+    single_objects: RefCell<HashSet<Oid>>,
+    /// Commits written through this store. Each is whole when its parents are,
+    /// and the remote may not hold it yet, so it is never fetched.
+    written_commits: RefCell<HashSet<Oid>>,
     #[cfg(test)]
     command_count: Cell<usize>,
 }
+
+/// Reads one object from wherever the store's remote keeps them: its kind
+/// (`blob`, `tree` or `commit`) and its content, without the
+/// `<kind> <size>\0` header.
+pub type ObjectFetcher = Box<dyn Fn(&Oid) -> Result<(String, Vec<u8>), String>>;
 
 static NEXT_OBJECT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +180,9 @@ impl GitStore {
             legacy_reads: RefCell::new(std::collections::HashMap::new()),
             batch: RefCell::new(None),
             batch_dirty: Cell::new(false),
+            object_fetcher: RefCell::new(None),
+            single_objects: RefCell::new(HashSet::new()),
+            written_commits: RefCell::new(HashSet::new()),
             #[cfg(test)]
             command_count: Cell::new(0),
         };
@@ -398,11 +418,69 @@ impl GitStore {
         }
     }
 
+    /// Make `oid` and everything git walks from it local: what a command that
+    /// follows history needs, as opposed to a read of one object.
+    ///
+    /// An object that is present is whole, unless it came singly from the
+    /// object fetcher (then its closure is fetched now) or is a commit written
+    /// here (then it is whole when its parents are). A commit written here
+    /// may name a tree that was never read: see `ensure_whole_tree`.
     pub fn ensure_local(&self, oid: &Oid) -> Result<(), String> {
-        if !self.has_local(oid)? {
-            self.fetch_object(oid)?;
+        let mut pending = vec![oid.clone()];
+        let mut seen = HashSet::new();
+        while let Some(oid) = pending.pop() {
+            if !seen.insert(oid.clone()) {
+                continue;
+            }
+            let single = self.single_objects.borrow().contains(&oid);
+            if single || !self.has_local(&oid)? {
+                self.fetch_object(&oid)?;
+                self.single_objects.borrow_mut().remove(&oid);
+            } else if self.written_commits.borrow().contains(&oid) {
+                let commit = self.read_commit(&oid).map_err(String::from)?;
+                pending.extend(commit.parents);
+            }
         }
         Ok(())
+    }
+
+    /// Read missing objects one at a time with `fetcher` instead of fetching
+    /// each one's closure with git.
+    pub fn set_object_fetcher(&self, fetcher: ObjectFetcher) {
+        *self.object_fetcher.borrow_mut() = Some(fetcher);
+    }
+
+    /// Bring one missing object in for a read: singly when the store has an
+    /// object fetcher, with its closure otherwise.
+    fn fetch_missing(&self, oid: &Oid) -> Result<(), String> {
+        let fetched = match self.object_fetcher.borrow().as_ref() {
+            Some(fetcher) => fetcher(oid)?,
+            None => return self.fetch_object(oid),
+        };
+        let (kind, bytes) = fetched;
+        let kind = match kind.as_str() {
+            "blob" => ObjectKind::Blob,
+            "tree" => ObjectKind::Tree,
+            "commit" => ObjectKind::Commit,
+            other => return Err(format!("{oid} was fetched as an unknown kind {other:?}")),
+        };
+        let written = self.write_object(kind, &bytes).map_err(String::from)?;
+        if written != *oid {
+            return Err(format!("the object fetched as {oid} hashes to {written}"));
+        }
+        self.single_objects.borrow_mut().insert(oid.clone());
+        Ok(())
+    }
+
+    /// Make every object under `tree` local, for a command that reads files.
+    /// With an object fetcher a tree can be present without what it names, so
+    /// presence proves nothing and the closure is fetched.
+    fn ensure_whole_tree(&self, tree: &Oid) -> Result<(), String> {
+        if self.object_fetcher.borrow().is_some() {
+            self.fetch_object(tree)
+        } else {
+            self.ensure_local(tree)
+        }
     }
 
     pub fn ensure_local_with_tip(&self, oid: &Oid, tip: &Oid) -> Result<(), String> {
@@ -835,7 +913,7 @@ impl GitStore {
                     return Ok(bytes);
                 }
                 BatchResult::Missing if self.remote.is_some() && !fetched => {
-                    self.fetch_object(oid).map_err(StoreError::Other)?;
+                    self.fetch_missing(oid).map_err(StoreError::Other)?;
                     fetched = true;
                     self.reset_batch();
                 }
@@ -846,7 +924,7 @@ impl GitStore {
                         && !fetched
                         && !self.has_local(oid).map_err(StoreError::Other)?
                     {
-                        self.fetch_object(oid).map_err(StoreError::Other)?;
+                        self.fetch_missing(oid).map_err(StoreError::Other)?;
                         fetched = true;
                     } else {
                         restarted = true;
@@ -962,7 +1040,9 @@ impl ObjectStore for GitStore {
     }
 
     fn write_commit(&mut self, commit: &CommitInfo) -> Result<Oid, StoreError> {
-        self.write_object(ObjectKind::Commit, &encode_commit_bytes(commit))
+        let oid = self.write_object(ObjectKind::Commit, &encode_commit_bytes(commit))?;
+        self.written_commits.borrow_mut().insert(oid.clone());
+        Ok(oid)
     }
 }
 
@@ -998,6 +1078,11 @@ impl CodeOps for GitStore {
         let base_commit = self.read_commit(base).map_err(String::from)?;
         let ours_tree = self.tree_of(ours)?;
         let theirs_tree = self.tree_of(theirs)?;
+        // git merges files, and a commit can be read, or minted, without its
+        // tree ever being local.
+        for tree in [&base_commit.tree, &ours_tree, &theirs_tree] {
+            self.ensure_whole_tree(tree)?;
+        }
         self.merge_over(base, &base_commit, ours_tree, theirs_tree)
     }
 

@@ -503,13 +503,8 @@ entropy=<filled in by push>
 value=<secret>
 # or read from a file, relative to this one
 value:@=<file>
-<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
 reader:@@=git+https://github.com/softmax-universe/caos?rev=<sha>&dir=std/llm-step since=<sha>
-reader:@=imports/caos/std/llm-step conversation=<id>
-=======
-reader:@@=git+https://github.com/Metta-AI/caos?rev=<sha>&dir=std/llm-step since=<sha>
 reader:@=imports/caos/std/llm-step session=<id>
->>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
 ```
 
 ## Readers

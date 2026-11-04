@@ -25,7 +25,7 @@ functions, cached by redis
     - Put this into `$CAOS_SECRETS_DIR/github-token`, using your real github token as the value:
       ```
       value=<token>
-      reader:@@=git+https://github.com/Metta-AI/caos?ref=refs/heads/main&dir=std/github
+      reader:@@=git+https://github.com/softmax-universe/caos?ref=refs/heads/main&dir=std/github
       ```
       The first reader lets `llm-step` fetch a session's content from a private
       repository; the second lets `caos-std/github` use the token, and through

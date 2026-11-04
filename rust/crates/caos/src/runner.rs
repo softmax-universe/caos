@@ -240,6 +240,14 @@ struct Runner {
     /// with (every entry is tagged with its hash).
     image_oid: Option<String>,
     affinity_oid: Option<String>,
+    /// The first job's `required*` args (`required_entries`), carried into
+    /// every follow-up poll's required args AND its lineage. The runnerd that
+    /// started us required them, so they say which runner we came from: a
+    /// container the caosd runner started (with the host's volumes mounted)
+    /// must take only jobs that asked for that host, and a pending job that
+    /// names that runner must be able to evict us toward it. Empty when a plain
+    /// runnerd started us, which is what both used to hard-code.
+    requires: std::collections::BTreeMap<String, String>,
 }
 
 /// `runner --job=<json>` — run the handed-in job through the staged lifecycle,
@@ -259,6 +267,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         used_next: false,
         image_oid: None,
         affinity_oid: None,
+        requires: std::collections::BTreeMap::new(),
     };
     if runner.cfg.resident {
         serve_next_socket(runner.tx.clone())?;
@@ -276,7 +285,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         if matches!(after, After::Done) {
             return Ok(());
         }
-        match next_job(&runner.t, &oid, &token)? {
+        match next_job(&runner.t, &oid, &runner.requires, &token)? {
             Some(next) => job = next,
             None => return Ok(()),
         }
@@ -507,12 +516,16 @@ impl Runner {
             return Err("a resident job's args name no base or affinity".to_string());
         };
         let ttl_ms = self.cfg.poll_ms;
+        let mut required = self.requires.clone();
+        required.insert("base".to_string(), image.clone());
+        required.insert("affinity".to_string(), affinity.clone());
         let body = serde_json::json!({
-            "required": { "base": image, "affinity": affinity },
+            "required": required,
             "tenure": tenure,
-            // Our parent is a generic runner (runnerd) — it polls with no required
-            // args once we die, so a job we can't serve can evict us toward it.
-            "lineage": [ {} ],
+            // Our parent is the runnerd that started us — it polls with just the
+            // `required*` args we share with it once we die, so a job we can't
+            // serve can evict us toward it.
+            "lineage": [ &self.requires ],
             "ttl_ms": ttl_ms,
         });
         let url = runner_url(&self.t, "poll")?;
@@ -565,6 +578,9 @@ impl Runner {
         }
         if self.affinity_oid.is_none() {
             self.affinity_oid = crate::read_hash(&cas.join("args").join("affinity")).ok();
+        }
+        if fresh {
+            self.requires = required_entries(&cas.join("args"));
         }
         // Drop the granted secrets at `/secret/<name>` just before the worker
         // runs (design/secrets.md). `write_secrets` wipes any prior job's
@@ -923,7 +939,7 @@ fn serve_next_socket(tx: mpsc::Sender<Event>) -> Result<(), String> {
     Ok(())
 }
 
-/// One `caos next` conversation. The request is one JSON line:
+/// One `caos next` session. The request is one JSON line:
 /// `{"op":"next","error":<text|absent>}` — answered with one line when the next
 /// job is ready — or `{"op":"stream"}`, which stays open for the worker's life.
 /// Answers are `job`, `leave` or `refused <why>`.
@@ -987,7 +1003,7 @@ fn serve_next_connection(stream: UnixStream, tx: &mpsc::Sender<Event>) -> std::i
 }
 
 /// `caos next [--error <text>]` and `caos next --stream`: the worker's side of
-/// the conversation above. Returns the process's exit status: 0 with the next
+/// the session above. Returns the process's exit status: 0 with the next
 /// job's args at `/cas/args`, [`LEAVE_STATUS`] when the worker should stop.
 pub fn next_client(args: &[String]) -> Result<u8, String> {
     let (request, stream) = match args {
@@ -1027,7 +1043,7 @@ fn answer_status(answer: &str) -> Result<u8, String> {
 
 /// `--stream`: stdin lines go to the runner and its lines come back on stdout,
 /// so a daemon that does not want a process per job reads `job` lines and
-/// writes `done`. EOF on stdin closes the conversation; `leave` ends it with
+/// writes `done`. EOF on stdin closes the session; `leave` ends it with
 /// [`LEAVE_STATUS`].
 fn stream_client(socket: UnixStream) -> Result<u8, String> {
     let mut upstream = socket.try_clone().map_err(|e| e.to_string())?;
@@ -1092,14 +1108,18 @@ fn remove_secrets() {
 fn next_job(
     t: &HttpTransport,
     image_oid: &str,
+    requires: &std::collections::BTreeMap<String, String>,
     token: &Option<String>,
 ) -> Result<Option<RunnerJob>, String> {
     let ttl_ms = crate::env_u32(RUNNER_TTL_ENV).unwrap_or(DEFAULT_RUNNER_TTL_MS);
+    let mut required = requires.clone();
+    required.insert("base".to_string(), image_oid.to_string());
     let body = serde_json::json!({
-        "required": { "base": image_oid },
-        // Our parent is a generic runner (runnerd) — it polls with no required
-        // args once we die, so a job we can't serve can evict us toward it.
-        "lineage": [ {} ],
+        "required": required,
+        // Our parent is the runnerd that started us (`Runner::requires`; a
+        // plain runnerd when that is empty) — it polls with just those args
+        // once we die, so a job we can't serve can evict us toward it.
+        "lineage": [ requires ],
         "ttl_ms": ttl_ms,
     });
     let url = runner_url(t, "poll")?;
@@ -1124,6 +1144,30 @@ fn next_job(
         Some(job) if job.is_object() => Ok(Some(RunnerJob::from_value(job)?)),
         _ => Ok(None),
     }
+}
+
+/// The job's runner-selection args — every top-level entry of `args` named with
+/// `caos_world::REQUIRED_ARG_PREFIX` — as name → oid, read off the placeholders
+/// the way `base` is. These name the runner the job was sent to
+/// (`required-caosd`, `required-pool`); an entry whose hash cannot be read is
+/// left out, which only costs the follow-up poll its specificity.
+fn required_entries(args: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(args) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !name.starts_with(caos_world::REQUIRED_ARG_PREFIX) {
+            continue;
+        }
+        if let Ok(oid) = crate::read_hash(&entry.path()) {
+            out.insert(name, oid);
+        }
+    }
+    out
 }
 
 /// The server's runner endpoint `/runner/<leaf>`.

@@ -1,4 +1,4 @@
-//! Recording a Claude Code session as an ordinary CAOS conversation.
+//! Recording a Claude Code session as an ordinary CAOS session.
 //!
 //! Claude Code drives the model; CAOS keeps the durable log. Every hook Claude
 //! Code fires arrives here as one JSON object on stdin, so the whole surface is
@@ -7,17 +7,17 @@
 //! this tree's most reliable source of bugs. The payload names its own event
 //! (`hook_event_name`), so one command serves every hook.
 //!
-//! The conversation these events build is an ordinary one: the same head ref,
+//! The session these events build is an ordinary one: the same head ref,
 //! the same append-only spine, the same transitions `caos tui` already replays
 //! (design/chat.md). Its id is derived from the Claude Code session id rather
 //! than stored in a side table, so there is no local state to lose or corrupt:
 //! the ref is the whole record.
 //!
 //! NOTHING HERE READS A CHECKOUT. A process knows the server it talks to (from
-//! `--server=<url>`, or the environment), the step that runs tools
-//! (`--llm-step:@@=<locator>`) and, for a conversation's first prompt, where its
+//! the global `caos-cli --server=<url> mcp ...`), the step that runs tools
+//! (`--llm-step:@@=<locator>`) and, for a session's first prompt, where its
 //! content comes from (`--base:@@=<locator>`); the rest is a request to the
-//! server. A harness that wants uncommitted files in a conversation commits and
+//! server. A harness that wants uncommitted files in a session commits and
 //! pushes them first, and names the commit.
 //!
 //! AND THE TOOLS ARE ORDINARY TOOLS. Nothing here implements one. A call is
@@ -41,14 +41,14 @@ use std::io::Read;
 use serde_json::{json, Value};
 
 use caos::HttpTransport;
-use conversation_protocol::v3::oid::Oid;
-use conversation_protocol::v3::refs;
+use session_protocol::v3::oid::Oid;
+use session_protocol::v3::refs;
 
-use crate::{conversation_ref, TurnOptions, LLM_STEP_ARG};
+use crate::{session_ref, TurnOptions, LLM_STEP_ARG};
 
-/// Conversation ids for recorded sessions live under one component so they are
-/// obvious in the sidebar and cannot collide with a hand-named conversation.
-/// `ConversationId::parse` accepts it: Claude Code session ids are lowercase
+/// Session ids for recorded sessions live under one component so they are
+/// obvious in the sidebar and cannot collide with a hand-named session.
+/// `SessionId::parse` accepts it: Claude Code session ids are lowercase
 /// hex and dashes.
 const SESSION_PREFIX: &str = "cc/";
 
@@ -63,20 +63,21 @@ const TOOL_PREFIX: &str = "mcp__caos__";
 const CLAUDE_CODE_MODEL: &str = "claude-code";
 
 /// What a `caos mcp` process is told, by its arguments: where the server is,
-/// which step runs the tools, and where a new conversation's content comes from.
+/// which step runs the tools, and where a new session's content comes from.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    /// `--server=<url>`; the environment otherwise ([`Config::server`]).
+    /// The global `caos-cli --server=<url>` ahead of `mcp`
+    /// ([`caos::server_override`]); nothing else names it.
     server: Option<String>,
     /// The `--llm-step:@@=<locator>` argument, verbatim.
     step: Option<String>,
-    /// `--base:@@=<locator>`: the content a new conversation starts with.
+    /// `--base:@@=<locator>`: the content a new session starts with.
     base: Option<String>,
     /// `--max-result-chars=<n>`: sent to the server with every call, which keeps a
-    /// longer tool text in the conversation and answers with a preview. Absent
+    /// longer tool text in the session and answers with a preview. Absent
     /// means the server's default (50000); 0 for no limit.
     max_result_chars: Option<usize>,
-    /// `--agents-md`: give the model the conversation's own `AGENTS.md` when the
+    /// `--agents-md`: give the model the session's own `AGENTS.md` when the
     /// first prompt creates it. Claude Code stands in a checkout of the client
     /// repo and reads it there, so only a harness that does not (Hermes) asks.
     agents_md: bool,
@@ -84,7 +85,10 @@ pub struct Config {
 
 impl Config {
     fn parse(args: &[String]) -> Result<(Self, Vec<&str>), String> {
-        let mut config = Config::default();
+        let mut config = Config {
+            server: caos::server_override().map(String::from),
+            ..Config::default()
+        };
         let mut turn = TurnOptions::default();
         let mut rest = Vec::new();
         for argument in args {
@@ -96,13 +100,16 @@ impl Config {
                 })?);
             } else if argument == "--agents-md" {
                 config.agents_md = true;
-            } else if let Some(url) = argument.strip_prefix("--server=") {
-                config.server = Some(url.to_string());
+            } else if argument == "--server" || argument.starts_with("--server=") {
+                return Err(format!(
+                    "{argument}: the server is a global flag, named before the command: \
+                     `caos-cli --server=<url> mcp ...`"
+                ));
             } else if let Some(locator) = argument.strip_prefix("--base:@@=") {
                 config.base = Some(locator.to_string());
             } else if argument.starts_with("--base=") || argument.starts_with("--base:") {
                 return Err(format!(
-                    "{argument}: a conversation's content is named by locator, \
+                    "{argument}: a session's content is named by locator, \
                      `--base:@@=<git locator>`, and the commit it names is pushed first"
                 ));
             } else if !turn.take_image_arg(argument) {
@@ -115,9 +122,10 @@ impl Config {
 
     /// The server this process talks to.
     fn server(&self) -> Result<String, String> {
-        self.server
-            .clone()
-            .ok_or_else(|| "no caos server: pass --server=<url>".to_string())
+        self.server.clone().ok_or_else(|| {
+            "no caos server: pass it before the command, `caos-cli --server=<url> mcp ...`"
+                .to_string()
+        })
     }
 }
 
@@ -137,16 +145,16 @@ pub fn cli_mcp(args: &[String]) -> Result<(), String> {
 fn usage() -> String {
     format!(
         "usage:\n  \
-         caos mcp hook    (reads one Claude Code hook payload on stdin)\n  \
-         caos mcp serve   (workspace tool server; JSON-RPC on stdio)\n\n\
-         Both take the server (--server=<url>) and name the step that \
-         runs this session's tools:\n  \
+         caos --server=<url> mcp hook    (reads one Claude Code hook payload on stdin)\n  \
+         caos --server=<url> mcp serve   (workspace tool server; JSON-RPC on stdio)\n\n\
+         Both need the server, as the global --server=<url> before `mcp`, and name the \
+         step that runs this session's tools:\n  \
          {}\n\
-         and the hook takes `--base:@@=<git locator>` for what a new conversation starts from, \
-         and `--agents-md` to answer the prompt that creates it with the conversation's \
+         and the hook takes `--base:@@=<git locator>` for what a new session starts from, \
+         and `--agents-md` to answer the prompt that creates it with the session's \
          AGENTS.md as additionalContext.\n\
          `serve` takes `--max-result-chars=<n>`: a tool result longer than that is kept in \
-         the conversation and answered with a preview (default 50000; 0 for no limit).",
+         the session and answered with a preview (default 50000; 0 for no limit).",
         crate::missing_image_arg(LLM_STEP_ARG)
     )
 }
@@ -168,17 +176,17 @@ impl StepRequest {
     }
 }
 
-/// The request that runs the step on a conversation, ready to send: the server,
+/// The request that runs the step on a session, ready to send: the server,
 /// the parameters (`params` are the step's own arguments for this call -- a tool
-/// call, a recorded event -- and the step and the conversation are added), and
+/// call, a recorded event -- and the step and the session are added), and
 /// the secrets to present.
 ///
-/// EVERYTHING a tool call or a hook does to a conversation goes through here, so
+/// EVERYTHING a tool call or a hook does to a session goes through here, so
 /// that is the whole of the client's part: nothing is read from disk, written, or
 /// pushed first.
 fn step_request(config: &Config, id: &str, params: &[(&str, &str)]) -> Result<StepRequest, String> {
     let server = config.server()?;
-    let secrets = caos::Secrets::current().for_conversation(id);
+    let secrets = caos::Secrets::current().for_session(id);
     // REACHABLE FIRST, in front of everything below. Resolving the step talks
     // to the server, and in a cloud session that server is reached through a
     // tunnel whose far end, when gone, accepts and swallows: the wait is
@@ -189,7 +197,7 @@ fn step_request(config: &Config, id: &str, params: &[(&str, &str)]) -> Result<St
     let step = step_image(config, &server, &secrets)?;
     let mut all: Vec<(String, String)> = vec![
         ("base:hash".to_string(), step),
-        ("conversation".to_string(), id.to_string()),
+        ("session".to_string(), id.to_string()),
     ];
     all.extend(
         params
@@ -207,7 +215,7 @@ fn step_request(config: &Config, id: &str, params: &[(&str, &str)]) -> Result<St
     })
 }
 
-/// Run the step on a conversation and wait: the result's `(kind, hash)`.
+/// Run the step on a session and wait: the result's `(kind, hash)`.
 fn run_step(
     config: &Config,
     id: &str,
@@ -257,7 +265,7 @@ fn step_image(config: &Config, server: &str, secrets: &caos::Secrets) -> Result<
 /// THE HOOK'S OWN TIMEOUT IS SET, in `shared/settings.json`, because Claude
 /// Code's 60s default is not enough over iroh: this wait plus the first
 /// prompt's content fetch exceeded it in a cloud session, and a killed hook
-/// lets the prompt through with no conversation and no reason given.
+/// lets the prompt through with no session and no reason given.
 const HOOK_REACH_ATTEMPTS: u32 = 6;
 const HOOK_REACH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -279,9 +287,9 @@ pub(super) fn wait_server_reachable(server: &str) -> Result<(), String> {
 /// A prompt with no server to record into is refused outright (exit 2): the
 /// diagnostics go first (stderr and the diag journal), because exit 2 is the
 /// one status with which Claude Code shows the reason, and a session that runs
-/// on with nothing recorded is worse than one that stops. Elsewhere a failed
-/// hook is shown only as an error line, and exit 2 on `Stop` would force the
-/// session on.
+/// on with nothing recorded is worse than one that stops. The same holds for a
+/// prompt the server failed to record, and every failure is bounded in time and
+/// reported where the person sees it ([`report_failure`]).
 fn hook(config: &Config) -> Result<(), String> {
     let mut input = String::new();
     std::io::stdin()
@@ -313,21 +321,108 @@ fn hook(config: &Config) -> Result<(), String> {
             std::process::exit(2);
         }
     }
-    let result = match event {
-        "UserPromptSubmit" => on_user_prompt(config, &payload),
-        "PreToolUse" => on_pre_tool_use(&payload),
-        "Stop" => on_stop(config, &payload),
-        _ => on_stop_failure(config, &payload),
-    };
+    let result = run_bounded(config, &payload, event, HOOK_BUDGET);
     debug_log_hook("end", event, &payload, Some((started.elapsed(), &result)));
-    result
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => report_failure(event, &payload, session, &error),
+    }
+}
+
+/// How long a hook may take before it gives up and says so. Shorter than the
+/// 300s `timeout` `integrations/claude-code/shared/settings.json` gives the
+/// hooks that talk to the server, so the hook always outlives its own budget and
+/// reports why: a hook that Claude Code kills lets the prompt through and says
+/// nothing. It cannot be much shorter: a session's first prompt (a fork, or a
+/// cold content fetch over iroh) has taken over 60s.
+const HOOK_BUDGET: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// Run one hook event on a thread and wait for it, at most `budget`.
+///
+/// The work is a chain of server requests, several with no timeout of their
+/// own (`eval_line_request` waits for the step), so the bound is on the whole
+/// event rather than on any one request. On timeout the thread is abandoned:
+/// the caller reports the failure and the process exits with it.
+fn run_bounded(
+    config: &Config,
+    payload: &Value,
+    event: &str,
+    budget: std::time::Duration,
+) -> Result<(), String> {
+    let config = config.clone();
+    let payload = payload.clone();
+    let event = event.to_string();
+    bounded(budget, move || match event.as_str() {
+        "UserPromptSubmit" => on_user_prompt(&config, &payload),
+        "PreToolUse" => on_pre_tool_use(&payload),
+        "Stop" => on_stop(&config, &payload),
+        _ => on_stop_failure(&config, &payload),
+    })
+}
+
+/// `work` on a thread, its answer if it comes within `budget`, else an error.
+fn bounded(
+    budget: std::time::Duration,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    match receiver.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "the caos server did not finish recording within {}s",
+            budget.as_secs()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the hook's worker stopped without an answer (it panicked)".to_string())
+        }
+    }
+}
+
+/// Make a failed hook VISIBLE. Claude Code shows a hook's reason only for exit 2
+/// (or in a `systemMessage`); any other failure is a bare "hook error" at
+/// most, and for `UserPromptSubmit` nothing at all, so a session whose
+/// recording broke ran on for hours with every turn missing from caos and no
+/// one told why.
+///
+/// - `UserPromptSubmit`: refused, exit 2, as for a session with no server: a
+///   prompt caos did not record is a session running on with nothing behind
+///   it. The person sees the reason and can send the prompt again.
+/// - `Stop` / `StopFailure`: a `systemMessage` with the reason, exit 0. Exit 2
+///   on `Stop` would force the turn to continue.
+/// - `PreToolUse`: unchanged; its failure is the tool call's.
+///
+/// Every one goes to the diag journal first, so `help` can show it later.
+fn report_failure(event: &str, payload: &Value, session: &str, error: &str) -> Result<(), String> {
+    if event == "PreToolUse" {
+        return Err(error.to_string());
+    }
+    diag::emit(&diag::Context {
+        event,
+        source: payload.get("source").and_then(Value::as_str),
+        session: Some(session),
+        reason: Some(error),
+    });
+    if event == "UserPromptSubmit" {
+        eprintln!(
+            "caos: this prompt was NOT recorded, so it was not sent: {error}\n\
+             Send it again once caos answers. If it keeps failing, this session can no longer \
+             record: fork its last recorded head into a new session."
+        );
+        std::process::exit(2);
+    }
+    announce(&format!(
+        "caos did NOT record the end of this turn: {error}"
+    ))
 }
 
 /// The hook debug log, when `CAOS_CC_HOOK_LOG` names one -- OFF by default.
 ///
 /// The hooks are the one part of this that runs in a process nobody watches:
 /// Claude Code spawns them and keeps only a pass/fail. So when a session's
-/// conversation is unexpectedly absent, or its first turn is slow, set this to a
+/// session is unexpectedly absent, or its first turn is slow, set this to a
 /// path and every hook writes a start line, an end line (session, elapsed,
 /// ok/ERR) and its `record_prompt` phase timings. `None` -- unset -- makes all
 /// of `debug_log_hook`/`cc_timing` no-ops, so production writes nothing.
@@ -398,18 +493,18 @@ fn debug_log_hook(
 /// EXIT 2, the one status with which Claude Code blocks a prompt and shows the
 /// hook's stderr. Any other failure lets the prompt through and drops the
 /// reason, and for a failed fork or resume that is a session running on with
-/// no conversation behind it: the model, following the command's text, calls a
-/// tool that answers `no conversation ... to record into`, and the actual
+/// no session behind it: the model, following the command's text, calls a
+/// tool that answers `no session ... to record into`, and the actual
 /// refusal (not the head, not on this server) is never seen by anyone.
 fn refuse_prompt(error: &str) -> ! {
     eprintln!(
-        "caos: this session is NOT attached to that conversation: {error}\n\
+        "caos: this Claude Code session is NOT attached to that caos session: {error}\n\
          Nothing was recorded; fix the command and send it again."
     );
     std::process::exit(2)
 }
 
-/// The user's prompt, and the only event allowed to create the conversation:
+/// The user's prompt, and the only event allowed to create the session:
 /// the first prompt of a session establishes its base and fallback title
 /// exactly as the TUI's first message does.
 fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
@@ -417,18 +512,18 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Ok(());
     }
-    // `/fork-caos-conversation <hash>` makes the conversation this session records
+    // `/fork-caos-session <hash>` makes the caos session this Claude Code session records
     // into, as a fork of that commit. The step does it with the first prompt, and
-    // does nothing once the session has its conversation.
+    // does nothing once the Claude Code session has its caos session.
     //
     // A refusal exits 2, the one status with which Claude Code blocks the prompt
-    // and shows the reason: a session that ran on would have no conversation
+    // and shows the reason: a Claude Code session that ran on would have no caos session
     // behind it, and a tool call would fail with a reason nobody sees.
     let from = match fork::parse_command(prompt) {
         Ok(from) => from,
         Err(error) => refuse_prompt(&error),
     };
-    let id = recorded_conversation(payload)?;
+    let id = recorded_session(payload)?;
     let readers = crate::secret_store::reader_summary();
     let recorded = match record_prompt(config, &id, prompt, from.as_ref()) {
         Ok(recorded) => recorded,
@@ -437,13 +532,10 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
     };
     let text = match (recorded.status.as_str(), &from) {
         ("forked", Some(from)) => format!(
-            "caos conversation ref {} forked from {from}; {readers}",
-            conversation_ref(&id)?
+            "caos session ref {} forked from {from}; {readers}",
+            session_ref(&id)?
         ),
-        ("created", _) => format!(
-            "caos conversation ref {}; {readers}",
-            conversation_ref(&id)?
-        ),
+        ("created", _) => format!("caos session ref {}; {readers}", session_ref(&id)?),
         _ => return Ok(()),
     };
     let mut message = json!({ "systemMessage": text });
@@ -463,17 +555,15 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The `AGENTS.md` at the root of the conversation `head`, introduced for the
-/// model; `None` when the conversation has none. Bounded as `llm-step` bounds a
+/// The `AGENTS.md` at the root of the session `head`, introduced for the
+/// model; `None` when the session has none. Bounded as `llm-step` bounds a
 /// source tree's (`std/llm-step/src/source_trees.rs`).
 fn agents_md(config: &Config, head: &str) -> Result<Option<String>, String> {
     let transport = HttpTransport::new(&config.server()?);
     let object = |oid: &str| caos::Transport::get_object(&transport, oid);
     let (kind, bytes) = object(head)?;
     if kind != "commit" {
-        return Err(format!(
-            "conversation head {head} is a {kind}, not a commit"
-        ));
+        return Err(format!("session head {head} is a {kind}, not a commit"));
     }
     let commit = gix::objs::CommitRef::from_bytes(&bytes, gix::hash::Kind::Sha1)
         .map_err(|error| format!("invalid commit {head}: {error}"))?;
@@ -494,7 +584,7 @@ fn agents_md(config: &Config, head: &str) -> Result<Option<String>, String> {
         .take(64_000)
         .collect();
     Ok(Some(format!(
-        "The conversation's AGENTS.md, its instructions for this session:\n\n{text}"
+        "The session's AGENTS.md, its instructions for this Claude Code session:\n\n{text}"
     )))
 }
 
@@ -508,7 +598,7 @@ struct Recorded {
 /// Send one event to the step (`llm-step --record=<kind>`) and read its answer.
 ///
 /// A hook is one request: the step makes the transitions on the server, so this
-/// process needs no checkout of the conversation, writes nothing, and a repeated
+/// process needs no checkout of the session, writes nothing, and a repeated
 /// event (a retried hook) names the message id it already recorded and writes
 /// nothing twice.
 fn record_event(
@@ -547,19 +637,19 @@ fn username() -> Result<String, String> {
     Ok(crate::ambient_username(std::env::var("USER"))?.unwrap_or_else(|| "user".to_string()))
 }
 
-/// Record a user's prompt, creating the conversation on the session's first one;
+/// Record a user's prompt, creating the caos session on the Claude Code session's first one;
 /// the step's status says what happened (`created`, `forked`, `recorded`, ...).
 ///
-/// The step appends the message and nothing else: a conversation keeps no turn
+/// The step appends the message and nothing else: a session keeps no turn
 /// state, so there is no request to open before Claude Code's calls are
 /// recorded.
 ///
-/// A NEW conversation needs where it starts from, which the step cannot find for
+/// A NEW session needs where it starts from, which the step cannot find for
 /// itself: `from`, the commit it forks, and the locator naming its content. With
 /// `from` alone the fork keeps its source's content; with both, the content
-/// commit is merged into the fork, which is how a session picks a conversation
+/// commit is merged into the fork, which is how a Claude Code session picks a caos session
 /// up on a newer client repo. Both go with every prompt and the step uses them
-/// only when the conversation does not exist yet.
+/// only when the session does not exist yet.
 fn record_prompt(
     config: &Config,
     id: &str,
@@ -570,7 +660,7 @@ fn record_prompt(
     let from = from.map(|from| from.to_string());
     let content = session_base::content_locator(config.base.as_deref(), prompt);
     // Both go: a root is seeded from the content, a fork merges it into the
-    // forked conversation (`std/llm-step/src/record.rs`). The step imports the
+    // forked session (`std/llm-step/src/record.rs`). The step imports the
     // commit the locator names, so the hook resolves nothing.
     if let Some(from) = &from {
         extra.push(("from", from));
@@ -584,10 +674,10 @@ fn record_prompt(
     Ok(recorded)
 }
 
-/// Tell a caos workspace tool which conversation it is working in.
+/// Tell a caos workspace tool which session it is working in.
 ///
 /// The tool server is spawned once per session and is otherwise stateless, so
-/// this is the only thing that attributes a call to a conversation. Both values
+/// this is the only thing that attributes a call to a session. Both values
 /// are declared in every tool's schema rather than smuggled in, so the model's
 /// own call stays schema-valid and this hook only fills in values the tool
 /// already accepted.
@@ -613,7 +703,7 @@ fn on_pre_tool_use(payload: &Value) -> Result<(), String> {
     if let Some(id) = payload.get("tool_use_id").and_then(Value::as_str) {
         object.insert("caos_tool_use_id".to_string(), json!(id));
     }
-    // The prompt this call belongs to. The conversation keys a call by its id
+    // The prompt this call belongs to. The session keys a call by its id
     // alone and records no turn, so the server strips it with the other
     // injected values.
     if let Some(prompt) = payload.get("prompt_id").and_then(Value::as_str) {
@@ -633,20 +723,20 @@ fn on_pre_tool_use(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The conversation a hook payload's session records into.
-fn recorded_conversation(payload: &Value) -> Result<String, String> {
-    conversation_id_for(string_field(payload, "session_id")?)
+/// The caos session a hook payload's Claude Code session records into.
+fn recorded_session(payload: &Value) -> Result<String, String> {
+    session_id_for(string_field(payload, "session_id")?)
 }
 
-/// A session's conversation id is derived, never stored: the ref is the only
+/// A Claude Code session's caos session id is derived, never stored: the ref is the only
 /// state, so there is no map to fall out of step with the sessions it names.
 ///
 /// A session id is the one ref component we do not author, so it is validated
 /// through the protocol's own parser rather than trusted — whether it arrives
 /// in a hook payload or as a tool argument.
-fn conversation_id_for(session: &str) -> Result<String, String> {
-    let id = format!("{SESSION_PREFIX}{session}");
-    refs::validate_conversation_id(&id)?;
+fn session_id_for(claude_session: &str) -> Result<String, String> {
+    let id = format!("{SESSION_PREFIX}{claude_session}");
+    refs::validate_session_id(&id)?;
     Ok(id)
 }
 
@@ -660,7 +750,7 @@ fn string_field<'a>(payload: &'a Value, key: &str) -> Result<&'a str, String> {
 /// The assistant's closing message. A call still running in the background is
 /// unaffected: its result is recorded whenever it arrives.
 fn on_stop(config: &Config, payload: &Value) -> Result<(), String> {
-    let id = recorded_conversation(payload)?;
+    let id = recorded_session(payload)?;
     let message = payload
         .get("last_assistant_message")
         .and_then(Value::as_str)
@@ -674,7 +764,7 @@ fn on_stop(config: &Config, payload: &Value) -> Result<(), String> {
     announce(&format!("caos head {}", recorded.head))
 }
 
-/// Show the person running the session where it is recorded: the conversation's
+/// Show the person running the session where it is recorded: the session's
 /// ref once, when the first prompt creates it, and its head after every turn.
 ///
 /// A `systemMessage` goes to the USER, not the model. Without it the head is
@@ -691,7 +781,7 @@ fn announce(text: &str) -> Result<(), String> {
 }
 
 fn on_stop_failure(config: &Config, payload: &Value) -> Result<(), String> {
-    let id = recorded_conversation(payload)?;
+    let id = recorded_session(payload)?;
     let kind = payload
         .get("error_type")
         .and_then(Value::as_str)
@@ -710,6 +800,38 @@ fn on_stop_failure(config: &Config, payload: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook's work that answers in time is passed through, error included.
+    #[test]
+    fn bounded_passes_the_answer_through() {
+        let budget = std::time::Duration::from_secs(5);
+        assert_eq!(bounded(budget, || Ok(())), Ok(()));
+        assert_eq!(
+            bounded(budget, || Err("no record".to_string())),
+            Err("no record".to_string())
+        );
+    }
+
+    /// Work that outlasts the budget is an error naming it, returned when the
+    /// budget runs out rather than when the work ends.
+    #[test]
+    fn bounded_gives_up_at_the_budget() {
+        let started = std::time::Instant::now();
+        let error = bounded(std::time::Duration::from_millis(100), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(error.contains("did not finish recording within"), "{error}");
+    }
+
+    /// A panic in the work is an error, not a hang or a silent success.
+    #[test]
+    fn bounded_reports_a_panic() {
+        let error = bounded(std::time::Duration::from_secs(5), || panic!("boom")).unwrap_err();
+        assert!(error.contains("panicked"), "{error}");
+    }
 
     /// The limit is an argument, not an environment variable, and it is the
     /// server that applies it; this process only forwards it.
@@ -736,15 +858,15 @@ mod tests {
     }
 
     #[test]
-    fn session_ids_become_valid_conversation_ids() {
+    fn claude_session_ids_become_valid_session_ids() {
         let payload = json!({"session_id": "88888abc-9ae5-4d07-a44d-54b366776bdc"});
         assert_eq!(
-            recorded_conversation(&payload).unwrap(),
+            recorded_session(&payload).unwrap(),
             "cc/88888abc-9ae5-4d07-a44d-54b366776bdc"
         );
     }
 
-    /// A session id is the one part of a conversation id we do not author.
+    /// A Claude Code session id is the one part of a caos session id we do not author.
     /// v3 puts the id in its ref path HEX-ENCODED, so a hostile one cannot
     /// escape the namespace or name a directory -- which is what this pins,
     /// rather than a rejection the protocol deliberately does not perform.
@@ -752,10 +874,10 @@ mod tests {
     fn hostile_session_ids_cannot_escape_the_ref_namespace() {
         for hostile in ["../../etc", "a/../b", "with space", "head", "a.lock"] {
             let payload = json!({ "session_id": hostile });
-            let id = recorded_conversation(&payload).unwrap();
-            let refname = conversation_ref(&id).unwrap();
+            let id = recorded_session(&payload).unwrap();
+            let refname = session_ref(&id).unwrap();
             assert!(
-                refname.starts_with("refs/caos/v3/conversations/"),
+                refname.starts_with("refs/caos/v4/sessions/"),
                 "session id {hostile:?} named {refname}"
             );
             assert_eq!(refs::parse_head_ref(&refname).unwrap(), id);
@@ -778,16 +900,14 @@ mod config_tests {
     }
 
     #[test]
-    fn the_arguments_name_the_server_the_step_and_the_base() {
+    fn the_arguments_name_the_step_and_the_base() {
         let given = args(&[
             "hook",
-            "--server=http://s",
             "--llm-step:@@=github:o/r?rev=abc",
             "--base:@@=github:o/c?rev=def",
         ]);
         let (config, rest) = Config::parse(&given).unwrap();
         assert_eq!(rest, ["hook"]);
-        assert_eq!(config.server.as_deref(), Some("http://s"));
         assert_eq!(
             config.step.as_deref(),
             Some("--llm-step:@@=github:o/r?rev=abc")
@@ -798,6 +918,19 @@ mod config_tests {
         let (config, rest) = Config::parse(&given).unwrap();
         assert_eq!(rest, ["hook"]);
         assert!(config.agents_md);
+    }
+
+    /// The server is the global flag, ahead of `mcp`; one after it is refused
+    /// with the form that works, rather than ignored.
+    #[test]
+    fn a_server_after_mcp_is_refused_with_the_global_form() {
+        for given in [
+            args(&["hook", "--server=http://s"]),
+            args(&["serve", "--server", "http://s"]),
+        ] {
+            let error = Config::parse(&given).unwrap_err();
+            assert!(error.contains("caos-cli --server=<url> mcp"), "{error}");
+        }
     }
 
     /// `--base=<sha>` named a commit in a checkout, and nothing reads one now.
@@ -812,7 +945,7 @@ mod config_tests {
         }
     }
     #[test]
-    fn a_server_is_named_by_argument_only() {
+    fn a_missing_server_names_the_global_flag() {
         let named = Config {
             server: Some("http://arg".into()),
             ..Config::default()

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# stack/prune-dev-refs <git-dir> [--alone] — drop the refs a dev stack's runs
+# leave behind in the shared dev repo.
+#
+# EVERY PUSH PAYS FOR EVERY REF. receive-pack advertises the whole ref list and
+# then checks the push's connectivity against every ref tip, so a push costs in
+# proportion to the refs in the repo. The suite pushes a session ref per tool
+# call, and these namespaces only grow: at 12,900 refs a one-commit push took
+# 880ms (450ms of it `rev-list --not --all`), and a scripted turn with seven tool
+# calls spent 11s of its 12s pushing. After dropping them, 60ms and 4s.
+#
+# WHAT GOES is what a run writes for itself and nothing reads once it is over:
+#   refs/caos/res/      result pins; never read back (design/caos-store-and-gc.md)
+#   refs/caos/req/      negotiation bases, which the server already sweeps at 10 min
+#   refs/caos/v4/, v3/  the tests' sessions and their memberships; a dev stack's
+#                       sessions die with it (dev/README.md)
+#   refs/heads/actors*  tests/actor's state branches
+#   refs/heads/<other>  branches tests make under unique names (tests/README.md)
+# WHAT STAYS is what a stack reads at bring-up or a later run reads back:
+# refs/caos/dev, refs/caos/locator-trees/, refs/heads/caos-test*. Objects are
+# untouched: GC is off, and dropping a ref deletes nothing.
+#
+# --alone: no other stack is up (stack-up holds the exclusive lock), so nothing
+# is mid-run and every ref in those namespaces goes, and the rest are packed.
+# Without it, only LOOSE refs older than an hour go (a run takes minutes, and a
+# packed ref has no age to judge it by), and NEVER a session's: a dev stack can
+# be serving a real cloud session (dev/README.md), idle for hours, while another
+# stack starts, and its session refs are that session.
+set -euo pipefail
+git_dir=${1:?usage: prune-dev-refs <git-dir> [--alone]}
+alone=${2:-}
+
+ephemeral() { # the refnames this may drop, one per line, from stdin
+  grep -E '^refs/caos/(res|req|v3|v4)/|^refs/heads/' | grep -vE '^refs/heads/caos-test(/|-workspace$)' || true
+}
+
+if [ "$alone" = --alone ]; then
+  doomed=$(git --git-dir="$git_dir" for-each-ref --format='%(refname)' | ephemeral)
+else
+  doomed=$(cd "$git_dir" && find refs -type f -mmin +60 | ephemeral | grep -vE '^refs/caos/(v3|v4)/' || true)
+fi
+count=0
+if [ -n "$doomed" ]; then
+  count=$(printf '%s\n' "$doomed" | wc -l)
+  printf '%s\n' "$doomed" | while IFS= read -r ref; do printf 'delete %s\n' "$ref"; done \
+    | git --git-dir="$git_dir" update-ref --stdin
+fi
+if [ "$alone" = --alone ]; then
+  git --git-dir="$git_dir" pack-refs --all
+fi
+echo "prune-dev-refs: dropped $count ref(s)${alone:+, packed the rest}" >&2

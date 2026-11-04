@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# stack/explode-packs REPO... — turn every pack in each server repo into loose
+# objects, then delete the pack.
+#
+# The server keeps every object loose and writes no packs
+# (design/loose-object-store.md); a pack in its repo predates that, or came
+# from a server of an older build sharing the repo. Exploding is a REWRITE of
+# the object store, so the caller runs this only when nothing can be reading
+# the repo: `caosd up` with the stack removed and no worker alive, `dev/stack-up`
+# holding the dev repo's lock exclusively.
+#
+# CRASH-SAFE AT EVERY STEP: no object is ever only in a place that a crash can
+# lose. Each pack is unpacked into a private staging repo on the same
+# filesystem, the staged data is flushed, the objects are renamed into
+# `objects/`, the names are flushed, every object the pack's index names is
+# checked to be loose, and only then is the pack deleted. Until then it is
+# still there. The flush before the renames is load-bearing: on ext4 a rename
+# whose data was never written survives a power cut as a zero-length file.
+#
+# Not into the repo directly: `unpack-objects` skips any object the repo
+# already has, and every object in one of its own packs counts.
+#
+# Packs in a repo are never thin (receive-pack and index-pack complete them),
+# so each unpacks on its own. Level 1, the server's own (loose::LEVEL).
+set -euo pipefail
+
+for repo in "$@"; do
+  [ -d "$repo/objects/pack" ] || continue
+  # A crash's leftovers: invisible to git, and every object in them is still
+  # in a pack, which is only deleted once its objects are loose.
+  rm -rf "$repo"/explode.*
+
+  shopt -s nullglob
+  packs=("$repo"/objects/pack/*.pack)
+  shopt -u nullglob
+  [ "${#packs[@]}" -gt 0 ] || continue
+  echo "==> exploding $repo: ${#packs[@]} pack(s) into loose objects" >&2
+
+  stage=$(mktemp -d "$repo/explode.XXXXXX")
+  git init -q --bare "$stage"
+  for pack in "${packs[@]}"; do
+    git -C "$stage" -c core.looseCompression=1 unpack-objects -q < "$pack"
+  done
+  sync -f "$stage/objects"
+
+  for dir in "$stage"/objects/[0-9a-f][0-9a-f]; do
+    fan=${dir##*/}
+    mkdir -p "$repo/objects/$fan"
+    # A zero-length loose file is a crash's leftover, never an object; the
+    # server replaces one the same way (loose::is_stored). Left in place, `-n`
+    # below would keep it, the check would refuse, and `caosd up` would die
+    # on every retry.
+    find "$repo/objects/$fan" -maxdepth 1 -type f -empty -delete
+    # -n: an object already loose is identical content; keep the stored one.
+    find "$dir" -maxdepth 1 -type f -exec mv -n -t "$repo/objects/$fan" {} +
+  done
+  sync -f "$repo/objects"
+
+  for pack in "${packs[@]}"; do
+    base=${pack%.pack}
+    missing=$(git -C "$stage" show-index < "$base.idx" | cut -d' ' -f2 \
+      | while read -r id; do
+          [ -s "$repo/objects/${id:0:2}/${id:2}" ] || echo "$id"
+        done | head -n 1)
+    if [ -n "$missing" ]; then
+      echo "explode-packs: $missing from $pack is not loose after the move; keeping the pack" >&2
+      exit 1
+    fi
+    # The index first: without it git no longer sees the pack at all.
+    rm -f "$base.idx"
+    rm -f "$base.pack" "$base.rev" "$base.bitmap" "$base.mtimes" "$base.keep" "$base.promisor"
+  done
+  sync -f "$repo/objects"
+  rm -rf "$stage"
+  echo "==> exploded $repo: $(find "$repo/objects/pack" -mindepth 1 | wc -l) file(s) left in objects/pack" >&2
+done

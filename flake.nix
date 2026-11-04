@@ -83,7 +83,7 @@
         # musl std are the SAME component derivations in every profile, and the
         # aggregate is a link farm that cannot influence codegen.
         #
-        # Parameterised on the package set because the cargo worker image is
+        # Parameterized on the package set because the cargo worker image is
         # Linux (linuxPkgs) while the host build is the host's. On Linux those
         # are one derivation, which is what collapses the bake and
         # cargoArtifacts into a single compile.
@@ -539,7 +539,7 @@
             # 99 MB, so this is not the expensive part of a 160 MB userland.
             linuxPkgs.nix
             # mount(8) for the bind that swaps that store over this image's
-            # own, and flock(1) to serialise the copy that precedes it —
+            # own, and flock(1) to serialize the copy that precedes it —
             # several containers seed one volume (see stack/bootstrap).
             linuxPkgs.util-linux
             (if pkgs.stdenv.hostPlatform.isLinux then
@@ -674,7 +674,7 @@ sandbox = false''
           # records each as a distinct failure before it was a line:
           #
           #   /tmp, /var/tmp   a writable TMPDIR for every derivation nix
-          #                    realises, and for the nix-DB dump bootstrap
+          #                    realizes, and for the nix-DB dump bootstrap
           #                    takes before binding the store over /nix.
           #                    Absent, that bind fails with a bare
           #                    `/tmp/image-db.dump: No such file or directory`
@@ -993,7 +993,8 @@ sandbox = false''
         #                tests, a consuming tree) just run it to guarantee a
         #                current stack — no daemon to babysit, no teardown race.
         #   caosd down   stop the stack (all CAOS_DATA state kept).
-        #   caosd reset  stop and wipe CAOS_DATA state for a clean slate.
+        #   caosd reset  stop and wipe CAOS_DATA state and the dev stacks' volume
+        #                (caos-vol-caos-dev) for a clean slate.
         #   caosd logs   follow the running stack's logs (Ctrl-C returns; the stack
         #                keeps running).
         #   caosd up     also answers `caos://` clients (design/
@@ -1138,15 +1139,16 @@ sandbox = false''
             # of source instead of 1.6 GB of tarballs, and `nix build` out here
             # no longer has to produce any of them.
 
-            # ---- repack, and ONLY here ------------------------------------
-            # A caos server repo accumulates one pack per push — a suite adds
-            # hundreds — and gix's object store has a fixed 32 slots. At 33
-            # packs the server starts answering `reading arg tree: object <oid>
-            # not found: The slotmap turned out to be too small with 32
-            # entries`, which reads as a missing object and is really a full
-            # table. Measured, not predicted.
+            # ---- explode packs into loose objects, and ONLY here ---------
+            # The server keeps every object loose and writes no packs
+            # (design/loose-object-store.md). A pack in a server repo predates
+            # that, or came from a server of an older build: a dev stack runs
+            # its own branch's build against the repo every dev stack shares.
+            # Packs cost every read (gix probes each pack's index; the dev repo
+            # once reached 8,583 and a 2.5-minute suite took 68), so each `up`
+            # turns any it finds into loose objects (stack/explode-packs).
             #
-            # WHY THIS IS THE ONLY SAFE PLACE. A repack REWRITES the object
+            # WHY THIS IS THE ONLY SAFE PLACE. Exploding REWRITES the object
             # store, and this repo's whole config exists to stop anything doing
             # that behind a live reader's back: `gc.auto 0`, `receive.autogc
             # false` and `maintenance.geometric-repack.enabled false` are three
@@ -1155,26 +1157,19 @@ sandbox = false''
             # object database re-consolidates against packs that moved under
             # it, gix asserts and the request thread panics — the caller gets a
             # body-less 500 and the log says nothing (see the server config
-            # above). `dev/stack-up` used to do this at every dev bring-up,
-            # which was harmless while one stack existed at a time and became a
-            # live peer's silent 500 as soon as two did.
+            # above).
             #
             # Here, nothing is reading: `up` has just removed the stack, and we
             # refuse if any worker is still alive. So this is the one moment a
             # rewrite is safe, and it covers BOTH repos — the host's own, and
             # the one every dev stack shares.
             #
-            # `-a -d -k` and the `-k` is load-bearing: GC is off precisely
-            # because almost every object here is unreachable from any ref
-            # (SPEC), so a repack that dropped unreachable objects would delete
-            # most of the store.
-            #
             # IN A CONTAINER, for both, even though the host repo is a plain
             # bind. It keeps one mechanism rather than two, and it is the only
             # way to reach the dev repo at all — that one lives in a named
             # volume, which on macOS is inside the engine's VM and has no host
             # path. It also means this command needs no `git` of its own, which
-            # is why it now carries almost no runtime inputs.
+            # is why it carries almost no runtime inputs.
             DEV_VOLUME=caos-vol-caos-dev
 
             # Is anything alive that could be READING a server repo? Two
@@ -1199,30 +1194,41 @@ sandbox = false''
               [ -n "$running" ]
             }
 
-            # ONE container for both repos. `--geometric=2` merges only the
-            # small recent packs and keeps unreachable objects (nearly every
-            # object here), so it is cheap enough to run on every `up` without a
-            # pack-count threshold: 0.5s for a suite's 400 packs, where `-a`
-            # rewrote the whole store (12 minutes at 8,000 packs). It is a no-op
-            # on an already-consolidated repo.
-            repack_repos() {
+            # EVERY WORKER LEFT ON THIS ENGINE IS AN ORPHAN once the stack
+            # container is removed. runnerd labels what it starts with its own
+            # container id; no replacement will ever reap them (it reaps only
+            # EXITED containers carrying ITS id, and the id is new on every
+            # `up`). A dev-stack worker orphaned by a restart kept running for
+            # three days on caosd-prod, and `caos_containers_running` then made
+            # every later `up` skip the consolidation: the shared dev repo went
+            # from 1 pack to 8,583, every object read got slower with each of
+            # them, and a suite that takes 2.5 minutes took 68. Removing them is
+            # not new damage: the server they were polling is gone, so no job
+            # they hold can finish.
+            remove_orphan_workers() {
+              local orphans
+              mapfile -t orphans < <(docker ps -aq --filter label=caos.runnerd.owner)
+              if [ "''${#orphans[@]}" -gt 0 ]; then
+                echo "==> removing ''${#orphans[@]} worker(s) orphaned by the stack just removed" >&2
+                docker rm -f "''${orphans[@]}" >/dev/null
+              fi
+            }
+
+            # The script is the staged tree's (below), so it is this revision's.
+            # A repo with no packs costs nothing; the first `up` after packs
+            # appear pays about 5 minutes per million objects.
+            explode_packs() {
               # Skipped rather than fatal: a person running `up` while a suite
               # is in flight wants a stack, not homework, and the next idle
               # `up` will do it.
               if caos_containers_running; then
-                echo "==> caos containers are still running — skipping the repack" >&2
+                echo "==> caos containers are still running — skipping exploding packs" >&2
                 return 0
               fi
               docker run --rm --entrypoint /bin/bash \
                 -v "$CAOS_DATA/stack:/host" -v "$DEV_VOLUME:/dev-stack" \
-                caos-stack:latest -c '
-                  for d in /host/git /dev-stack/git; do
-                    [ -d "$d" ] || continue
-                    echo "==> consolidating $d ($(ls "$d"/objects/pack/*.pack 2>/dev/null | wc -l) packs)" >&2
-                    git -C "$d" -c gc.auto=0 repack --geometric=2 -dq || exit 1
-                  done
-                ' \
-                || die "repacking the server repos"
+                caos-stack:latest /host/tree/stack/explode-packs /host/git /dev-stack/git \
+                || die "exploding the server repos' packs"
             }
 
             # The registry and Redis are caches: git holds the image inputs and
@@ -1297,7 +1303,7 @@ sandbox = false''
 
             usage() {
               echo "caosd ($CAOS_REV)"
-              echo "usage: caosd [up [--iroh=false]|down|reset|logs|ticket|image-cleanup|version]"
+              echo "usage: caosd [up [--iroh=false]|down|reset|logs|ticket|doctor|image-cleanup|version]"
             }
 
             case "''${1:-up}" in
@@ -1306,6 +1312,24 @@ sandbox = false''
               exit 0
               ;;
             up)
+              # Match Docker's endpoint selection: DOCKER_CONTEXT overrides
+              # DOCKER_HOST, otherwise use the selected context. Keep the socket
+              # at its host path inside the stack too: runnerd passes that path
+              # back to the host engine when granting it to nested workers.
+              if [ -n "''${DOCKER_CONTEXT:-}" ]; then
+                engine_endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
+              elif [ -n "''${DOCKER_HOST:-}" ]; then
+                engine_endpoint=$DOCKER_HOST
+              else
+                engine_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+              fi
+              case "$engine_endpoint" in
+                unix:///*) engine_socket="''${engine_endpoint#unix://}" ;;
+                *) die "caosd up needs a local Unix Docker socket; active endpoint is $engine_endpoint" ;;
+              esac
+              [ -S "$engine_socket" ] || die "caosd up: Docker endpoint is not a socket: $engine_socket"
+              docker info >/dev/null
+
               # REACHABLE BY TICKET UNLESS TOLD OTHERWISE. `caosd up` adds the
               # `caos://` listener (design/iroh-transport.md), which publishes
               # this machine's endpoint and answers anyone holding the ticket.
@@ -1375,7 +1399,7 @@ sandbox = false''
               # bridge is recreated, so a ticket for a server whose identity has
               # not changed does; 127.0.0.1 points a client at its own machine,
               # which is a trap for anyone running a stack on the same port; a
-              # client on a colliding 10.x range probes its own neighbours; and
+              # client on a colliding 10.x range probes its own neighbors; and
               # all of it tells whoever holds the ticket what the internal
               # addressing is.
               #
@@ -1408,28 +1432,12 @@ sandbox = false''
                 || docker network create "$NET" >/dev/null
               docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-              # EVERY WORKER LEFT ON THIS ENGINE IS AN ORPHAN NOW. runnerd labels
-              # what it starts with its own container id, and that container is
-              # the one removed just above; no replacement will ever reap them
-              # (it reaps only EXITED containers carrying ITS id, and the id is
-              # new on every `up`). A dev-stack worker orphaned by a restart
-              # kept running for three days on caosd-prod, and
-              # `caos_containers_running` then made every later `up` skip the
-              # repack: the shared dev repo went from 1 pack to 8,583, every
-              # object read got slower with each of them, and a suite that
-              # takes 2.5 minutes took 68. Removing them is not new damage: the
-              # server they were polling is gone, so no job they hold can
-              # finish.
-              mapfile -t orphans < <(docker ps -aq --filter label=caos.runnerd.owner)
-              if [ "''${#orphans[@]}" -gt 0 ]; then
-                echo "==> removing ''${#orphans[@]} worker(s) orphaned by the stack just removed" >&2
-                docker rm -f "''${orphans[@]}" >/dev/null
-              fi
+              remove_orphan_workers
 
               # Docker creates a missing bind source as root. Create it as the
-              # invoking user before repack_repos mounts it and tree staging writes it.
+              # invoking user before tree staging writes it and explode_packs
+              # mounts it.
               mkdir -p "$CAOS_DATA/stack"
-              repack_repos
 
               # THE TREE, copied rather than mounted: a bind's source is
               # resolved by the ENGINE, which on macOS is a VM that sees only
@@ -1444,6 +1452,8 @@ sandbox = false''
               chmod -R u+w "$CAOS_DATA/stack/tree.new"
               rm -rf "$CAOS_DATA/stack/tree"
               mv "$CAOS_DATA/stack/tree.new" "$CAOS_DATA/stack/tree"
+
+              explode_packs
 
               echo "==> starting the stack (redis, registry, server, runnerd)" >&2
               # Three aliases, one container: every name that resolved under
@@ -1474,7 +1484,8 @@ sandbox = false''
                 -p 9090:80 -p "$REGISTRY_PORT:5000" "''${iroh_publish[@]}" \
                 -v "$CAOS_DATA/stack:/state" \
                 -v caos-vol-mounted-nix:/mounted-nix \
-                -v /var/run/docker.sock:/var/run/docker.sock \
+                --mount "type=bind,source=$engine_socket,target=$engine_socket" \
+                -e "DOCKER_HOST=unix://$engine_socket" \
                 -e CAOS_STACK_TREE=/state/tree \
                 -e CAOS_STACK_INPUTS_ATTR=caos-stack-inputs \
                 -e CAOS_STACK_STORE=/mounted-nix \
@@ -1485,7 +1496,6 @@ sandbox = false''
                 -e CAOS_REGISTRY_HTTP=localhost:5000 \
                 -e CAOS_STACK_REDIS_PORT=6379 \
                 -e CAOS_STACK_REDIS_PERSIST=yes \
-                -e CAOS_STACK_STORE_CHECK=yes \
                 -e CAOS_STACK_REDIS_MAXMEM="''${CAOS_STACK_REDIS_MAXMEM:-}" \
                 -e CAOS_STACK_REGISTRY=yes \
                 -e CAOS_STACK_REDIS=yes \
@@ -1498,7 +1508,7 @@ sandbox = false''
                 -e CAOS_STACK_RUNNER_REDIS_ADDR=caos-redis:6379 \
                 -e CAOS_REGISTRY_PULL_HOST="$REGISTRY" \
                 -e CAOS_DOCKER_NETWORK="$NET" \
-                -e CAOS_RUNNER_SOCKET=/var/run/docker.sock \
+                -e "CAOS_RUNNER_SOCKET=$engine_socket" \
                 -e CAOS_PENDING_TIMEOUT_SECS=900 \
                 caos-stack:latest >/dev/null
 
@@ -1599,9 +1609,17 @@ sandbox = false''
               docker rm -f "$NAME" >/dev/null 2>&1 || true
               ;;
             reset)
-              echo "==> stopping stack and wiping CAOS_DATA state" >&2
+              echo "==> stopping stack, wiping CAOS_DATA state and the dev stacks' volume" >&2
               docker rm -f "$NAME" >/dev/null 2>&1 || true
               rm -rf "$CAOS_DATA/stack" "$CAOS_DATA/publish-client-repo"
+              # The dev stacks' repo is not under CAOS_DATA but in a named
+              # volume (see explode_packs). Workers mount it, and a volume in
+              # use cannot be removed, so they go first.
+              remove_orphan_workers
+              if docker volume inspect "$DEV_VOLUME" >/dev/null 2>&1; then
+                docker volume rm "$DEV_VOLUME" >/dev/null \
+                  || die "removing the dev stacks' volume $DEV_VOLUME"
+              fi
               ;;
             logs)
               # The group's members log to files (one container, four daemons —
@@ -1624,6 +1642,25 @@ sandbox = false''
                 die "no ticket here. Bring the stack up with 'caosd up --iroh' (or CAOS_IROH=yes)"
               fi
               cat "$ticket"
+              ;;
+            doctor)
+              # Is every stored object's history stored? The server's own check
+              # (`server doctor`), run by hand: it reads every object, minutes
+              # on a long-lived store, which is why no start pays for it.
+              # Read-only and safe beside the live server: objects are never
+              # deleted, and each is stored only after everything it references.
+              #
+              # In the running stack, with the binary that is serving: bootstrap
+              # builds the stack inputs inside the container and execs serve
+              # (PID 1) with CAOS_STACK_BIN, so that is where to find it.
+              if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)" != true ]; then
+                die "the stack is not running; 'caosd up' first"
+              fi
+              # shellcheck disable=SC2016
+              docker exec "$NAME" bash -c '
+                bin=$(tr "\0" "\n" < /proc/1/environ | sed -n "s/^CAOS_STACK_BIN=//p")
+                CAOS_GIT_DIR="$CAOS_STACK_STATE/git" exec "$bin/server" doctor
+              '
               ;;
             image-cleanup)
               shift
@@ -1674,9 +1711,15 @@ sandbox = false''
             }
           else
             null;
+
+        deltaRunner = import ./integrations/delta/connector/package.nix {
+          inherit pkgs;
+          prelude = ./std/go/prelude;
+        };
       in
       {
         packages = nixpkgs.lib.optionalAttrs (hermesGateway != null) { hermes-gateway = hermesGateway; } // {
+          delta-runner = deltaRunner;
           # The client a cloud container can actually exec, built for the
           # container's architecture rather than this machine's. `caosd up`
           # pushes it into caosd; see `clientForTarget`.

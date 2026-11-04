@@ -72,6 +72,7 @@ pub fn serve(config: Config) -> Result<(), String> {
     let out: Out = Arc::new(Mutex::new(std::io::stdout()));
     let secrets = caos::Secrets::current();
 
+    let mut in_flight: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line.map_err(|error| format!("reading request: {error}"))?;
@@ -94,32 +95,135 @@ pub fn serve(config: Config) -> Result<(), String> {
                 continue;
             }
         }
-        let answer = match (&server, &step) {
-            (Ok(server), Ok(step)) => caos::mcp_post(
-                server,
-                step.as_deref(),
-                &secrets,
-                config.max_result_chars,
-                &line,
-            ),
-            (Err(error), _) | (_, Err(error)) => Err(error.clone()),
-        };
-        let response = match answer {
-            Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(message) => Some(with_local_facts(&line, message)),
-                Err(error) => Some(degraded(
-                    &line,
-                    &format!("the server's answer was not JSON: {error}"),
-                )),
-            },
-            Ok(None) => None,
-            Err(error) => degraded_or_none(&line, &error),
-        };
-        if let Some(response) = response {
-            write_message(&out, &response)?;
-        }
+        // EACH REQUEST IS ANSWERED ON A THREAD OF ITS OWN, so calls run side by
+        // side. A harness issues the calls of one assistant message together,
+        // and Claude Code starts each call's clock when it issues it: answered
+        // one at a time, the third call of a batch waited out the first two and
+        // routinely passed the 120 s after which the harness moves a call to the
+        // background. Everything past this loop already takes concurrent calls:
+        // the server answers each request on a thread, the `caos://` transport
+        // opens a stream per request on one shared connection, and the step
+        // declares and records each call with a compare-and-swap that retries.
+        // Responses go out in the order they finish; JSON-RPC matches them to
+        // requests by `id`, and `out`'s lock keeps each one whole.
+        let (server, step, secrets, out) = (
+            server.clone(),
+            step.clone(),
+            secrets.clone(),
+            Arc::clone(&out),
+        );
+        let max_result_chars = config.max_result_chars;
+        in_flight.retain(|call| !call.is_finished());
+        in_flight.push(std::thread::spawn(move || {
+            if let Some(response) = answer(&server, &step, &secrets, max_result_chars, &line) {
+                if let Err(error) = write_message(&out, &response) {
+                    eprintln!("caos mcp serve: {error}");
+                }
+            }
+        }));
+    }
+    // Stdin is closed, so nothing more will be asked; the calls already asked
+    // are still owed their answers.
+    for call in in_flight {
+        let _ = call.join();
     }
     Ok(())
+}
+
+/// One request's answer from the server, with its timing; `None` for a
+/// notification.
+fn answer(
+    server: &Result<String, String>,
+    step: &Result<Option<String>, String>,
+    secrets: &caos::Secrets,
+    max_result_chars: Option<usize>,
+    line: &str,
+) -> Option<Value> {
+    let received = std::time::SystemTime::now();
+    let started = std::time::Instant::now();
+    let answer = match (server, step) {
+        (Ok(server), Ok(step)) => {
+            caos::mcp_post(server, step.as_deref(), secrets, max_result_chars, line)
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error.clone()),
+    };
+    let response = match answer {
+        Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
+            Ok(message) => with_local_facts(line, message),
+            Err(error) => degraded(line, &format!("the server's answer was not JSON: {error}")),
+        },
+        Ok(None) => return None,
+        Err(error) => degraded_or_none(line, &error)?,
+    };
+    let round_trip = started.elapsed().as_secs_f64();
+    Some(with_client_timing(line, response, received, round_trip))
+}
+
+/// A `tools/call` answer with the client's part of the timing appended: when
+/// the call arrived here (UTC) and how long the server took to answer it. The
+/// server's own line, when there is one, comes just before and says where that
+/// time went. Also one journal line per call, naming the tool, so `help`'s phase
+/// journal says which call each slow request was.
+///
+/// In the result, not in a hook's message to the user: the harness shows it
+/// only when the call is expanded, which is where a reader looks for it.
+fn with_client_timing(
+    line: &str,
+    mut message: Value,
+    received: std::time::SystemTime,
+    round_trip: f64,
+) -> Value {
+    let Some((_, method, params)) = request_of(line) else {
+        return message;
+    };
+    if method != "tools/call" {
+        return message;
+    }
+    let tool = params.get("name").and_then(Value::as_str).unwrap_or("?");
+    let path = params
+        .pointer("/arguments/path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let what = format!("{tool} {path}");
+    caos::timing::record(
+        "mcp-call",
+        &format!("{} in {round_trip:.1}s", what.trim_end()),
+    );
+    if let Some(content) = message
+        .pointer_mut("/result/content")
+        .and_then(Value::as_array_mut)
+    {
+        content.push(json!({
+            "type": "text",
+            "text": format!("timing: received {}; round trip {round_trip:.1}s", utc(received)),
+        }));
+    }
+    message
+}
+
+/// `at` as an ISO 8601 UTC timestamp to the second, without a date crate:
+/// days since the epoch to a civil date is Howard Hinnant's `civil_from_days`.
+fn utc(at: std::time::SystemTime) -> String {
+    let secs = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
 }
 
 fn request_of(line: &str) -> Option<(Value, String, Value)> {
@@ -248,7 +352,7 @@ fn diagnostics() -> String {
         match (stamped("rev"), dev_client) {
             (Some(rev), true) => format!(
                 "on -- the whole install package came from refs/caos/dev at {}, \
-                 and this conversation seeds from {} rather than from HEAD",
+                 and this session seeds from {} rather than from HEAD",
                 &rev[..rev.len().min(12)],
                 stamped("seed").map_or_else(
                     || "<none>".to_string(),
@@ -286,7 +390,7 @@ fn diagnostics() -> String {
     d.push_str(&format!("git-remote-caos: {}\n", git_remote_helper()));
     // The CROSS-PROCESS phase journal, which is the only way this session can
     // see what the other caos processes did. `mcp hook` fires per prompt and
-    // pays the conversation-base push. It
+    // pays the session-base push. It
     // cannot print to a transcript, and a cloud session has no shell to go looking
     // with -- so it writes here and this reads it back.
     let phases = caos::timing::tail(25);
@@ -402,6 +506,44 @@ fn write_message(out: &Out, message: &Value) -> Result<(), String> {
     writeln!(out, "{encoded}").map_err(|error| format!("writing response: {error}"))?;
     out.flush()
         .map_err(|error| format!("flushing response: {error}"))
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn utc_is_iso_8601_to_the_second() {
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        assert_eq!(utc(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(at(951_782_400)), "2000-02-29T00:00:00Z");
+        assert_eq!(utc(at(1_793_992_805)), "2026-11-06T19:20:05Z");
+    }
+
+    #[test]
+    fn a_tool_call_answer_gets_the_client_timing_last() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run","arguments":{"path":"caos-std/read"}}}"#;
+        let answer = json!({"jsonrpc": "2.0", "id": 7, "result": {"content": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "timing: server 1.0s (step 0.9s, decode 0.1s); step trace: t"},
+        ]}});
+        let received = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_992_805);
+        let timed = with_client_timing(line, answer, received, 1.24);
+        let content = timed["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(
+            content[2]["text"],
+            "timing: received 2026-11-06T19:20:05Z; round trip 1.2s"
+        );
+    }
+
+    #[test]
+    fn only_tool_calls_are_timed() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let answer = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        let timed = with_client_timing(line, answer.clone(), std::time::UNIX_EPOCH, 0.1);
+        assert_eq!(timed, answer);
+    }
 }
 
 #[cfg(test)]

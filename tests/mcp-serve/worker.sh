@@ -6,7 +6,7 @@
 # `instructions` that tell the model how the five fit together. `tools/list` is a
 # CONSTANT: it needs no step, no cache, no warm-up hook and no server, so there is
 # nothing for a re-list-averse client to miss. A call is one request to the server,
-# and what a tool runs is named by a PATH in the conversation.
+# and what a tool runs is named by a PATH in the session.
 #
 # The regressions this guards: a listing that waited on a worker run (a first
 # session in a tree built the step before the client's startup budget ran out, and
@@ -26,8 +26,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # is request/response with UNSOLICITED notifications interleaved, so a reader
 # has to skip lines it did not ask for rather than assume the next line is its
 # answer.
-open_server() { # <arguments: the server and the step>
-  coproc SERVER { "$CAOS_CLI" mcp serve $1 2>/tmp/mcp-serve.err; }
+open_server() { # <the global --server flag> <arguments: the step>
+  coproc SERVER { "$CAOS_CLI" $1 mcp serve $2 2>/tmp/mcp-serve.err; }
   SERVER_IN=${SERVER[1]}
   SERVER_OUT=${SERVER[0]}
 }
@@ -74,7 +74,7 @@ echo "== with no server, the handshake and the list still answer, and help says 
 # slower than that from the session with no tools and no reason, and a handshake
 # that crossed an iroh relay from a cold container lost that race. Only a call
 # needs the server, and a call to a dead one must say so.
-open_server "--server=http://127.0.0.1:9 --llm-step:hash=0000000000000000000000000000000000000000"
+open_server "--server=http://127.0.0.1:9" "--llm-step:hash=0000000000000000000000000000000000000000"
 send '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 init=$(await '"id":1' 10) || fail "the handshake did not answer without a server"
 for needle in 'instructions' 'help(path)' 'run(path' 'eval-path' 'caos-std'; do
@@ -99,7 +99,7 @@ esac
 close_server
 
 echo "== the real step: the same five tools, and none of the old registry ==" >&2
-open_server "$CAOS_MCP_ARGS"
+open_server "$CAOS_MCP_SERVER" "$CAOS_MCP_ARGS"
 send '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 init=$(await '"id":1' 10) || fail "the handshake did not answer"
 # The instructions are how the model learns what to do with five tools and no
@@ -153,17 +153,17 @@ cat > "$foreign/hello/.caos-expr" <<EXPR
 HELP=<<END
 Pinned generated tool.
 @param word The word.
-@in
+@root
 END
 curry --base:hash=$bash_image --worker1:@=worker.sh --help=\$HELP
 EXPR
 cat > "$foreign/hello/worker.sh" <<'WORKER'
 #!/usr/bin/env bash
 set -euo pipefail
-caos get /cas/args/in
-caos get /cas/args/in/mcp-marker
+caos get /cas/args/root
 caos get /cas/args/word
-printf 'pinned %s %s' "$(cat /cas/args/word)" "$(cat /cas/args/in/mcp-marker)" > /tmp/out
+mkdir -p /tmp/out
+printf 'pinned %s %s' "$(cat /cas/args/word)" "$(cat /cas/args/root)" > /tmp/out/stdout
 caos put /tmp/out /cas/out
 WORKER
 git -C "$foreign" init -q
@@ -202,11 +202,11 @@ git add generated mcp-marker
 git -c user.name=test -c user.email=test@caos commit -qm mcp-generated-tools
 session="mcp-path-$(date +%s)-$$"
 printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"test generated tools"}\n' "$session" \
-  | "$CAOS_CLI" mcp hook $CAOS_MCP_ARGS "$(mcp_base_arg)"
+  | "$CAOS_CLI" $CAOS_MCP_SERVER mcp hook $CAOS_MCP_ARGS "$(mcp_base_arg)"
 key=$(printf 'cc/%s' "$session" | od -An -tx1 | tr -d ' \n')
 # The prompt hook recorded it on the server; fetch it.
-git fetch -q caos "+refs/caos/v3/conversations/$key/head:refs/caos/v3/conversations/$key/head"
-head=$(git rev-parse "refs/caos/v3/conversations/$key/head")
+git fetch -q caos "+refs/caos/v4/sessions/$key/head:refs/caos/v4/sessions/$key/head"
+head=$(git rev-parse "refs/caos/v4/sessions/$key/head")
 # Discover the repository mount, so this test does not prescribe startup's
 # source-tree prefix (or require a prefix if startup mounts content directly).
 prefix=$(git ls-tree -r "$head" | awk '$1 == "160000" && !found {print $4; found=1}')
@@ -226,12 +226,13 @@ case "$help" in
   *'"isError":false'*'Pinned generated tool.'*|*'Pinned generated tool.'*'"isError":false'*) ;;
   *) fail "pinned help missed the generated path: $help" ;;
 esac
-invalid=$(call_tool 21 run hello)
+marker="${prefix}mcp-marker"
+invalid=$(call_tool 21 run hello "$(jq -nc --arg root "$marker" '{root:$root}')")
 case "$invalid" in
   *needs*word*) ;;
   *) fail "run did not reject missing arguments: $invalid" ;;
 esac
-ran=$(call_tool 22 run hello '{"word":"supplied"}')
+ran=$(call_tool 22 run hello "$(jq -nc --arg root "$marker" '{word:"supplied",root:$root}')")
 case "$ran" in
   *'pinned supplied original-input'*) ;;
   *) fail "pinned invocation lost its path, arguments, or original input: $ran" ;;
@@ -263,12 +264,20 @@ echo "== a call still running at Stop records its result when it finishes ==" >&
 # which Claude Code opens with a `UserPromptSubmit`. The transcript is flat: the
 # Stop's closing message and the call's result are facts appended as they
 # happen, and nothing the Stop does can leave the call with nowhere to record
-# its completion. The sleep stands in for the 120s.
+# its completion.
+#
+# A GATE STANDS IN FOR THE 120s, not a sleep: the tool runs until the branch
+# `gate` names exists on the caos server, and this script pushes it only once it
+# has done what must happen while the call runs. A sleep had to outlast those
+# steps on the slowest machine, so it was 60s of waiting in all, and it still
+# only made the ordering likely; the gate makes it certain. `none` answers at
+# once. A branch, not a TCP port: a random port on a busy stack's network
+# could already be taken, and then the gate never opened.
 mkdir -p slow
 cat > slow/.caos-expr <<EXPR
 HELP=<<END
-Sleeps, then answers.
-@param seconds How long to sleep.
+Waits for its gate to open, then answers.
+@param gate A branch to wait for (refs/heads/<gate>), or none.
 @param request-id Makes each call a new job.
 END
 curry --base:hash=$bash_image --worker1:@=worker.sh --help=\$HELP
@@ -276,31 +285,44 @@ EXPR
 cat > slow/worker.sh <<'WORKER'
 #!/usr/bin/env bash
 set -euo pipefail
-caos get /cas/args/seconds
+caos get /cas/args/gate
 caos get /cas/args/request-id
-sleep "$(cat /cas/args/seconds)"
-printf 'slept %s' "$(cat /cas/args/seconds)" > /tmp/out
+gate=$(cat /cas/args/gate)
+if [ "$gate" != none ]; then
+  for _ in $(seq 4500); do
+    if caos ref-get "refs/heads/$gate" /cas/gate 2>/dev/null; then break; fi
+    sleep 0.2
+  done
+fi
+printf 'released %s' "$gate" > /tmp/out
 caos put /tmp/out /cas/out
 WORKER
+# A branch no one has made yet, and the push that makes it.
+new_gate() { printf 'mcp-gate-%s-%s-%s' "$(date +%s%N)" "$$" "$RANDOM"; }
+open_gate() { # <gate>
+  git -C /tmp/client push -q caos "HEAD:refs/heads/$1" || fail "opening the gate $1"
+}
 git add slow
 git -c user.name=test -c user.email=test@caos commit -qm slow-tool
 held="mcp-held-$(date +%s)-$$"
 hook() { # <event JSON>
-  printf '%s\n' "$1" | "$CAOS_CLI" mcp hook $CAOS_MCP_ARGS "$(mcp_base_arg)"
+  printf '%s\n' "$1" | "$CAOS_CLI" $CAOS_MCP_SERVER mcp hook $CAOS_MCP_ARGS "$(mcp_base_arg)"
 }
 hook "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$held\",\"prompt\":\"run slow\"}"
-held_ref="refs/caos/v3/conversations/$(printf 'cc/%s' "$held" | od -An -tx1 | tr -d ' \n')/head"
-send "$(jq -nc --arg session "$held" --arg path "${prefix}slow" --arg request_id "$held" \
+held_ref="refs/caos/v4/sessions/$(printf 'cc/%s' "$held" | od -An -tx1 | tr -d ' \n')/head"
+held_gate=$(new_gate)
+send "$(jq -nc --arg session "$held" --arg path "${prefix}slow" --arg request_id "$held" --arg gate "$held_gate" \
   '{jsonrpc:"2.0",id:30,method:"tools/call",params:{name:"run",arguments:{
     caos_session:$session,caos_tool_use_id:"held-30",path:$path,
-    arguments:{seconds:"25","request-id":$request_id}}}}')"
+    arguments:{gate:$gate,"request-id":$request_id}}}}')"
 # The Stop lands while the call runs, as a backgrounded call's does.
 #
 # The STEP declares and starts the call on the server, a moment after the
 # request reaches it, so it is not in this checkout's copy of the ref: fetch it.
 sync_held() { git fetch -q caos "+$held_ref:$held_ref"; }
 started_call=""
-for _ in $(seq 60); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues").
+for _ in $(seq 300); do
   if sync_held 2>/dev/null; then
     case "$(git log -4 --format=%s "$held_ref")" in
       *tool.start*) started_call=yes; break ;;
@@ -310,9 +332,13 @@ for _ in $(seq 60); do
 done
 if [ -z "$started_call" ]; then fail "the call was never started"; fi
 hook "{\"hook_event_name\":\"Stop\",\"session_id\":\"$held\",\"last_assistant_message\":\"moved to the background\"}"
-answer=$(await '"id":30' 300) || fail "the held call never answered"
+open_gate "$held_gate"
+# A queue, not a latency: the tool's job can wait minutes for a runner on a
+# loaded host before it even reaches its gate. The tool waits longer than this,
+# so if anything gives up, it is this, with this message.
+answer=$(await '"id":30' 600) || fail "the held call never answered"
 case "$answer" in
-  *'"isError":false'*'slept 25'*|*'slept 25'*'"isError":false'*) ;;
+  *'"isError":false'*'released '*|*'released '*'"isError":false'*) ;;
   *) fail "a call that outlived its turn lost its result: $answer" ;;
 esac
 # The turn that delivers the result is one more prompt, and its Stop one more
@@ -324,7 +350,7 @@ sync_held
 # Stop (which came while the call ran), the call's start, and its declaration.
 subjects=$(git log --format=%s "$held_ref" | tr '\n' ' ')
 case "$subjects" in
-  "message.append message.append tool.complete message.append tool.start message.append message.append conversation.root "*) ;;
+  "message.append message.append tool.complete message.append tool.start message.append message.append session.root "*) ;;
   *) fail "the backgrounded call was not recorded as it happened: $subjects" ;;
 esac
 
@@ -335,30 +361,33 @@ echo "== a started call loses nothing to the Stop right behind its ticket ==" >&
 # and kept failing, for its ticket is the call's id. A Stop closes nothing now.
 started="mcp-start-$(date +%s)-$$"
 hook "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$started\",\"prompt\":\"start slow\"}"
-started_ref="refs/caos/v3/conversations/$(printf 'cc/%s' "$started" | od -An -tx1 | tr -d ' \n')/head"
-send "$(jq -nc --arg session "$started" --arg path "${prefix}slow" --arg request_id "$started" \
+started_ref="refs/caos/v4/sessions/$(printf 'cc/%s' "$started" | od -An -tx1 | tr -d ' \n')/head"
+started_gate=$(new_gate)
+send "$(jq -nc --arg session "$started" --arg path "${prefix}slow" --arg request_id "$started" --arg gate "$started_gate" \
   '{jsonrpc:"2.0",id:40,method:"tools/call",params:{name:"start",arguments:{
     caos_session:$session,caos_tool_use_id:"started-40",path:$path,
-    arguments:{seconds:"15","request-id":$request_id}}}}')"
+    arguments:{gate:$gate,"request-id":$request_id}}}}')"
 ticket_answer=$(await '"id":40' 120) || fail "start never answered"
 ticket=$(printf '%s' "$ticket_answer" | grep -oE 'ticket: [0-9a-f]{40}' | head -1 | cut -d' ' -f2)
 [ -n "$ticket" ] || fail "start returned no ticket: $ticket_answer"
 # The Stop goes in IMMEDIATELY, with nothing awaited between the ticket and it.
 hook "{\"hook_event_name\":\"Stop\",\"session_id\":\"$started\",\"last_assistant_message\":\"started it, will check back\"}"
-# The ticket still resolves to the tool's own result, polled as a model would.
-finished=""
+# The ticket still resolves to the tool's own result, polled as a model would:
+# pending while the gate is shut, the result once it opens.
+finished="" opened=""
 for poll in $(seq 41 160); do
   send "$(jq -nc --argjson id "$poll" --arg session "$started" --arg ticket "$ticket" \
     '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:"result",arguments:{
       caos_session:$session,caos_tool_use_id:("started-"+($id|tostring)),ticket:$ticket}}}')"
   polled=$(await "\"id\":$poll" 60) || fail "result never answered"
   case "$polled" in
-    *pending:*) sleep 1 ;;
+    *pending:*) if [ -z "$opened" ]; then open_gate "$started_gate"; opened=yes; fi; sleep 1 ;;
     *) finished=$polled; break ;;
   esac
 done
+[ -n "$opened" ] || fail "the started call answered before its gate opened: $finished"
 case "$finished" in
-  *'slept 15'*) ;;
+  *'released '*) ;;
   *) fail "a started call that outlived its turn lost its result: ${finished:-never finished}" ;;
 esac
 # A call started after the turn's Stop is recorded and run like any other:
@@ -367,7 +396,7 @@ hook "{\"hook_event_name\":\"Stop\",\"session_id\":\"$started\",\"last_assistant
 send "$(jq -nc --arg session "$started" --arg path "${prefix}slow" --arg request_id "$started-late" \
   '{jsonrpc:"2.0",id:200,method:"tools/call",params:{name:"start",arguments:{
     caos_session:$session,caos_tool_use_id:"started-200",path:$path,
-    arguments:{seconds:"1","request-id":$request_id}}}}')"
+    arguments:{gate:"none","request-id":$request_id}}}}')"
 late=$(await '"id":200' 120) || fail "a start after the turn's Stop never answered"
 case "$late" in
   *'ticket: '*) ;;
@@ -381,10 +410,11 @@ echo "== a started call is read back by its id after another call is declared be
 # runs as before.
 behind="mcp-behind-$(date +%s)-$$"
 hook "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$behind\",\"prompt\":\"start slow, then call again\"}"
-send "$(jq -nc --arg session "$behind" --arg path "${prefix}slow" --arg request_id "$behind" \
+behind_gate=$(new_gate)
+send "$(jq -nc --arg session "$behind" --arg path "${prefix}slow" --arg request_id "$behind" --arg gate "$behind_gate" \
   '{jsonrpc:"2.0",id:300,method:"tools/call",params:{name:"start",arguments:{
     caos_session:$session,caos_tool_use_id:"behind-300",path:$path,
-    arguments:{seconds:"20","request-id":$request_id}}}}')"
+    arguments:{gate:$gate,"request-id":$request_id}}}}')"
 ticket_answer=$(await '"id":300' 120) || fail "start never answered"
 ticket=$(printf '%s' "$ticket_answer" | grep -oE 'ticket: [0-9a-f]{40}' | head -1 | cut -d' ' -f2)
 [ -n "$ticket" ] || fail "start returned no ticket: $ticket_answer"
@@ -392,13 +422,14 @@ ticket=$(printf '%s' "$ticket_answer" | grep -oE 'ticket: [0-9a-f]{40}' | head -
 send "$(jq -nc --arg session "$behind" --arg path "${prefix}slow" --arg request_id "$behind-quick" \
   '{jsonrpc:"2.0",id:301,method:"tools/call",params:{name:"run",arguments:{
     caos_session:$session,caos_tool_use_id:"behind-301",path:$path,
-    arguments:{seconds:"0","request-id":$request_id}}}}')"
+    arguments:{gate:"none","request-id":$request_id}}}}')"
 quick=$(await '"id":301' 300) || fail "the call behind the started one never answered"
 case "$quick" in
-  *'slept 0'*) ;;
+  *'released none'*) ;;
   *) fail "the call behind the started one failed: $quick" ;;
 esac
-# The started call still finishes, and its ticket carries its result.
+# The started call still finishes once released, and its ticket carries its result.
+open_gate "$behind_gate"
 finished=""
 for poll in $(seq 302 420); do
   send "$(jq -nc --argjson id "$poll" --arg session "$behind" --arg ticket "$ticket" \
@@ -411,17 +442,17 @@ for poll in $(seq 302 420); do
   esac
 done
 case "$finished" in
-  *'slept 20'*) ;;
+  *'released '*) ;;
   *) fail "a started call lost its result once another call was declared behind it: ${finished:-never finished}" ;;
 esac
 # And the session runs on: a third call in the same turn runs.
 send "$(jq -nc --arg session "$behind" --arg path "${prefix}slow" --arg request_id "$behind-after" \
   '{jsonrpc:"2.0",id:421,method:"tools/call",params:{name:"run",arguments:{
     caos_session:$session,caos_tool_use_id:"behind-421",path:$path,
-    arguments:{seconds:"0","request-id":$request_id}}}}')"
+    arguments:{gate:"none","request-id":$request_id}}}}')"
 after=$(await '"id":421' 300) || fail "the call after the started one never answered"
 case "$after" in
-  *'slept 0'*) ;;
+  *'released none'*) ;;
   *) fail "a call after the started one's completion failed: $after" ;;
 esac
 hook "{\"hook_event_name\":\"Stop\",\"session_id\":\"$behind\",\"last_assistant_message\":\"done\"}"
@@ -435,7 +466,7 @@ echo "== an unreachable caos server is named, not waited on ==" >&2
 # a real cloud container showed. A refused port is the testable half: it proves the
 # probe runs and that its message names the server. The swallowing half is the same
 # code path with a timeout instead of a refusal.
-open_server "--server=http://127.0.0.1:9 ${CAOS_MCP_ARGS#* }"
+open_server "--server=http://127.0.0.1:9" "$CAOS_MCP_ARGS"
 send '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 await '"id":1' 10 >/dev/null || fail "the handshake did not answer without a server"
 # `help` with no path, for a session: it says
@@ -449,7 +480,7 @@ case "$status" in
 esac
 # And a call that needs the server fails promptly, saying so, instead of waiting.
 send "$(jq -nc --arg session "$session" \
-  '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"run",arguments:{caos_session:$session,caos_tool_use_id:"unreachable-1",path:"caos-std/read",arguments:{"file-path":"README.md"}}}}')"
+  '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"run",arguments:{caos_session:$session,caos_tool_use_id:"unreachable-1",path:"caos-std/read",arguments:{"root":"README.md"}}}}')"
 refused=$(await '"id":3' 120) || fail "a call did not fail promptly while the server was unreachable"
 case "$refused" in
   *DEGRADED*) ;;

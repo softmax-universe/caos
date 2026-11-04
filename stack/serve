@@ -23,10 +23,6 @@
 #   CAOS_STACK_LOGS    dir for <member>.log (required)
 #   CAOS_STACK_READY   file to touch once every member is serving (optional)
 #   CAOS_STACK_BIN     dir holding `server` and `runnerd` (required)
-#   CAOS_STACK_STORE_CHECK    "yes" to repack and verify the server's object
-#                             store before it serves (default no). Minutes on
-#                             a long-lived repo, so only `caosd` asks; a test
-#                             stack's store is new and is not checked.
 #   CAOS_STACK_REDIS_PORT     redis port (required)
 #   CAOS_STACK_REDIS_PERSIST  "yes" for an appendonly cache, "no" to keep it
 #                             in memory and lose it with the process
@@ -41,7 +37,7 @@
 #                             someone else's. The host placement runs one; the
 #                             test placement deliberately does not — a
 #                             content-addressed registry shared across tests
-#                             cannot leak behaviour, only work, and sharing it
+#                             cannot leak behavior, only work, and sharing it
 #                             is what stops every test rebaking the toolchain.
 #   CAOS_STACK_REDIS          "yes" to run redis in the group, "no" to use
 #                             someone else at CAOS_STACK_REDIS_ADDR. Two redis
@@ -88,7 +84,22 @@
 #                             image as one of these (design/one-stack-image.md,
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
-#   CAOS_RUNNER_SLOTS         the general pool's concurrency
+#   CAOS_RUNNER_SLOTS         how many workers this host runs at once, in total
+#                             (default 8): split between the plain runnerd and
+#                             the caosd runner below, half each by default
+#   CAOS_STACK_CAOSD_SLOTS    the caosd runner's share of CAOS_RUNNER_SLOTS
+#                             (default: half, rounded down, at least one; 0
+#                             starts no caosd runner); the plain runnerd gets
+#                             the rest, at least one. The caosd runner is a second runnerd,
+#                             started only when
+#                             RUNNERD=yes, requiring `required-caosd=true`: it
+#                             alone runs the jobs that must run on this host
+#                             (they carry that arg: dev/test-stack, every
+#                             flake-builder build) and it alone grants
+#                             persistent volumes. The plain runnerd grants
+#                             none, which is what makes it safe to start
+#                             runnerds on OTHER machines — they are plain
+#                             runnerds too.
 #   CAOS_PENDING_TIMEOUT_SECS how long a job waits for a runner to exist
 #   CAOS_STACK_IROH           "yes" to answer `caos://` clients as well
 #                             (design/iroh-transport.md): an iroh endpoint that
@@ -232,6 +243,18 @@ for _ in $(seq 1 200); do
 done
 redis-cli -p "$CAOS_STACK_REDIS_PORT" ping >/dev/null 2>&1 \
   || fail "redis never came up"
+# PONG IS NOT READY. Redis answers PING while it is still loading its dataset
+# from disk, and refuses everything else with `LOADING`. A persistent cache of
+# gigabytes takes seconds to load, and the server, started next, fails every
+# request that touches the cache until then: on caosd-prod (2026-11-10), the
+# first probe after a restart got "cannot record ticket …: LOADING Redis is
+# loading the dataset in memory". So wait for `loading:0`, for as long as redis
+# is alive and still at it.
+redis_pid=${pids[-1]}
+while redis-cli -p "$CAOS_STACK_REDIS_PORT" info persistence 2>/dev/null | grep -q '^loading:1'; do
+  kill -0 "$redis_pid" 2>/dev/null || fail "redis exited while loading its dataset (see redis.log)"
+  sleep 0.05
+done
 else
   # Someone else's. Probed anyway, and by ADDRESS rather than by starting one:
   # a stack whose cache is unreachable still works (the server treats redis as
@@ -270,15 +293,11 @@ start server env \
   CAOS_REDIS_ADDR="$REDIS_ADDR" \
   CAOS_CACHE_NAMESPACE="${CAOS_CACHE_NAMESPACE:-}" \
   CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
-  CAOS_STORE_CHECK="${CAOS_STACK_STORE_CHECK:-no}" \
   "$CAOS_STACK_BIN/server"
 ok=""
-# The server does not listen until its store check is done, so a checking stack
-# waits up to an hour (0.1s steps) instead of 30s: at 30s the first start after
-# the repo grew past it died with "server never came up" and systemd retried
-# the same walk forever.
+# 30s in 0.1s steps. The server reads nothing in proportion to its store before
+# it listens (`server doctor` does that, by hand), so this covers any repo.
 server_wait_steps=300
-if [ "${CAOS_STACK_STORE_CHECK:-no}" = yes ]; then server_wait_steps=36000; fi
 # `git ls-remote`, NOT curl: this script also runs in the seed placement,
 # whose image is the BUILDER, and that flake has no curl — a curl probe here is
 # exit 127 on every attempt, so the loop runs out and every seed stack dies with
@@ -333,7 +352,25 @@ start_runnerd() { # <log-name> <slots> <require>
 }
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
-  start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
+  # CAOS_RUNNER_SLOTS is this host's TOTAL, shared by the two runnerds, so
+  # starting the caosd runner does not raise how many containers the host runs
+  # at once. Half each by default; the plain runnerd gets whatever the caosd
+  # runner does not, and never fewer than one.
+  total_slots=${CAOS_RUNNER_SLOTS:-8}
+  half=$((total_slots / 2))
+  if [ "$half" -lt 1 ]; then half=1; fi
+  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-$half}
+  plain_slots=$((total_slots - caosd_slots))
+  if [ "$plain_slots" -lt 1 ]; then plain_slots=1; fi
+  start_runnerd runnerd "$plain_slots" ""
+  # The caosd runner: it runs the jobs that must run on this host
+  # (`--required-caosd=true`: dev/test-stack, every flake-builder build) and
+  # only those. Without it they match no runner and fail at their pending
+  # deadline, which is the intended failure — so it starts by default wherever
+  # runnerd does.
+  if [ "$caosd_slots" -gt 0 ]; then
+    start_runnerd runnerd-caosd "$caosd_slots" "required-caosd=true"
+  fi
 fi
 
 # --- caos-iroh: the same server, reachable by ticket -------------------------

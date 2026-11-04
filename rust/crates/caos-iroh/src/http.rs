@@ -159,7 +159,7 @@ pub fn encode_request(
 /// is the whole client, with no endpoint or runtime involved.
 ///
 /// Finishing the send side is part of the request: `Connection: close` says this
-/// exchange is the whole conversation, and the EOF is what makes the server act
+/// exchange is the whole session, and the EOF is what makes the server act
 /// on it rather than wait for a second request.
 pub async fn exchange(
     mut send: SendStream,
@@ -310,7 +310,7 @@ fn decode_head(head: &[u8]) -> Result<Head, String> {
         reason,
         chunked,
         // Chunked wins, as HTTP requires: a body framed twice is a body framed
-        // wrong, and honouring a length alongside it would cut it short.
+        // wrong, and honoring a length alongside it would cut it short.
         content_length: if chunked { None } else { content_length },
     })
 }

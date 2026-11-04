@@ -8,11 +8,11 @@ tests plus every `tests/<name>`:
 
 ```
 run_tool(path="caos-std/caos-test",
-         arguments={"in": "sources/caos/<layer>", "only": "git-import"})
+         arguments={"root": "sources/caos/<layer>", "only": "git-import"})
 ```
 
-- `in` is the source tree you edited. Omitting it tests the tree the tool sits
-  in, which is not your change.
+- `root` is the source tree you edited. It is required: nothing is implied by
+  where the tool sits.
 - `only` takes bare `tests/` directory names, space-separated, no `tests/`
   prefix. Use it while iterating; run the whole suite before you finish.
 - `test-salt=<fresh value>` re-runs cached tests. Use it for anything on a push
@@ -140,7 +140,7 @@ Every script here runs with it, and two constructs quietly break under it.
   through different URLs (a fork, a mirror, ssh vs https) get different keys for
   identical content. That argument is intact and says nothing about WHO — the
   server resolves at the same point in the same walk. What broke the old
-  arrangement is the agent: a conversation's tree is evaluated server-side, so a
+  arrangement is the agent: a session's tree is evaluated server-side, so a
   client repo that mounts caos through a pin had no client in the loop and
   `eval_path ./caos-std` died on its own root expression. `server::locator` is
   the one resolver now; `caos-cli` and a worker both ask it over
@@ -171,7 +171,7 @@ Every script here runs with it, and two constructs quietly break under it.
   `llm-step`'s `std_tool` read the latter, and since `registry` SKIPPED any
   tool it could not describe, every std tool vanished from the registry: no
   error, no log line, and `caos-build`, `caos-test`, `caos-test-result`,
-  `merge`, `log`, `show` and `diff` simply absent from every conversation the
+  `merge`, `log`, `show` and `diff` simply absent from every session the
   tui ran. **A registry must fail on something it was configured with and
   cannot describe** — the skip is what turned a wrong path into an invisible
   one. `caos-cli run --base:@=std/llm-step --list-tools=1` prints the registry,
@@ -247,7 +247,16 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   ~200 MB tree to a temp dir, tarring it, hashing it and pushing it — 24 seconds
   in which the suite started no containers. Single-flight anything expensive
   behind a per-key lock and RE-READ the cache after acquiring it. There is one
-  server process per stack, so an in-process lock is the whole requirement.
+  server process per stack, so an in-process lock is enough to stop duplicate
+  WORK. It is not enough for anything that judges state another process may
+  have written: every dev stack of one build on a host shares the host redis
+  under one `CAOS_CACHE_NAMESPACE`, so a key one server reads may have been
+  written by a peer's. Tickets were read that way — `pending` and not in this
+  process meant "the server restarted" — and failed healthy calls whenever two
+  suites of one commit shared a host (never on a laptop). A ticket's `pending`
+  now names its owner, and owners hold a lease in redis.
+  (`crates/server/src/compute.rs`, `live_tickets`).
+
 - **A default is dead if every caller passes the variable.** `devbox/worker`
   read `CAOS_TEST_STACK_IDLE_SECS` with a 900s default, and the `docker run`
   three hundred lines away that starts that role always passed the variable,
@@ -429,7 +438,7 @@ concurrency.
 - **A test is an ENTRY, not a script the harness interprets.** `tests/<name>/`
   carries a `.caos-expr`, a `DEPS` and a `worker.sh`, exactly like a std entry,
   and running a test is EVALUATING it (`dev/run-test` does nothing else, plus
-  turning the outcome into a verdict). Two consequences worth internalising:
+  turning the outcome into a verdict). Two consequences worth internalizing:
   - **Naming a dependency resolves it.** `:@=` evaluates any tree carrying a
     `.caos-expr`, not just `--base` (caos-eval's `eval_if_evaluable`), so
     `--rustc:@=DEEP-DEPS/rustc` hands the worker the BUILT image. A worker
@@ -477,8 +486,11 @@ concurrency.
   log before suspecting the daemon.
 - **`drive`'s token is granted only to a tree `caosd up` has published.** The
   store's reader for it is `git+caos://local?ref=refs/caos/dev&dir=integrations/claude-code/drive`,
-  and a reader matches only when the walk's ROOT tree is one of the commits on that
-  ref. So `caos-stack --cloud-env` and `dev/remove-dev-envs` work straight after
+  and what a reader approves is fixed when the store is pushed: `drive` as each
+  commit then on that ref evaluates it (design/secrets.md). A later `caosd up`
+  publishes a commit the store has not seen, so run `caos-cli secrets-push`
+  again after it; and an edit to `drive`, or to anything it depends on, makes a
+  tree no published commit has. So `caos-stack --cloud-env` and `dev/remove-dev-envs` work straight after
   `nix build && caosd up`, and fail with "drive: no token at
   /secret/claude-oauth-token" once the tree has been edited since — with the same
   message as a missing secret, and nothing in the server log (no grant is recorded,

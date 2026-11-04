@@ -12,7 +12,7 @@
 //	raced       the request FAILED (lost race, not cached); the competing head stands;
 //	            send the identical request again
 //	retried     the retry succeeded on top of the winner: state has x (winner) and a
-//	after-conc  12 concurrent puts (map-then, retried on a lost race) all landed
+//	after-conc  4 concurrent puts (map-then, retried on a lost race) all landed
 //	after-lazy  a read touched one entry and the inner saw the others unmaterialized
 //	after-hit1/after-hit2
 //	            the same read twice with different request-ids ran the inner once
@@ -220,11 +220,14 @@ func main() {
 			w.True(stateFile(head, "x") == "0", "the winner's entry was lost")
 			w.True(stateFile(head, "a") == "1", "state/a missing after the retry")
 			// Concurrent writers, each retrying a lost race, must converge with
-			// no lost update.
+			// no lost update. FOUR, not twelve: one writer wins each round and
+			// the rest retry, so the rounds are sequential and twelve writers
+			// were twelve rounds, most of this test's time. Four still loses a
+			// race three times over and still has to converge to a chain.
 			stateRef = freshRef("conc")
 			w.Must(os.RemoveAll("/tmp/msgs"))
 			w.Must(os.MkdirAll("/tmp/msgs", 0o755))
-			for n := 1; n <= 12; n++ {
+			for n := 1; n <= 4; n++ {
 				w.Must(os.WriteFile(fmt.Sprintf("/tmp/msgs/m%d", n), []byte(fmt.Sprintf("put c%d v%d\n", n, n)), 0o644))
 			}
 			caos("put", "/tmp/msgs", "/cas/msgs")
@@ -236,10 +239,10 @@ func main() {
 		case "after-conc":
 			head := remoteHead(stateRef)
 			w.True(head != "", "no branch after the concurrent puts")
-			for n := 1; n <= 12; n++ {
+			for n := 1; n <= 4; n++ {
 				w.True(stateFile(head, fmt.Sprintf("c%d", n)) == fmt.Sprintf("v%d", n), "update c%d was lost", n)
 			}
-			w.True(git("rev-list", "--count", head) == "12", "expected a linear chain of 12 commits")
+			w.True(git("rev-list", "--count", head) == "4", "expected a linear chain of 4 commits")
 			call("getcheck c3", "n6", kvInner(), "after-lazy", false, "--h="+head)
 
 		case "after-lazy":

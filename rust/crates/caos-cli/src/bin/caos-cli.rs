@@ -5,13 +5,14 @@
 //! local working repo and exchanged with the server by negotiated push/fetch, so
 //! a large unchanged tree is almost free to "upload" and an edit ships only its
 //! delta. Compute is triggered over HTTP against the same server — its URL is
-//! always the `caos` remote's URL, never an env var.
+//! the `caos` remote's URL, never an env var, unless `--server=<url>` ahead of
+//! the command overrides it for that invocation.
 //!
 //! There is no `/cas` here — that's the worker's world. The commands: `run`
 //! (compute, with the result checked out to any host path, or a file result
 //! streamed to stdout when no path is given), `curry` (bind args to an image,
 //! printing the curried ref), `import-image` (get a docker image into caos,
-//! printing its hash), and `talk`/`tui`/`chat` (agent conversations — see
+//! printing its hash), and `talk`/`tui`/`chat` (agent sessions — see
 //! design/agent-harness.md; `talk` is the everyday surface, `chat` the
 //! explicit one-turn form). The object-level commands (`get`/`put`/…) live
 //! only in the worker `caos`, which runs inside a sandbox with a real `/cas`.
@@ -29,6 +30,18 @@ fn main() -> ExitCode {
     }));
     caos::set_secret_readers(caos_cli::secret_store::reader_keys());
     let args: Vec<String> = std::env::args().collect();
+    let args = match take_global_flags(&args).and_then(|(server, args)| {
+        if let Some(server) = server {
+            caos::set_server_override(&server)?;
+        }
+        Ok(args)
+    }) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("{}: {err}", prog_name(&args));
+            return ExitCode::FAILURE;
+        }
+    };
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -36,6 +49,43 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Consume the flags that come BEFORE the command and apply to all of them,
+/// returning argv with them removed, so every command still sees its own
+/// arguments from `args[2..]`, and the `--server` they named.
+///
+/// `--server=<url>` (or `--server <url>`) names the caos server for this
+/// invocation, overriding the checkout's `caos` git remote — for every
+/// command: `caos-cli --server=caos://<ticket> watch <ticket>`. Only flags
+/// ahead of the command are global; a `--server` after it belongs to that
+/// command (`secrets-push` and `tui` take their own; `mcp` takes only this one).
+fn take_global_flags(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let mut rest = args.iter().skip(1);
+    let mut server = None;
+    let mut out = vec![args.first().cloned().unwrap_or_default()];
+    while let Some(arg) = rest.next() {
+        let value = if let Some(value) = arg.strip_prefix("--server=") {
+            value.to_string()
+        } else if arg == "--server" {
+            rest.next()
+                .cloned()
+                .ok_or("--server needs a URL: --server=<url>")?
+        } else {
+            out.push(arg.clone());
+            break;
+        };
+        if server.replace(value).is_some() {
+            return Err("--server given more than once".to_string());
+        }
+    }
+    out.extend(rest.cloned());
+    if let Some(server) = &server {
+        if server.is_empty() || server.starts_with('-') || server.chars().any(char::is_control) {
+            return Err(format!("invalid --server URL: {server:?}"));
+        }
+    }
+    Ok((server, out))
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -73,19 +123,19 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             _ => Err(usage(args)),
         },
-        // `talk [<prompt>] [flags]` — agent conversation, everyday surface:
-        // continues the repo's most recent conversation (`-c` picks one,
+        // `talk [<prompt>] [flags]` — agent session, everyday surface:
+        // continues the repo's most recent session (`-c` picks one,
         // `--new` starts another); with no prompt on a terminal it loops, one
-        // turn per line. Flag parsing and usage live in the conversation client.
+        // turn per line. Flag parsing and usage live in the session client.
         Some("talk") => caos_cli::cli_talk(&transport()?, &args[2..]),
         // `mcp hook` / `mcp serve` — record a Claude Code session as an ordinary
-        // conversation. Its transport is not this one: the process is started
+        // session. Its transport is not this one: the process is started
         // by Claude Code, not by a person standing in the repository.
         Some("mcp") => caos_cli::cli_mcp(&args[2..]),
         Some("tui") => tui::run(&args[2..]).map_err(|error| format!("tui: {error}")),
         // `chat <name> [-m <message>] [flags]` — one explicit turn of a named
-        // conversation on its shared canonical head. Flag parsing (and the
-        // chat-specific usage) lives in the conversation client.
+        // session on its shared canonical head. Flag parsing (and the
+        // chat-specific usage) lives in the session client.
         Some("chat") => caos_cli::cli_chat(&transport()?, &args[2..]),
         // `run-tool <script | name> [--name=value ...]` — run a caos-tool (a
         // directory with a `.caos-expr`, `caos-tools/<name>` for a bare name) as a caos
@@ -162,18 +212,19 @@ fn usage(args: &[String]) -> String {
     let rev = build_rev();
     format!(
         "{prog} ({rev})\n\
-         usage:\n  \
+         usage: {prog} [--server=<url>] <command> ...\n  \
+         (--server names the caos server, overriding the checkout's `caos` git remote)\n  \
          {prog} run [output] --base:<type>=<image> [--name=value | --name:@=path ...]\n  \
          {prog} curry [--unbind=<name> ...] --base:<type>=<arg tree> [--name=value | --name:@=path ...]\n    \
          (an image is --base:@=<dir>, --base:docker=<ref> or --base:hash=<oid>)\n  \
          {prog} prepare-request --base:<type>=<image-or-arg tree> [--name=value | --name:@=path ...]\n  \
          {prog} import-image [--base docker://<ref>] <docker-archive>\n  \
-         {prog} talk [<prompt>] [-c <name>] [--new] [--log] [--username <name>] [conversation options]\n  \
-         {prog} tui [-c <name>] [--new] [--username <name>] [conversation options]\n  \
-         {prog} chat <name> [-m <message>] [--base <revspec>] [--log] [--username <name>] [conversation options]\n    \
-         (a conversation names its two workers: --llm-step:@=<path> --llm-call:@=<path>,\n     \
+         {prog} talk [<prompt>] [-c <name>] [--new] [--log] [--username <name>] [session options]\n  \
+         {prog} tui [-c <name>] [--new] [--username <name>] [session options]\n  \
+         {prog} chat <name> [-m <message>] [--base <revspec>] [--log] [--username <name>] [session options]\n    \
+         (a session names its two workers: --llm-step:@=<path> --llm-call:@=<path>,\n     \
          typed like any image arg — caos-std/<name> in a repo that mounted caos)\n  \
-         {prog} mcp <hook | serve | diag> --server=<url> --llm-step:@@=<locator> [--base:@@=<locator>]\n    \
+         {prog} --server=<url> mcp <hook | serve | diag> --llm-step:@@=<locator> [--base:@@=<locator>]\n    \
          (Claude Code: the hook that records a session, and the MCP tool server it spawns)\n  \
          {prog} run-tool <script | name> [--name=value ...]\n  \
          {prog} eval-path [--tree=<oid>] <path>\n  \
@@ -295,5 +346,62 @@ fn ensure_helper_on_path() {
     if let Ok(joined) = std::env::join_paths(entries) {
         // SAFETY: called once at the top of main, before any thread is spawned.
         unsafe { std::env::set_var("PATH", joined) };
+    }
+}
+
+#[cfg(test)]
+mod global_flag_tests {
+    use super::take_global_flags;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn server_before_the_command_is_taken_out() {
+        let (server, rest) =
+            take_global_flags(&argv(&["caos-cli", "--server=caos://t", "watch", "abc"])).unwrap();
+        assert_eq!(server.as_deref(), Some("caos://t"));
+        assert_eq!(rest, argv(&["caos-cli", "watch", "abc"]));
+        let (server, rest) = take_global_flags(&argv(&[
+            "caos-cli",
+            "--server",
+            "http://h:1",
+            "status",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(server.as_deref(), Some("http://h:1"));
+        assert_eq!(rest, argv(&["caos-cli", "status", "x"]));
+    }
+
+    #[test]
+    fn server_after_the_command_belongs_to_the_command() {
+        let args = argv(&["caos-cli", "secrets-push", "--dir=d", "--server=http://h"]);
+        let (server, rest) = take_global_flags(&args).unwrap();
+        assert_eq!(server, None);
+        assert_eq!(rest, args);
+    }
+
+    #[test]
+    fn no_flags_leaves_argv_alone() {
+        for args in [
+            argv(&["caos-cli"]),
+            argv(&["caos-cli", "run", "--base:@=x"]),
+        ] {
+            assert_eq!(take_global_flags(&args).unwrap(), (None, args));
+        }
+    }
+
+    #[test]
+    fn bad_server_flags_are_refused() {
+        for args in [
+            argv(&["caos-cli", "--server"]),
+            argv(&["caos-cli", "--server=", "watch", "t"]),
+            argv(&["caos-cli", "--server", "--other", "watch"]),
+            argv(&["caos-cli", "--server=a", "--server=b", "watch", "t"]),
+        ] {
+            assert!(take_global_flags(&args).is_err(), "{args:?}");
+        }
     }
 }

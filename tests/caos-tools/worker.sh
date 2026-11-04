@@ -11,7 +11,7 @@
 # NOTHING ENUMERATES THE TOOLS, and the first stage below asserts exactly that:
 # the declared tool list holds `tool_help`/`run_tool` and no `hello`, and the
 # system prompt carries no per-source-tree schema block. That is what makes the
-# list tree-independent, so a conversation that gains a source tree mid-run
+# list tree-independent, so a session that gains a source tree mid-run
 # neither re-keys the prompt nor grows it.
 #
 # Asserts, against the scripted stub LLM: description through `tool_help`
@@ -26,7 +26,7 @@
 #
 # NOTHING HERE WAS EVER THE CLIENT'S. The tools run in workers, llm-step is a
 # worker, and the client only curried the turn and blocked on it —
-# std/llm-test/worker-common.sh does the first and polls the conversation ref
+# std/llm-test/worker-common.sh does the first and polls the session ref
 # instead of the second.
 set -euo pipefail
 
@@ -217,14 +217,14 @@ stage "script the stub LLM (describe; edit; bad call; dead sub-run; good; write)
 # describe the path, then run it. The missing arg must be answered in place, and
 # the dead sub-run must preserve the bash-edited source tree, so the final valid
 # hello call can still run the v2 script.
-R1='[{"id":"generated-help","input":{"path":"main/generator/tools/hello"},"name":"tool_help","type":"tool_use"},{"id":"generated-run","input":{"path":"main/generator/tools/hello","arguments":{"word":"supplied"}},"name":"run_tool","type":"tool_use"},{"id":"generated-missing","input":{"path":"main/generator/tools/missing"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00","input":{"path":"main/caos-tools/hello"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00b","input":{"path":"main/caos-tools/undocumented"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00c","input":{"path":"main/caos-tools/nope"},"name":"tool_help","type":"tool_use"},{"id":"toolu_01","input":{"arguments":{"cmd":"sed -i s/v1/v2/ caos-tools/hello/worker.sh","paths":["caos-tools/hello/worker.sh"]},"path":"main/caos-tools/sh"},"name":"run_tool","type":"tool_use"},{"id":"toolu_02","input":{"path":"main/caos-tools/hello"},"name":"run_tool","type":"tool_use"},{"id":"toolu_03","input":{"path":"main/caos-tools/boom"},"name":"run_tool","type":"tool_use"},{"id":"toolu_04","input":{"path":"main/caos-tools/hello","arguments":{"word":"banana","suffix":"-split"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_05","input":{"path":"main/caos-tools/writer"},"name":"tool_help","type":"tool_use"},{"id":"toolu_06","input":{"path":"main/caos-tools/writer"},"name":"run_tool","type":"tool_use"},{"id":"toolu_07","input":{"path":"main/caos-tools/orphan"},"name":"run_tool","type":"tool_use"},{"id":"toolu_08","input":{"path":"main/caos-tools/hello","arguments":{"word":"banana","suffix":"-split"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_09","input":{"path":"main/caos-tools/countdir","arguments":{"src":"main/caos-tools/hello"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_10","input":{"path":"main/caos-tools/countdir","arguments":{"src":"main/nope"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_11","input":{"path":"main/caos-tools/whichtree"},"name":"run_tool","type":"tool_use"},{"id":"toolu_12","input":{"path":"main/caos-tools/whichtree","arguments":{"in":"main/caos-tools/hello"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_13","input":{"path":"main/caos-tools/whichtree"},"name":"tool_help","type":"tool_use"}]'
+R1='[{"id":"generated-help","input":{"path":"main/generator/tools/hello"},"name":"tool_help","type":"tool_use"},{"id":"generated-run","input":{"path":"main/generator/tools/hello","arguments":{"word":"supplied"}},"name":"run_tool","type":"tool_use"},{"id":"generated-missing","input":{"path":"main/generator/tools/missing"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00","input":{"path":"main/caos-tools/hello"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00b","input":{"path":"main/caos-tools/undocumented"},"name":"tool_help","type":"tool_use"},{"id":"toolu_00c","input":{"path":"main/caos-tools/nope"},"name":"tool_help","type":"tool_use"},{"id":"toolu_01","input":{"arguments":{"root":"main","cmd":"sed -i s/v1/v2/ caos-tools/hello/worker.sh","paths":["caos-tools/hello/worker.sh"]},"path":"main/caos-tools/sh"},"name":"run_tool","type":"tool_use"},{"id":"toolu_02","input":{"path":"main/caos-tools/hello"},"name":"run_tool","type":"tool_use"},{"id":"toolu_03","input":{"path":"main/caos-tools/boom"},"name":"run_tool","type":"tool_use"},{"id":"toolu_04","input":{"path":"main/caos-tools/hello","arguments":{"word":"banana","suffix":"-split"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_05","input":{"path":"main/caos-tools/writer"},"name":"tool_help","type":"tool_use"},{"id":"toolu_06","input":{"path":"main/caos-tools/writer"},"name":"run_tool","type":"tool_use"},{"id":"toolu_07","input":{"path":"main/caos-tools/orphan"},"name":"run_tool","type":"tool_use"},{"id":"toolu_08","input":{"path":"main/caos-tools/hello","arguments":{"word":"banana","suffix":"-split"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_09","input":{"path":"main/caos-tools/countdir","arguments":{"src":"main/caos-tools/hello"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_10","input":{"path":"main/caos-tools/countdir","arguments":{"src":"main/nope"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_11","input":{"path":"main/caos-tools/whichtree"},"name":"run_tool","type":"tool_use"},{"id":"toolu_12","input":{"path":"main/caos-tools/whichtree","arguments":{"in":"main/caos-tools/hello"}},"name":"run_tool","type":"tool_use"},{"id":"toolu_13","input":{"path":"main/caos-tools/whichtree"},"name":"tool_help","type":"tool_use"}]'
 mkdir -p /tmp/stub
 printf '{"content":%s,"stop_reason":"tool_use"}' "$R1" > /tmp/stub/response-1.json
 printf '{"content":[{"text":"tools done","type":"text"}],"stop_reason":"end_turn"}' \
   > /tmp/stub/response-2.json
 start_stub /tmp/stub
 
-new_llm_conversation ct "$STUB_PORT" "$ws"
+new_llm_session ct "$STUB_PORT" "$ws"
 
 stage "run the turn"
 dispatch_turn "run the hello tool"
@@ -244,7 +244,7 @@ jq -e '[.tools[].name] | index("run_tool") != null and index("tool_help") != nul
   /tmp/stub/request-1.json >/dev/null \
   || fail "repository tools must be reached through tool_help/run_tool, not declared"
 # The per-source-tree schema block is gone. Its absence is the whole point: with
-# it, a conversation that gained a source tree re-keyed the prompt and grew it.
+# it, a session that gained a source tree re-keyed the prompt and grew it.
 if grep -qF 'Repository tools for source tree' /tmp/system-prompt; then
   fail "the system prompt still enumerates a source tree's tools"
 fi
@@ -295,7 +295,7 @@ echo "  ok: the bad call was answered in place" >&2
 
 stage "a tool whose SUB-RUN dies is an is_error result, not a dead turn"
 # The turn reaching round 2 at all is the assertion: before `run-then --catch`
-# the failed sub-run errored the whole run, the conversation ref never moved,
+# the failed sub-run errored the whole run, the session ref never moved,
 # and the model never learned why. (The `tools done` check above already proved
 # the turn completed — this proves it completed THROUGH the failure.)
 [ -e /tmp/stub/request-2.json ] \
@@ -388,7 +388,7 @@ assert_oid "$first" "the first hello task"
 # task carries one and hello's does not.
 echo "  ok: one task for both calls, across a real tree change" >&2
 
-stage "a {tree} argument arrives as a tree, named by a conversation path"
+stage "a {tree} argument arrives as a tree, named by a session path"
 # hello's directory holds exactly worker.sh and .caos-expr, and a `.caos-expr`
 # is NOT stripped here: nothing is being evaluated, the tree is just read.
 grep -qF 'files=2' /tmp/stub/request-2.json \
@@ -411,7 +411,7 @@ case "$default" in
   *) fail "the default input was not the tool's own source tree: $default" ;;
 esac
 # toolu_12 names another tree, and that is the one the script reads. This is
-# what a conversation-generated caos-build needs: a tool sitting in one place,
+# what a session-generated caos-build needs: a tool sitting in one place,
 # run over a source tree somewhere else entirely.
 redirected=$(jq -r '..|objects|select(.tool_use_id=="toolu_12")|.content[0].text' \
   /tmp/stub/request-2.json)

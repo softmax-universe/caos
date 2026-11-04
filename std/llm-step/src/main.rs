@@ -1,6 +1,6 @@
-//! The agent turn driver for the v3 conversation protocol.
+//! The agent turn driver for the v3 session protocol.
 //!
-//! A conversation is a flat transcript of facts: prompts, assistant messages,
+//! A session is a flat transcript of facts: prompts, assistant messages,
 //! tool calls and their results. The driver keeps no turn state in it, and
 //! derives what to do from the transcript every time it looks: the latest
 //! assistant message's `tool_use` blocks with no terminal record are the calls
@@ -8,18 +8,13 @@
 //! after the prompt (and no newer prompt after that) means the turn is done;
 //! otherwise the model is called and its message appended. A round is only a
 //! message's position, and "running" is a fact about this process, not about
-//! the conversation.
+//! the session.
 
 mod async_work;
-mod ci_status;
 mod githist;
-mod import_source;
 mod progress;
-mod publish_source;
-mod stack_merge_to_master;
-mod stack_publish;
-mod stack_sync;
 mod record;
+mod root;
 mod source_trees;
 mod subagents;
 mod timing;
@@ -32,12 +27,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use conversation_protocol::v3::apply::{apply, inherited_signature, mint, Transition};
-use conversation_protocol::v3::canonical::canonical_bytes;
-use conversation_protocol::v3::ids;
-use conversation_protocol::v3::paths;
-use conversation_protocol::v3::view::Conversation;
-use conversation_protocol::v3::{
+use session_protocol::v3::apply::{apply, inherited_signature, mint, Transition};
+use session_protocol::v3::canonical::canonical_bytes;
+use session_protocol::v3::ids;
+use session_protocol::v3::paths;
+use session_protocol::v3::view::Session;
+use session_protocol::v3::{
     reconcile, validate_spine, AsyncRecord, Block, CallRecord, CallStatus, ChildRecord, CodeOps,
     FilesOutcome, Identity, IdentityKind, Mode, ObjectStore, Oid, Owner, Role,
     SourceTreeResolution, SpawnIntent, TaskStatus, ToolResult, TranscriptEntry,
@@ -74,7 +69,7 @@ struct Config {
     /// already answered.
     ///
     /// The value is the id of the call. It is the call's identity in the
-    /// conversation (a call is keyed by its id alone), and it separates one
+    /// session (a call is keyed by its id alone), and it separates one
     /// dispatch from the next: every other argument is the same for every call of
     /// a session, so without it a second call would name the first's ArgTree and
     /// be answered from the memo.
@@ -82,16 +77,16 @@ struct Config {
     /// With `tools_only`: the call to run, as a tool name and its arguments,
     /// instead of one a harness declared beforehand. The step declares it -- an
     /// assistant message carrying the `tool_use` -- and then runs it, so a caller
-    /// needs only this ArgTree, with no conversation access of its own. A call
+    /// needs only this ArgTree, with no session access of its own. A call
     /// already declared under the id is not declared twice, so a retry runs it
     /// rather than failing.
     tool_call: Option<(String, Value)>,
     /// With `tools_only`: a completed call whose text is longer than this many
-    /// characters is also saved in the conversation, and the run's result says
+    /// characters is also saved in the session, and the run's result says
     /// where (`spilled`). 0 saves nothing. See [`spill_oversized`].
     max_result_chars: usize,
     /// Record a harness's event (a prompt, the end of a turn, a failure) on the
-    /// conversation and stop: no model, no tool. See `record`.
+    /// session and stop: no model, no tool. See `record`.
     record: Option<record::Request>,
     /// Describe the tools and stop, writing the registry as JSON. A harness
     /// that drives the model itself has to publish these declarations to it,
@@ -100,7 +95,7 @@ struct Config {
     merge_refs: Option<String>,
     model: String,
     base_url: String,
-    conversation: String,
+    session: String,
 }
 
 fn image_arg(name: &str) -> Result<Option<String>, String> {
@@ -171,18 +166,18 @@ impl Config {
                 false => String::new(),
             },
             base_url: read_arg_opt("base-url")?.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-            // A listing describes tools, which no conversation owns.
-            conversation: match (read_arg_opt("conversation")?, list_tools) {
-                (Some(conversation), _) => conversation,
+            // A listing describes tools, which no session owns.
+            session: match (read_arg_opt("session")?.or(read_arg_opt("conversation")?), list_tools) {
+                (Some(session), _) => session,
                 (None, true) => String::new(),
-                (None, false) => return Err("llm-step requires --conversation".to_string()),
+                (None, false) => return Err("llm-step requires --session".to_string()),
             },
         })
     }
 }
 
 /// What this run of the step is doing: its own identity, and the prompt it
-/// answers. Nothing of it is in the conversation.
+/// answers. Nothing of it is in the session.
 struct Turn {
     /// The step's own request, the ArgTree its callbacks are curried with
     /// (`run`), so that a callback is the same run picking up where it left off.
@@ -199,12 +194,12 @@ fn run() -> Result<(), String> {
         return list_tools(&cfg);
     }
     if let Some(request) = &cfg.record {
-        return record::run(&cfg.conversation, request);
+        return record::run(&cfg.session, request);
     }
-    let mut state = progress::State::open(&cfg.conversation)?;
+    let mut state = progress::State::open(&cfg.session)?;
     timing::phase("state.open");
     let run_text = read_arg_opt("run")?.unwrap_or(own_args_tree()?);
-    let request = Oid::parse(&run_text, "conversation request")?;
+    let request = Oid::parse(&run_text, "session request")?;
     let prompt = match (&cfg.tools_only, &cfg.tool_call) {
         (Some(call), Some((name, arguments))) => {
             declare_requested_call(&mut state, call, name, arguments)?;
@@ -233,36 +228,36 @@ fn run() -> Result<(), String> {
 
 fn start(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), String> {
     reconcile_background_tasks(state)?;
-    announce_background_tasks(&cfg.conversation, state)?;
+    announce_background_tasks(&cfg.session, state)?;
     resume(cfg, state, turn)
 }
 
 /// Check that `head`, the commit the step was asked to answer, is on this
-/// conversation's spine, and say where its prompt is: the last entry it holds.
+/// session's spine, and say where its prompt is: the last entry it holds.
 fn admit(state: &mut progress::State, head: &Oid) -> Result<u64, String> {
-    let identity = state.conversation()?.identity()?;
-    if identity.id != state_conversation_id(state)? {
+    let identity = state.session()?.identity()?;
+    if identity.id != state_session_id(state)? {
         return Err(format!(
-            "conversation identity {:?} does not match its ref",
+            "session identity {:?} does not match its ref",
             identity.id
         ));
     }
     if !state.store().is_ancestor(head, state.head())? {
-        return Err(format!("request head {head} is not on the conversation spine"));
+        return Err(format!("request head {head} is not on the session spine"));
     }
     state
-        .conversation_at(head)?
+        .session_at(head)?
         .transcript_len()?
         .checked_sub(1)
         .ok_or_else(|| format!("request head {head} holds no prompt to answer"))
 }
 
-fn state_conversation_id(state: &progress::State) -> Result<String, String> {
-    conversation_protocol::v3::refs::parse_head_ref(state.refname())
+fn state_session_id(state: &progress::State) -> Result<String, String> {
+    session_protocol::v3::refs::parse_head_ref(state.refname())
 }
 
 fn last_matching<T>(
-    view: &Conversation<'_>,
+    view: &Session<'_>,
     mut select: impl FnMut(u64, TranscriptEntry) -> Option<T>,
 ) -> Result<Option<T>, String> {
     for ordinal in (0..view.transcript_len()?).rev() {
@@ -297,7 +292,7 @@ fn callback(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<()
                 error = format!("{path}: {error}");
             }
             let block = failed_run_block(&id, &tool, &error);
-            let declaration = declaration_message(&state.conversation()?, &id)?;
+            let declaration = declaration_message(&state.session()?, &id)?;
             let call = Call {
                 id,
                 name: tool,
@@ -310,7 +305,7 @@ fn callback(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<()
     }
 
     let record = state
-        .conversation()?
+        .session()?
         .tool(&id)?
         .ok_or_else(|| format!("callback for call {id} has no tool.start"))?;
     if record.is_terminal() {
@@ -336,7 +331,7 @@ fn callback(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<()
 }
 
 fn pending_call_target(state: &progress::State, id: &str) -> Result<Option<(String, Oid)>, String> {
-    let view = state.conversation()?;
+    let view = state.session()?;
     let Some(declaration) = declaration_of(&view, id)? else {
         return Ok(None);
     };
@@ -354,10 +349,10 @@ fn resume(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), 
         if !state.take_fresh_after_append() {
             state.reload()?;
         }
-        if interrupted(&state.conversation()?, turn)? {
+        if interrupted(&state.session()?, turn)? {
             return drain(cfg, state, turn);
         }
-        if let Some(declaration) = working_declaration(cfg, &state.conversation()?)? {
+        if let Some(declaration) = working_declaration(cfg, &state.session()?)? {
             if let Some(call) = declaration.pending.first() {
                 if drive_call(cfg, state, &turn.request, &declaration, call)? {
                     continue;
@@ -367,9 +362,9 @@ fn resume(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), 
         }
 
         reconcile_background_tasks(state)?;
-        announce_background_tasks(&cfg.conversation, state)?;
+        announce_background_tasks(&cfg.session, state)?;
         state.reload()?;
-        let view = state.conversation()?;
+        let view = state.session()?;
         if interrupted(&view, turn)?
             || working_declaration(cfg, &view)?
                 .is_some_and(|declaration| !declaration.pending.is_empty())
@@ -386,11 +381,11 @@ fn resume(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), 
         let prompt = turn
             .prompt
             .ok_or("a step that answers the model needs a prompt")?;
-        if answered(&state.conversation()?, prompt)? {
+        if answered(&state.session()?, prompt)? {
             reconcile_background_tasks(state)?;
             return forward_result(state.head());
         }
-        let messages = context_messages(&state.conversation()?)?;
+        let messages = context_messages(&state.session()?)?;
         let source_trees = source_tree_paths(state)?;
         let previous = state.head().clone();
         // Appended or not -- the transcript may have moved under the model, a
@@ -400,7 +395,7 @@ fn resume(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), 
 }
 
 /// Whether someone interrupted this turn: an interruption after its prompt.
-fn interrupted(view: &Conversation<'_>, turn: &Turn) -> Result<bool, String> {
+fn interrupted(view: &Session<'_>, turn: &Turn) -> Result<bool, String> {
     let Some(prompt) = turn.prompt else {
         return Ok(false);
     };
@@ -417,7 +412,7 @@ fn interrupted(view: &Conversation<'_>, turn: &Turn) -> Result<bool, String> {
 
 /// Whether the prompt at `prompt` has its answer: the newest assistant message
 /// after it declares no call, and no newer prompt came after that message.
-fn answered(view: &Conversation<'_>, prompt: u64) -> Result<bool, String> {
+fn answered(view: &Session<'_>, prompt: u64) -> Result<bool, String> {
     for ordinal in (prompt + 1..view.transcript_len()?).rev() {
         let (_, entry) = view
             .transcript_entry(ordinal)?
@@ -437,7 +432,7 @@ fn answered(view: &Conversation<'_>, prompt: u64) -> Result<bool, String> {
 /// caller whose declaration lost a race would otherwise be handed a result with
 /// nothing of its own in it.
 fn require_completed_call(state: &mut progress::State, call: &str) -> Result<(), String> {
-    match state.conversation()?.tool(call)? {
+    match state.session()?.tool(call)? {
         Some(tool) if tool.is_terminal() => Ok(()),
         Some(tool) => Err(format!("call {call} is {:?}, not complete", tool.status)),
         None => Err(format!("no call {call} is recorded")),
@@ -566,7 +561,7 @@ fn close_pending_call(
     block: &Value,
     result: impl FnOnce(&CallRecord) -> ToolResult,
 ) -> Result<(), String> {
-    let existing = state.conversation()?.tool(&call.id)?;
+    let existing = state.session()?.tool(&call.id)?;
     let target = existing
         .as_ref()
         .and_then(|record| {
@@ -576,7 +571,7 @@ fn close_pending_call(
                 .zip(record.input_commit.clone())
         })
         .or_else(
-            || match resolve_target(&state.conversation().ok()?, call).ok()? {
+            || match resolve_target(&state.session().ok()?, call).ok()? {
                 Target::SourceTree { name, commit } => Some((name, commit)),
                 Target::Files => None,
             },
@@ -600,7 +595,7 @@ fn close_pending_call(
 /// while it runs.
 fn working_declaration(
     cfg: &Config,
-    view: &Conversation<'_>,
+    view: &Session<'_>,
 ) -> Result<Option<Declaration>, String> {
     if let Some(call) = &cfg.tools_only {
         return Ok(declaration_of(view, call)?.map(|mut declaration| {
@@ -616,7 +611,7 @@ fn working_declaration(
 }
 
 /// The declaration that carries call `id`, if a message declared it.
-fn declaration_of(view: &Conversation<'_>, id: &str) -> Result<Option<Declaration>, String> {
+fn declaration_of(view: &Session<'_>, id: &str) -> Result<Option<Declaration>, String> {
     last_matching(view, |_, entry| {
         (entry.role == Role::Assistant && entry.tool_uses().any(|(call, _, _)| call == id))
             .then_some(entry)
@@ -625,14 +620,14 @@ fn declaration_of(view: &Conversation<'_>, id: &str) -> Result<Option<Declaratio
     .transpose()
 }
 
-fn declaration_message(view: &Conversation<'_>, id: &str) -> Result<String, String> {
+fn declaration_message(view: &Session<'_>, id: &str) -> Result<String, String> {
     declaration_of(view, id)?
         .map(|declaration| declaration.message_id)
         .ok_or_else(|| format!("no message declares call {id}"))
 }
 
 /// The calls an assistant message declared, and which of them have not finished.
-fn declaration(view: &Conversation<'_>, entry: TranscriptEntry) -> Result<Declaration, String> {
+fn declaration(view: &Session<'_>, entry: TranscriptEntry) -> Result<Declaration, String> {
     let mut pending = Vec::new();
     for (id, name, arguments) in entry.tool_uses() {
         if view.tool(id)?.is_some_and(|tool| tool.is_terminal()) {
@@ -652,7 +647,7 @@ fn declaration(view: &Conversation<'_>, entry: TranscriptEntry) -> Result<Declar
     })
 }
 
-fn context_messages(view: &Conversation<'_>) -> Result<Vec<Value>, String> {
+fn context_messages(view: &Session<'_>) -> Result<Vec<Value>, String> {
     let mut messages = Vec::new();
     for ordinal in 0..view.transcript_len()? {
         let (_, entry) = view
@@ -711,7 +706,7 @@ fn context_messages(view: &Conversation<'_>) -> Result<Vec<Value>, String> {
 }
 
 fn render_tool_observation(
-    view: &Conversation<'_>,
+    view: &Session<'_>,
     tool: &CallRecord,
     observation: Value,
 ) -> Result<Value, String> {
@@ -754,7 +749,7 @@ fn llm_round(
         "max_tokens": MAX_TOKENS,
         "thinking": {"type": "adaptive"},
         "cache_control": {"type": "ephemeral"},
-        "system": format!("{}{}", cfg.system, format!("{}{}", source_trees::context(&state.conversation()?)?, source_trees::repository_context(&state.conversation()?, source_trees)?)),
+        "system": format!("{}{}", cfg.system, format!("{}{}", source_trees::context(&state.session()?)?, source_trees::repository_context(&state.session()?, source_trees)?)),
         "tools": registry(cfg)?,
         "messages": messages,
     });
@@ -827,7 +822,7 @@ fn model_transition(
     calls: &[Value],
 ) -> Result<Transition, String> {
     model_transition_by(
-        &cfg.conversation,
+        &cfg.session,
         &cfg.model,
         Some(&cfg.model),
         state,
@@ -841,7 +836,7 @@ fn model_transition(
 /// model named, for a caller whose model is not this step's: a harness that
 /// answers the model itself.
 fn model_transition_by(
-    conversation: &str,
+    session: &str,
     actor: &str,
     model: Option<&str>,
     state: &progress::State,
@@ -849,7 +844,7 @@ fn model_transition_by(
     calls: &[Value],
 ) -> Result<Transition, String> {
     let message_id = client_key()?;
-    let ordinal = state.conversation()?.transcript_len()?;
+    let ordinal = state.session()?.transcript_len()?;
     let dir = paths::transcript_payload_dir(ordinal, &message_id);
     let mut payloads = vec![(
         "response.json".to_string(),
@@ -882,7 +877,7 @@ fn model_transition_by(
     Ok(Transition::MessageAppend {
         entry: TranscriptEntry {
             message_id,
-            conversation: conversation.to_string(),
+            session: session.to_string(),
             role: Role::Assistant,
             actor: actor.to_string(),
             model: model.map(str::to_string),
@@ -908,7 +903,7 @@ fn declare_requested_call(
     arguments: &Value,
 ) -> Result<(), String> {
     loop {
-        let view = state.conversation()?;
+        let view = state.session()?;
         if declaration_of(&view, call)?.is_some() {
             return Ok(());
         }
@@ -917,7 +912,7 @@ fn declare_requested_call(
         let blocks = [json!({"type": "tool_use", "id": call, "name": name, "input": arguments})];
         let calls = [json!({"id": call, "name": name, "args": arguments})];
         let transition = model_transition_by(
-            &state_conversation_id(state)?,
+            &state_session_id(state)?,
             &actor,
             None,
             state,
@@ -933,20 +928,20 @@ fn declare_requested_call(
 }
 
 /// The result of a tools-only run: the call's own record, so a caller with only
-/// the run's result needs no access to the conversation to read it.
+/// the run's result needs no access to the session to read it.
 ///
-/// - `observation`: what the tool said, in the bytes the conversation holds. For
+/// - `observation`: what the tool said, in the bytes the session holds. For
 ///   a completed call that is the `tool_result` JSON the model would be shown;
 ///   for a failed one, its error; for a cancelled one, the reason.
 /// - `status`: `complete`, `failed` or `cancelled` -- which of those the
 ///   observation is.
 /// - `spilled`: present only when the call's text was longer than
-///   `--max-result-chars` and was saved in the conversation: the path, then the
+///   `--max-result-chars` and was saved in the session: the path, then the
 ///   blob's hash, on two lines. `observation` is still the whole of it; deciding
 ///   what a reader is shown instead is the caller's.
-/// - `conversation`: the conversation as it now stands.
+/// - `session`: the session as it now stands.
 fn forward_tool_result(cfg: &Config, state: &mut progress::State, call: &str) -> Result<(), String> {
-    let view = state.conversation()?;
+    let view = state.session()?;
     let tool = view
         .tool(call)?
         .ok_or_else(|| format!("no call {call} is recorded"))?;
@@ -957,7 +952,7 @@ fn forward_tool_result(cfg: &Config, state: &mut progress::State, call: &str) ->
         None => return Err(format!("call {call} has no result to forward")),
     };
     drop(view);
-    // Saved BEFORE the result is forwarded, so the `conversation` it carries is
+    // Saved BEFORE the result is forwarded, so the `session` it carries is
     // the one that holds the file.
     let spilled = match status {
         "complete" => spill_oversized(cfg, state, call, &observation),
@@ -972,19 +967,19 @@ fn forward_tool_result(cfg: &Config, state: &mut progress::State, call: &str) ->
 }
 
 /// Where a tools-only run keeps a result too long to hand back: one file per
-/// call at the conversation's root. Plain files there are inert to everything
+/// call at the session's root. Plain files there are inert to everything
 /// that walks the tree -- only code references (`Mode::Commit`) are source
 /// trees -- and `read` reaches them like any other path.
 const RESULTS_DIR: &str = "tool-results";
 
-/// Save a completed call's text in the conversation when it is longer than
+/// Save a completed call's text in the session when it is longer than
 /// `--max-result-chars`, and say where: `"<path>\n<blob hash>"`.
 ///
 /// Claude Code refuses an MCP result past its token limit and writes the whole
 /// of it to a file on ITS disk, which the model usually cannot open. A file in
-/// the conversation is part of the commit this call leaves, so it travels with
-/// the conversation (a push, a fork, a resume) and `read` can fetch it wherever
-/// the conversation can be read -- by path, or by blob hash as a bare `root`.
+/// the session is part of the commit this call leaves, so it travels with
+/// the session (a push, a fork, a resume) and `read` can fetch it wherever
+/// the session can be read -- by path, or by blob hash as a bare `root`.
 ///
 /// `None` when there is nothing to save, or saving failed: a failure here never
 /// costs the caller its result, which is then returned whole as before.
@@ -1004,11 +999,11 @@ fn spill_oversized(
     let path = format!("{RESULTS_DIR}/{}.txt", paths::admit_external_id(call));
     let files = vec![(path.clone(), Some((Mode::Blob, text.into_bytes())))];
     if let Err(error) = state.append(Transition::FilesApply { files }) {
-        eprintln!("llm-step: could not save the result of {call} in the conversation: {error}");
+        eprintln!("llm-step: could not save the result of {call} in the session: {error}");
         return None;
     }
     let blob = state
-        .conversation()
+        .session()
         .and_then(|view| view.snapshot().entry(&path))
         .ok()
         .flatten()
@@ -1040,17 +1035,17 @@ fn observation_text(observation: &[u8]) -> Option<String> {
     })
 }
 
-/// The run's result: `files` and the conversation as it stands at `head`, under
-/// `conversation`. By reference, so the conversation itself is not copied.
+/// The run's result: `files` and the session as it stands at `head`, under
+/// `session`. By reference, so the session itself is not copied.
 fn forward_files(head: &Oid, files: &[(&str, &[u8])]) -> Result<(), String> {
     let dir = scratch("llm-step-result")?;
     for (name, bytes) in files {
         fs::write(dir.join(name), bytes)
             .map_err(|error| format!("writing the result's {name}: {error}"))?;
     }
-    let conversation_path = fresh("terminal-conversation");
-    caos(["get-hash", head.as_str(), &conversation_path])?;
-    link(&conversation_path, dir.join("conversation"))?;
+    let session_path = fresh("terminal-session");
+    caos(["get-hash", head.as_str(), &session_path])?;
+    link(&session_path, dir.join("session"))?;
     caos(["put", path(&dir), "/cas/out"])
 }
 
@@ -1062,7 +1057,7 @@ enum Target {
 
 /// The call a step OPERATION sees: the declared `run_tool` call with its
 /// `arguments` as its input, which is where an operation reads its parameters.
-/// The NAME stays `run_tool`, because that is what the conversation declared and
+/// The NAME stays `run_tool`, because that is what the session declared and
 /// what the call's records must say.
 fn op_call(call: &Call) -> Call {
     let mut inner = call.clone();
@@ -1076,8 +1071,9 @@ fn op_call(call: &Call) -> Call {
 
 /// Perform a step operation (`@op` in a tool's help). Each owns its call's
 /// lifecycle: it writes the call's start, the records it exists for, and the
-/// call's completion itself. `started` is the call's record when this is a RESUME
-/// of an operation that began and has not finished.
+/// call's completion itself. `started` is the call's record when the step picks
+/// up an `agent-wait` that began in an earlier invocation; no other operation is
+/// ever run a second time (design/tool-contract.md, "No automatic resume").
 ///
 /// Returns whether the step should carry on at once. The one that does not is
 /// `agent-wait`, which dispatches a join on the child's relay and waits for its
@@ -1090,12 +1086,6 @@ fn run_op(
     started: Option<&CallRecord>,
 ) -> Result<bool, String> {
     match (op, started) {
-        ("import-source", _) => import_source::execute(state, site).map(|()| true),
-        ("publish-source", _) => publish_source::execute(state, site).map(|()| true),
-        ("stack-publish", _) => stack_publish::execute(state, site).map(|()| true),
-        ("stack-sync", _) => stack_sync::execute(state, site).map(|()| true),
-        ("stack-merge-to-master", _) => stack_merge_to_master::execute(state, site).map(|()| true),
-        ("ci-status", _) => ci_status::execute(state, site).map(|()| true),
         ("agent-spawn", _) => spawn_agent_call(cfg, state, site),
         ("agent-harvest", _) => harvest_agent_call(state, site).map(|()| true),
         ("run-async", _) => run_async_call(cfg, state, site).map(|()| true),
@@ -1131,25 +1121,15 @@ fn op_marker_path(site: &CallSite<'_>) -> String {
     )
 }
 
-/// The operation a STARTED `run_tool` call is in the middle of. A call resumed
-/// after a restart has only its record to go on, and re-evaluating the tool's path
-/// to learn the operation would be a build: so an operation says what it is in a
-/// payload of its own start, or by the pin it wrote before doing anything
-/// irreversible.
-fn started_op(view: &Conversation<'_>, site: &CallSite<'_>) -> Option<String> {
-    if let Ok(bytes) = view.payload(&op_marker_path(site)) {
-        if let Ok(Value::String(op)) = serde_json::from_slice::<Value>(&bytes) {
-            return Some(op);
-        }
-    }
-    if view.payload(&import_source::pin_path(site)).is_ok() {
-        Some("import-source".to_string())
-    } else if view.payload(&publish_source::pin_path(site)).is_ok() {
-        Some("publish-source".to_string())
-    } else if view.payload(&stack_publish::pin_path(site)).is_ok() {
-        Some("stack-publish".to_string())
-    } else {
-        None
+/// The operation a STARTED `run_tool` call is in the middle of, as the marker in
+/// its start says. Only `agent-wait` is ever picked up again from here (a join
+/// spans step invocations); re-evaluating the tool's path to learn the operation
+/// would be a build, which is why the start carries it.
+fn started_op(view: &Session<'_>, site: &CallSite<'_>) -> Option<String> {
+    let bytes = view.payload(&op_marker_path(site)).ok()?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::String(op)) => Some(op),
+        _ => None,
     }
 }
 
@@ -1162,32 +1142,30 @@ fn drive_call(
 ) -> Result<bool, String> {
     let site = CallSite::new(request, declaration, call);
     if let Some(existing) = state
-        .conversation()?
+        .session()?
         .tool(&call.id)?
     {
         if existing.status == CallStatus::Started {
+            // A subagent join spans step invocations by design: the step
+            // dispatches a join on the child's relay and is called back when
+            // the child finishes, so finding one started is the normal case.
+            if existing.name == subagents::WAIT_TOOL {
+                dispatch_wait_started(state, request, call, &existing)?;
+                return Ok(false);
+            }
             if existing.name == "run_tool" {
                 let inner = op_call(call);
                 let op_site = CallSite::new(request, declaration, &inner);
-                let op = started_op(&state.conversation()?, &op_site);
-                if let Some(op) = op {
-                    return run_op(cfg, &op, state, &op_site, Some(&existing));
+                if started_op(&state.session()?, &op_site).as_deref() == Some("agent-wait") {
+                    return run_op(cfg, "agent-wait", state, &op_site, Some(&existing));
                 }
             }
-            if existing.name == "publish_source" {
-                publish_source::execute(state, &site)?;
-                return Ok(true);
-            }
-            if existing.name == "import_source" {
-                import_source::execute(state, &site)?;
-                return Ok(true);
-            }
-            if existing.name == subagents::WAIT_TOOL {
-                dispatch_wait_started(state, request, call, &existing)?;
-            } else {
-                dispatch_started(state, request, call, &existing)?;
-            }
-            return Ok(false);
+            // Anything else found started was being run by a step that stopped
+            // before it finished. It is never run again behind the agent's back
+            // (design/tool-contract.md, "No automatic resume"): it is answered
+            // as unfinished, and the agent decides whether to call again.
+            close_unfinished(state, &existing)?;
+            return Ok(true);
         }
         return Ok(true);
     }
@@ -1202,20 +1180,12 @@ fn drive_call(
         harvest_agent_call(state, &site)?;
         return Ok(true);
     }
-    if call.name == "publish_source" {
-        publish_source::execute(state, &site)?;
-        return Ok(true);
-    }
-    if call.name == "import_source" {
-        import_source::execute(state, &site)?;
-        return Ok(true);
-    }
     if call.name == async_work::TOOL_NAME {
         run_async_call(cfg, state, &site)?;
         return Ok(true);
     }
 
-    let target = match resolve_target(&state.conversation()?, call) {
+    let target = match resolve_target(&state.session()?, call) {
         Ok(target) => target,
         Err(error) => {
             let block = error_block(&call.id, &error);
@@ -1256,13 +1226,13 @@ fn drive_call(
     if path_is_scoped(&call.name) {
         scoped_call.input["path"] = json!(tool_path_in_scope(call, name.as_deref())?);
     }
-    let conversation = state.conversation()?.tree().clone();
+    let session = state.session()?.tree().clone();
     match prepare_compute(
         &scoped,
         &scoped_call,
         &ws,
         &wc,
-        conversation.as_str(),
+        session.as_str(),
         request,
     )? {
         Prepared::Result(block) => {
@@ -1302,7 +1272,7 @@ fn drive_call(
     }
 }
 
-fn resolve_target(view: &Conversation<'_>, call: &Call) -> Result<Target, String> {
+fn resolve_target(view: &Session<'_>, call: &Call) -> Result<Target, String> {
     let requested = call
         .input
         .get("source_tree")
@@ -1345,12 +1315,12 @@ fn resolve_target(view: &Conversation<'_>, call: &Call) -> Result<Target, String
         }
     }
     let (name, commit) = source_tree_target(view, requested)?
-        .ok_or_else(|| "this conversation has no source tree".to_string())?;
+        .ok_or_else(|| "this session has no source tree".to_string())?;
     Ok(Target::SourceTree { name, commit })
 }
 
 fn source_tree_target(
-    view: &Conversation<'_>,
+    view: &Session<'_>,
     requested: Option<&str>,
 ) -> Result<Option<(String, Oid)>, String> {
     let source_trees = view.source_trees()?;
@@ -1371,18 +1341,18 @@ fn source_tree_target(
 }
 
 /// A `run_tool` call's tool path WITHIN the tree it will run against: the
-/// conversation path the model gave, minus the source-tree prefix that selected
+/// session path the model gave, minus the source-tree prefix that selected
 /// that tree.
 ///
 /// Both halves matter, and dropping either breaks a different thing. The prefix
 /// has to go because the remainder is EVALUATED AGAINST THAT TREE'S OWN ROOT —
-/// evaluate a conversation-relative path against the conversation root instead
+/// evaluate a session-relative path against the session root instead
 /// and a repository's root `.caos-expr` never runs, so `--base:@=DEEP-DEPS/<x>`
 /// inside the tool resolves to nothing. And it is what makes a human's
 /// `run-tool` land on the same ArgTree: one source tree, empty prefix, whole
 /// path (SPEC, "CaosTools" — Resolution).
 ///
-/// `None` scope is the conversation tree, where there is no prefix to strip.
+/// `None` scope is the session tree, where there is no prefix to strip.
 fn tool_path_in_scope(call: &Call, source_tree: Option<&str>) -> Result<String, String> {
     let path = scoped_path(call)?;
     match source_tree {
@@ -1398,7 +1368,7 @@ fn tool_path_in_scope(call: &Call, source_tree: Option<&str>) -> Result<String, 
     }
 }
 
-/// The tools whose `path` is CONVERSATION-relative and therefore has a source
+/// The tools whose `path` is SESSION-relative and therefore has a source
 /// tree to be scoped into: `run_tool`/`tool_help` name a tool, `eval_path`
 /// names anything at all.
 fn path_is_scoped(name: &str) -> bool {
@@ -1410,7 +1380,7 @@ fn path_is_scoped(name: &str) -> bool {
 /// is the root.
 ///
 /// The normalization is `eval_path`'s alone, deliberately: it is the one of the
-/// three with a meaningful empty path, so it is the one that has to recognise
+/// three with a meaningful empty path, so it is the one that has to recognize
 /// every shape a model writes for "the root" — absent, empty, whitespace, `/`.
 /// Applying it to a tool path would quietly start accepting `main/tool/`, which
 /// `validate_tree_path` refuses today.
@@ -1425,7 +1395,7 @@ fn scoped_path(call: &Call) -> Result<String, String> {
     }
 }
 
-/// `eval_path`'s `root`: the object to evaluate instead of the conversation
+/// `eval_path`'s `root`: the object to evaluate instead of the session
 /// tree, if the model named one.
 fn eval_root(call: &Call) -> Option<&str> {
     call.input
@@ -1488,9 +1458,9 @@ fn prepare_compute(
     call: &Call,
     ws: &str,
     wc: &str,
-    // The conversation tree oid: what a `{tree}`/`{commit}` ARGUMENT's path
+    // The session tree oid: what a `{tree}`/`{commit}` ARGUMENT's path
     // resolves against, which is not the source tree the tool runs in.
-    conversation: &str,
+    session: &str,
     request: &Oid,
 ) -> Result<Prepared, String> {
     let clean = call_without_source_tree(call);
@@ -1566,7 +1536,7 @@ fn prepare_compute(
         "grep" if cfg.grep_image.is_some() => prepare_grep(cfg, &clean, ws),
         name => Ok(Prepared::Result(error_block(
             &call.id,
-            &format!("unavailable tool {name:?}; use run_tool with its conversation-relative path"),
+            &format!("unavailable tool {name:?}; use run_tool with its session-relative path"),
         ))),
     }
 }
@@ -1590,36 +1560,6 @@ fn prepare_grep(cfg: &Config, call: &Value, ws: &str) -> Result<Prepared, String
 /// there is one only when the tool asked for it — the tree is the biggest thing
 /// that can enter an ArgTree, and the ArgTree is the cache key
 /// (SPEC, "CaosTools" — Receiving args).
-/// Split the bound arguments into the ones that ride on the TOOL'S CURRY and
-/// the tree bound as the REQUEST's `in`.
-///
-/// `in` is bound in exactly ONE place whichever side supplied it — the
-/// request — because `caos curry` refuses a rebind, and binding the caller's
-/// tree in the curry while the request bound the default would be exactly
-/// that. So the caller's `in` is lifted out of the curry args here.
-///
-/// With no `in` supplied, the default is the tree the tool's own path selected,
-/// and only for a tool that declared `@in`.
-type Bindings<'a> = Vec<(&'a str, Arg<'a>)>;
-
-fn split_input<'a>(
-    ready: &'a [(String, tools::ReadyArg)],
-    wants_in: bool,
-    ws: &'a str,
-) -> (Bindings<'a>, Bindings<'a>) {
-    let args = ready
-        .iter()
-        .filter(|(name, _)| name != "in")
-        .map(|(name, value)| (name.as_str(), value.arg()))
-        .collect();
-    let input = match ready.iter().find(|(name, _)| name == "in") {
-        Some((_, supplied)) => vec![("in", supplied.arg())],
-        None if wants_in => vec![("in", Arg::Path(ws))],
-        None => Vec::new(),
-    };
-    (args, input)
-}
-
 fn prepared_request(
     image: &str,
     args: &[(&str, Arg<'_>)],
@@ -1645,13 +1585,13 @@ fn launch_resolved_tool(
     id: &str,
 ) -> Result<(), String> {
     // The call this evaluation was for, if nothing has finished it since.
-    let Some(current) = declaration_of(&state.conversation()?, id)? else {
+    let Some(current) = declaration_of(&state.session()?, id)? else {
         return Err(format!("resolved tool {id} has no declaration"));
     };
     let Some(call) = current.pending.iter().find(|call| call.id == id).cloned() else {
         return resume(cfg, state, turn);
     };
-    let target = resolve_target(&state.conversation()?, &call)?;
+    let target = resolve_target(&state.session()?, &call)?;
     let (name, current_input) = match target {
         Target::SourceTree { name, commit } => (Some(name), commit),
         Target::Files => (None, state.head().clone()),
@@ -1677,7 +1617,6 @@ fn launch_resolved_tool(
         )?;
         return resume(cfg, state, turn);
     }
-    let (ws, wc) = materialize_source_tree(state, &commit)?;
     let relative = read_arg("tool-lookup")?;
     let image = arg("result");
     let site = CallSite::at(&turn.request, &call, &current.message_id);
@@ -1713,39 +1652,15 @@ fn launch_resolved_tool(
             Ok(())
         };
     }
+    if tool.root {
+        return launch_root_tool(cfg, state, turn, &call, &tool, &image, &current.message_id);
+    }
+    // A tool without `@root` reads nothing of the session: its arguments are its
+    // whole input (design/tool-contract.md, "Tags").
     let nested = json!({"id": id, "input":
         call.input.get("arguments").cloned().unwrap_or_else(|| json!({}))});
-    // A tool that declares `@scope <param>` runs over, and a writer changes, the
-    // source tree its argument names, not the one its path happens to sit in:
-    // `merge` is reached at `caos-std/merge` and advances `feature/01-change`.
-    let selected = tool
-        .scope
-        .as_deref()
-        .and_then(|param| nested["input"][param].as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let (name, commit, ws, wc) = match selected {
-        None => (name, commit, ws, wc),
-        Some(selected) => match source_tree_target(&state.conversation()?, Some(selected)) {
-            Ok(Some((scoped, scoped_commit))) => {
-                let (scoped_ws, scoped_wc) = materialize_source_tree(state, &scoped_commit)?;
-                (Some(scoped), scoped_commit, scoped_ws, scoped_wc)
-            }
-            Ok(None) | Err(_) => {
-                let why = source_tree_target(&state.conversation()?, Some(selected))
-                    .err()
-                    .unwrap_or_else(|| format!("unknown source tree {selected:?}"));
-                site.failed(
-                    state,
-                    &error_block(id, &why),
-                    name.map(|name| (name, commit)),
-                )?;
-                return resume(cfg, state, turn);
-            }
-        },
-    };
-    let conversation = state.conversation()?.tree().clone();
-    let bound = match tools::tree_tool_args(&nested, &tool, Some(conversation.as_str())) {
+    let session = state.session()?.tree().clone();
+    let bound = match tools::tree_tool_args(&nested, &tool, Some(session.as_str())) {
         Ok(bound) => bound,
         Err(block) => {
             site.failed(state, &block, name.map(|name| (name, commit)))?;
@@ -1760,20 +1675,18 @@ fn launch_resolved_tool(
         .iter()
         .map(|(key, value)| Ok((key.clone(), value.ready()?)))
         .collect::<Result<_, String>>()?;
-    let (args, input) = split_input(&ready, tool.wants_in, ws.as_str());
-    let mut args = args;
-    if tool.git {
-        args.push(("wc", Arg::Path(&wc)));
-        if let Some(refs) = cfg.merge_refs.as_deref() {
-            args.push(("refs", Arg::Lit(refs)));
-        }
-    }
-    if tool.call {
-        args.push(("call", Arg::Lit(&call.id)));
+    let mut args: Vec<(&str, Arg)> = ready
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.arg()))
+        .collect();
+    // `@request-id` the caller left out: the call's own id, so this call is its
+    // own run and the transcript says which key it used.
+    if tool.request_id && !args.iter().any(|(name, _)| *name == tools::REQUEST_ID) {
+        args.push((tools::REQUEST_ID, Arg::Lit(&call.id)));
     }
     let task = (|| {
         let curried = caos_curry(Arg::Hash(&tool_tree), &args)?;
-        let task_text = prepare_request(Arg::Hash(&curried), &input)?;
+        let task_text = prepare_request(Arg::Hash(&curried), &[])?;
         Oid::parse(&task_text, "tree tool task")
     })();
     let task = match task {
@@ -1816,6 +1729,117 @@ fn launch_resolved_tool(
     }
 }
 
+/// Launch a `@root` tool (design/tool-contract.md, "`root`"): it is given the
+/// object at its `root` path in the session as it is now, and nothing else.
+/// Where the tool sits decided which definition runs, never what it runs
+/// over. The session commit is the call's input, so a writer's result is put
+/// back against exactly what it was given.
+fn launch_root_tool(
+    cfg: &Config,
+    state: &mut progress::State,
+    turn: &Turn,
+    call: &Call,
+    tool: &tools::TreeTool,
+    image: &str,
+    declaration: &str,
+) -> Result<(), String> {
+    let id = call.id.as_str();
+    let site = CallSite::at(&turn.request, call, declaration);
+    let arguments = call
+        .input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let nested = json!({"id": id, "input": arguments});
+    let session = state.session()?.tree().clone();
+    let bound = match tools::tree_tool_args(&nested, tool, Some(session.as_str())) {
+        Ok(bound) => bound,
+        Err(block) => {
+            site.failed(state, &block, None)?;
+            return resume(cfg, state, turn);
+        }
+    };
+    let root_path = nested["input"][tools::ROOT].as_str().unwrap_or_default();
+    let base = state.head().clone();
+    let located = match root::locate(root_path) {
+        Ok(root::Located::Session(components)) => state
+            .store()
+            .tree_of(&base)
+            .and_then(|tree| root::resolve(state.store(), &tree, &components)),
+        Ok(root::Located::Object(..)) if tool.writer => Err(format!(
+            "root {root_path:?} names an object outside the session; a writer's root is a \
+             path in the session, such as sources/<repo>/<layer>/<file>"
+        )),
+        Ok(root::Located::Object(oid, components)) => {
+            root::resolve_object(state.store(), &oid, &components)
+        }
+        Err(error) => Err(error),
+    };
+    let object = match located {
+        Ok(object) => object,
+        Err(error) => {
+            site.failed(state, &error_block(id, &error), None)?;
+            return resume(cfg, state, turn);
+        }
+    };
+    let ready: Vec<(String, tools::ReadyArg)> = bound
+        .iter()
+        .filter(|(key, _)| key.as_str() != tools::ROOT)
+        .map(|(key, value)| Ok((key.clone(), value.ready()?)))
+        .collect::<Result<_, String>>()?;
+    let mut args: Vec<(&str, Arg)> = ready
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.arg()))
+        .collect();
+    // The object itself, materialized so it binds at its own kind: a blob, a
+    // tree, or a gitlink's commit. Nothing there binds nothing.
+    let materialized = fresh("root");
+    if let Some((_, oid)) = &object {
+        caos(["get-hash", oid.as_str(), &materialized])?;
+        args.push((tools::ROOT, Arg::Path(&materialized)));
+    }
+    if tool.request_id && !args.iter().any(|(name, _)| *name == tools::REQUEST_ID) {
+        args.push((tools::REQUEST_ID, Arg::Lit(id)));
+    }
+    let tool_tree = cas_hash(image)?;
+    let task = (|| {
+        let curried = caos_curry(Arg::Hash(&tool_tree), &args)?;
+        let task_text = prepare_request(Arg::Hash(&curried), &[])?;
+        Oid::parse(&task_text, "root tool task")
+    })();
+    let task = match task {
+        Ok(task) => task,
+        Err(error) => {
+            site.failed(state, &error_block(id, &error), None)?;
+            return resume(cfg, state, turn);
+        }
+    };
+    let started = CallRecord {
+        id: id.to_string(),
+        name: call.name.clone(),
+        declaration_message: declaration.to_string(),
+        source_tree_name: None,
+        input_commit: Some(base),
+        status: CallStatus::Started,
+        task: Some(task),
+        result: None,
+        source_tree_resolution: None,
+        files: Vec::new(),
+        files_outcome: None,
+    };
+    let expected = state.head().clone();
+    match state.try_append_at(
+        &expected,
+        Transition::ToolStart {
+            payloads: Vec::new(),
+            record: started.clone(),
+        },
+    )? {
+        progress::TryAppend::HeadChanged(_) => resume(cfg, state, turn),
+        progress::TryAppend::Appended(_) => dispatch_started(state, &turn.request, call, &started),
+    }
+}
+
 fn dispatch_started(
     state: &mut progress::State,
     request: &Oid,
@@ -1837,10 +1861,12 @@ fn dispatch_started(
     // Read from the declaration here, at dispatch, because by the time the
     // result comes back the tool's own path is no longer bound (`self_curry`
     // unbinds it) and `record.name` is only ever `run_tool`.
-    let writer_storage;
-    if let Some(declared) = declared_writer(call, record)? {
-        writer_storage = declared;
-        extras.push(("tool-writer", Arg::Lit(&writer_storage)));
+    let (writer_storage, root_storage) = declared_contract(call, record)?;
+    if let Some(declared) = &writer_storage {
+        extras.push(("tool-writer", Arg::Lit(declared)));
+    }
+    if let Some(root) = &root_storage {
+        extras.push(("tool-root", Arg::Lit(root)));
     }
     let scope_storage;
     if call.name == "grep" {
@@ -1866,10 +1892,16 @@ fn dispatch_started(
 /// a tool's help now comes from its EVALUATED image, so that would mean
 /// evaluating it twice.
 ///
+/// The second, for a task whose tool declares `@root`: the root path the call
+/// named (design/tool-contract.md, "`root`"), which its result is read against.
+///
 /// `None` for a task whose tool carries no help, which is every reader.
-fn declared_writer(call: &Call, record: &CallRecord) -> Result<Option<String>, String> {
+fn declared_contract(
+    call: &Call,
+    record: &CallRecord,
+) -> Result<(Option<String>, Option<String>), String> {
     let Some(task) = record.task.as_ref() else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let at = fresh("task-image");
     caos(["get-hash", task.as_str(), &at])?;
@@ -1877,19 +1909,23 @@ fn declared_writer(call: &Call, record: &CallRecord) -> Result<Option<String>, S
         Ok(Some(tool)) => tool,
         // A malformed or absent help is not this function's business: the call
         // has already run and its result is about to be read.
-        _ => return Ok(None),
+        _ => return Ok((None, None)),
     };
-    if !described.writer {
-        return Ok(None);
-    }
     // Name it the way the model named it, so an error about the proposal points
     // back at what it called.
-    Ok(Some(
+    let writer = described.writer.then(|| {
         call.input["path"]
             .as_str()
             .unwrap_or(&record.name)
-            .to_string(),
-    ))
+            .to_string()
+    });
+    let root = described.root.then(|| {
+        call.input["arguments"][tools::ROOT]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    Ok((writer, root))
 }
 
 fn dispatch_wait_started(
@@ -1904,7 +1940,7 @@ fn dispatch_wait_started(
     let value = call.value();
     let child_id = subagents::required_string(&value, "child", subagents::WAIT_TOOL)?;
     let child = state
-        .conversation()?
+        .session()?
         .child(child_id)?
         .ok_or_else(|| format!("wait_agent child {child_id:?} disappeared"))?;
     let relay = record
@@ -1938,6 +1974,10 @@ fn callback_result(
     // name any more.
     if read_arg_opt("op")?.as_deref() == Some("agent-wait") {
         return wait_callback_block(state, record);
+    }
+    if let Some(root) = read_arg_opt("tool-root")? {
+        let writer = read_arg_opt("tool-writer")?;
+        return root_callback(state, record, &root, writer.as_deref());
     }
     if let Some(tool) = read_arg_opt("tool-writer")? {
         return writer_callback(state, record, &tool);
@@ -1996,7 +2036,7 @@ fn writer_callback(
             let proposal = Oid::parse(&cas_hash(&result.prop)?, "writer result commit")?;
             state.fetch_object(&proposal)?;
             let descends =
-                conversation_protocol::v3::CodeOps::is_ancestor(state.store(), base, &proposal)?;
+                session_protocol::v3::CodeOps::is_ancestor(state.store(), base, &proposal)?;
             if !descends {
                 return fail(format!(
                     "{tool}: the returned commit {proposal} does not descend from the commit \
@@ -2011,6 +2051,92 @@ fn writer_callback(
         result_block(&record.id, result.out.trim_end(), result.failed),
         Some(proposal),
     ))
+}
+
+/// A `@root` tool's result (design/tool-contract.md, "The result"): the model
+/// reads `stdout`; a writer's `root` or `deleted` is put at its root path in
+/// the session as it was when the call started, everything above it rewritten
+/// (a child commit at each gitlink on the way), and that session is the
+/// proposal `complete_compute` reconciles with whatever happened since.
+///
+/// A tool's mistake is answered as an `is_error` tool_result naming it, as for
+/// any writer.
+fn root_callback(
+    state: &mut progress::State,
+    record: &CallRecord,
+    root_path: &str,
+    writer: Option<&str>,
+) -> Result<(Value, Option<Oid>), String> {
+    let fail = |message: String| Ok((error_block(&record.id, &message), None));
+    let result = match tools::root_result(&arg("result"), writer.is_some()) {
+        Ok(result) => result,
+        Err(error) => return fail(format!("{}: {error}", writer.unwrap_or("the tool"))),
+    };
+    let text = tools::keep_tail(&result.stdout);
+    let block = result_block(&record.id, &text, result.failed);
+    let Some(tool) = writer else {
+        return Ok((block, None));
+    };
+    if result.failed {
+        return Ok((block, None));
+    }
+    let base = record
+        .input_commit
+        .clone()
+        .ok_or("a root tool's start has no input commit")?;
+    let components = root::components(root_path)?;
+    let base_tree = state.store().tree_of(&base)?;
+    let old = root::resolve(state.store(), &base_tree, &components)?;
+    // Without a message of its own, the commit says which tool changed what.
+    let message = result
+        .commit_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map_or_else(|| format!("{tool} {root_path}"), str::to_string);
+    let new = if result.deleted {
+        None
+    } else {
+        let result_tree = Oid::parse(&cas_hash(&arg("result"))?, "root tool result")?;
+        state.fetch_object(&result_tree)?;
+        let entry = state
+            .store()
+            .read_tree(&result_tree)
+            .map_err(String::from)?
+            .into_iter()
+            .find(|entry| entry.name == "root")
+            .ok_or("the result has no root entry")?;
+        // A plain file keeps an executable bit it had: a tool that writes a
+        // file's content rarely means to change its mode.
+        let mode = match (entry.mode, &old) {
+            (Mode::Blob, Some((Mode::Executable, _))) => Mode::Executable,
+            (mode, _) => mode,
+        };
+        match (mode, &old) {
+            // A source tree's new code: the harness commits it, a child of the
+            // commit it replaces.
+            (Mode::Tree, Some((Mode::Commit, parent))) => {
+                let parent = parent.clone();
+                let minted = mint_source_tree_commit(state, &entry.oid, &parent, &message)?;
+                state.push_code(&minted)?;
+                Some((Mode::Commit, minted))
+            }
+            _ => Some((mode, entry.oid)),
+        }
+    };
+    if new == old {
+        return Ok((block, None));
+    }
+    let rebuilt = root::replace(state.store_mut(), &base_tree, &components, new, &message)?;
+    // A gitlink's commit is not part of the closure of the tree that names it,
+    // so each commit made on the way goes up on its own, deepest first, before
+    // the proposal that names them.
+    for commit in &rebuilt.commits {
+        state.push_code(commit)?;
+    }
+    let proposal = mint_source_tree_commit(state, &rebuilt.tree, &base, &message)?;
+    state.push_code(&proposal)?;
+    Ok((block, Some(proposal)))
 }
 
 fn mint_source_tree_commit(
@@ -2054,7 +2180,7 @@ fn complete_compute(
         .as_ref()
         .ok_or("tool has no input commit")?;
     let changes = if let Some(name) = &started.source_tree_name {
-        vec![conversation_protocol::v3::tree::Change {
+        vec![session_protocol::v3::tree::Change {
             path: name.clone(),
             before: Some((Mode::Commit, base.clone())),
             after: Some((Mode::Commit, proposal.clone())),
@@ -2062,7 +2188,7 @@ fn complete_compute(
     } else {
         let base_tree = state.store().tree_of(base)?;
         let proposed_tree = state.store().tree_of(&proposal)?;
-        conversation_protocol::v3::tree::diff(state.store(), Some(&base_tree), &proposed_tree)?
+        session_protocol::v3::tree::diff(state.store(), Some(&base_tree), &proposed_tree)?
     };
     if changes
         .iter()
@@ -2080,13 +2206,13 @@ fn complete_compute(
     for _ in 0..32 {
         state.reload()?;
         if state
-            .conversation()?
+            .session()?
             .tool(&started.id)?
             .is_some_and(|record| record.is_terminal())
         {
             return Ok(());
         }
-        let current_tree = state.conversation()?.tree().clone();
+        let current_tree = state.session()?.tree().clone();
         let FilePlan {
             mut files,
             conflicts,
@@ -2145,7 +2271,7 @@ fn complete_compute(
             progress::TryAppend::HeadChanged(_) => continue,
         }
     }
-    Err("conversation kept changing while applying tool result".into())
+    Err("session kept changing while applying tool result".into())
 }
 
 type FileEdits = Vec<(String, Option<(Mode, Vec<u8>)>)>;
@@ -2158,11 +2284,11 @@ struct FilePlan {
 
 fn plan_file_changes<S: ObjectStore + CodeOps>(
     store: &mut S,
-    changes: &[conversation_protocol::v3::tree::Change],
+    changes: &[session_protocol::v3::tree::Change],
     current_tree: &Oid,
     source: Option<&str>,
 ) -> Result<FilePlan, String> {
-    use conversation_protocol::v3::tree::Snapshot;
+    use session_protocol::v3::tree::Snapshot;
     let mut files = Vec::new();
     let mut conflicts = Vec::new();
     let mut source_resolution = None;
@@ -2256,6 +2382,44 @@ fn completed_record(
     }
 }
 
+/// What a call left started by a step that stopped is answered with.
+const UNFINISHED: &str = "this call did not finish: the step running it stopped before it completed. \
+It was not run again. Call it again if you still need its result; for anything that changes \
+something outside caos (a push, an import, a GitHub request), look at the remote first.";
+
+/// Close a call that a previous step left started, as failed with
+/// [`UNFINISHED`]. Concurrent completion wins: a call that is terminal by the
+/// time this looks again is left alone.
+fn close_unfinished<S: progress::RefStore>(
+    state: &mut progress::State<S>,
+    started: &CallRecord,
+) -> Result<(), String> {
+    let block = error_block(&started.id, UNFINISHED);
+    for _ in 0..progress::MAX_APPEND_ATTEMPTS {
+        state.reload()?;
+        if state
+            .session()?
+            .tool(&started.id)?
+            .is_some_and(|record| record.is_terminal())
+        {
+            return Ok(());
+        }
+        let record = completed_record(
+            started,
+            ToolResult::Failed {
+                error: observation_path(started),
+            },
+            None,
+        );
+        let expected = state.head().clone();
+        let transition = tool_complete_transition(record, &block, Vec::new())?;
+        if let progress::TryAppend::Appended(_) = state.try_append_at(&expected, transition)? {
+            return Ok(());
+        }
+    }
+    Err("session kept changing while closing an unfinished call".into())
+}
+
 fn complete_started_failed(
     state: &mut progress::State,
     started: &CallRecord,
@@ -2296,7 +2460,7 @@ fn tool_complete_transition(
 }
 
 /// Older file calls name a source tree separately. Translate that selector once;
-/// every inline tool then reads or edits the same conversation filesystem.
+/// every inline tool then reads or edits the same session filesystem.
 fn normalize_inline_call(call: &Call, target: &Target) -> Call {
     let mut normalized = call.clone();
     if let Some(input) = normalized.input.as_object_mut() {
@@ -2332,7 +2496,7 @@ fn execute_inline(
         {
             return site.fail(
                 state,
-                ".caos is protocol metadata; use conversation commands to change it",
+                ".caos is protocol metadata; use session commands to change it",
             );
         }
     }
@@ -2360,8 +2524,8 @@ fn execute_inline(
 }
 
 fn materialize_files(state: &mut progress::State) -> Result<String, String> {
-    let output = fresh("conversation-files");
-    caos(["get-hash", state.conversation()?.tree().as_str(), &output])?;
+    let output = fresh("session-files");
+    caos(["get-hash", state.session()?.tree().as_str(), &output])?;
     Ok(output)
 }
 
@@ -2398,7 +2562,7 @@ fn spawn_agent_call(
         .as_deref()
         .ok_or("spawn_agent was called without a run-and-update-ref image")?;
     let parent_head = state.head().clone();
-    let parent_view = state.conversation()?;
+    let parent_view = state.session()?;
     let parent_id = parent_view.identity()?.id;
     let actor = newest_user_actor(&parent_view)?;
 
@@ -2406,9 +2570,9 @@ fn spawn_agent_call(
     drop(parent_view);
     let child_id = ids::child_id(&parent_id, &call.id)?;
     let signature = inherited_signature(state.store(), &parent_head)?;
-    let genesis = conversation_protocol::v3::oid::ensure_genesis(state.store_mut())?;
-    let view = state.conversation()?;
-    let mut seed = conversation_protocol::v3::tree::TreeBuilder::from(
+    let genesis = session_protocol::v3::oid::ensure_genesis(state.store_mut())?;
+    let view = state.session()?;
+    let mut seed = session_protocol::v3::tree::TreeBuilder::from(
         selected_paths.is_none().then(|| view.tree().clone()),
     );
     if let Some(paths) = &selected_paths {
@@ -2429,7 +2593,7 @@ fn spawn_agent_call(
     }
     seed.delete(".caos");
     let content = seed.build(state.store_mut())?;
-    let root_transition = Transition::ConversationRoot {
+    let root_transition = Transition::SessionRoot {
         identity: Identity {
             id: child_id.clone(),
             kind: IdentityKind::Root,
@@ -2454,7 +2618,7 @@ fn spawn_agent_call(
     let prompt_transition = Transition::MessageAppend {
         entry: TranscriptEntry {
             message_id: prompt_message,
-            conversation: child_id.clone(),
+            session: child_id.clone(),
             role: Role::User,
             actor,
             model: None,
@@ -2533,7 +2697,7 @@ fn mint_detached(
     state: &mut progress::State,
     parent: &Oid,
     transition: &Transition,
-    signature: &conversation_protocol::v3::Signature,
+    signature: &session_protocol::v3::Signature,
 ) -> Result<Oid, String> {
     let tree = apply(state.store_mut(), Some(parent), transition)?;
     mint(
@@ -2545,14 +2709,14 @@ fn mint_detached(
     )
 }
 
-fn newest_user_actor(view: &Conversation<'_>) -> Result<String, String> {
+fn newest_user_actor(view: &Session<'_>) -> Result<String, String> {
     last_matching(view, |_, entry| {
         (entry.role == Role::User).then_some(entry.actor)
     })?
     .ok_or_else(|| "request has no user actor in the transcript".to_string())
 }
 
-fn tool_arguments_path(view: &Conversation<'_>, tool: &str) -> Result<String, String> {
+fn tool_arguments_path(view: &Session<'_>, tool: &str) -> Result<String, String> {
     last_matching(view, |_, entry| {
         if entry.role != Role::Assistant {
             return None;
@@ -2574,7 +2738,7 @@ fn wait_agent_call(state: &mut progress::State, site: &CallSite<'_>) -> Result<b
             return Ok(true);
         }
     };
-    let Some(child) = state.conversation()?.child(&child_id)? else {
+    let Some(child) = state.session()?.child(&child_id)? else {
         site.fail(state, &format!("unknown subagent {child_id}"))?;
         return Ok(true);
     };
@@ -2635,7 +2799,7 @@ fn wait_callback_block(
         ));
     }
     let child = state
-        .conversation()?
+        .session()?
         .child(&child_id)?
         .ok_or_else(|| format!("subagent {child_id} disappeared"))?;
     if child.status == TaskStatus::Pending {
@@ -2692,7 +2856,7 @@ fn harvest_agent_call(state: &mut progress::State, site: &CallSite<'_>) -> Resul
         Ok(paths) => paths,
         Err(error) => return site.fail(state, &error),
     };
-    let Some(child) = state.conversation()?.child(child_id)? else {
+    let Some(child) = state.session()?.child(child_id)? else {
         return site.fail(state, &format!("unknown subagent {child_id}"));
     };
     let Some(terminal) = child.terminal_head else {
@@ -2705,10 +2869,10 @@ fn harvest_agent_call(state: &mut progress::State, site: &CallSite<'_>) -> Resul
     if let Some(paths) = &selected {
         for path in paths {
             let before =
-                conversation_protocol::v3::tree::Snapshot::new(state.store(), base.clone())
+                session_protocol::v3::tree::Snapshot::new(state.store(), base.clone())
                     .entry(path);
             let after =
-                conversation_protocol::v3::tree::Snapshot::new(state.store(), result.clone())
+                session_protocol::v3::tree::Snapshot::new(state.store(), result.clone())
                     .entry(path);
             match (before, after) {
                 (Ok(None), Ok(None)) => {
@@ -2719,8 +2883,8 @@ fn harvest_agent_call(state: &mut progress::State, site: &CallSite<'_>) -> Resul
             }
         }
     }
-    let changes = conversation_protocol::v3::tree::diff(state.store(), Some(&base), &result)?;
-    let mut tree = conversation_protocol::v3::tree::TreeBuilder::from(Some(base));
+    let changes = session_protocol::v3::tree::diff(state.store(), Some(&base), &result)?;
+    let mut tree = session_protocol::v3::tree::TreeBuilder::from(Some(base));
     for change in changes {
         if change.path == ".caos" || change.path.starts_with(".caos/") {
             continue;
@@ -2756,7 +2920,7 @@ fn harvest_agent_call(state: &mut progress::State, site: &CallSite<'_>) -> Resul
     )
 }
 
-fn message_ordinal(view: &Conversation<'_>, message_id: &str) -> Result<Option<u64>, String> {
+fn message_ordinal(view: &Session<'_>, message_id: &str) -> Result<Option<u64>, String> {
     for ordinal in 0..view.transcript_len()? {
         if view
             .transcript_entry(ordinal)?
@@ -2787,7 +2951,7 @@ fn run_async_call(
         .as_deref()
         .ok_or("run_async was called without a run-and-update-ref image")?;
     let task = async_work::prepare_task(subrequest, state.refname(), image)?;
-    let record = state.conversation()?.async_task(&task)?;
+    let record = state.session()?.async_task(&task)?;
     if record.is_none() {
         state.append(Transition::AsyncStart {
             record: AsyncRecord {
@@ -2800,7 +2964,7 @@ fn run_async_call(
         })?;
     }
     let record = state
-        .conversation()?
+        .session()?
         .async_task(&task)?
         .ok_or_else(|| format!("async task {task} disappeared"))?;
     if record.target_ref.as_deref() != Some(state.refname()) {
@@ -2866,9 +3030,9 @@ fn async_status(record: &AsyncRecord) -> (&'static str, Option<String>) {
 }
 
 fn reconcile_background_tasks(state: &mut progress::State) -> Result<(), String> {
-    use conversation_protocol::v3::TaskRecord;
+    use session_protocol::v3::TaskRecord;
     for task in state
-        .conversation()?
+        .session()?
         .tasks()?
         .into_iter()
         .filter(|task| task.is_pending())
@@ -2887,7 +3051,7 @@ fn reconcile_background_tasks(state: &mut progress::State) -> Result<(), String>
                     ));
                 }
             }
-            TaskRecord::Conversation(child) => validate_child_relay(state, child)?,
+            TaskRecord::Session(child) => validate_child_relay(state, child)?,
         }
         if let Err(error) = async_work::dispatch(task.computation()) {
             eprintln!(
@@ -2901,12 +3065,12 @@ fn reconcile_background_tasks(state: &mut progress::State) -> Result<(), String>
 }
 
 fn announce_background_tasks(
-    conversation_id: &str,
+    session_id: &str,
     state: &mut progress::State,
 ) -> Result<(), String> {
     loop {
-        let view = state.conversation()?;
-        let notice = pending_task_notices(conversation_id, &view)?
+        let view = state.session()?;
+        let notice = pending_task_notices(session_id, &view)?
             .into_iter()
             .next();
         drop(view);
@@ -2920,10 +3084,10 @@ fn announce_background_tasks(
     }
 }
 
-fn background_notice(conversation_id: &str, message_id: String, text: String) -> TranscriptEntry {
+fn background_notice(session_id: &str, message_id: String, text: String) -> TranscriptEntry {
     TranscriptEntry {
         message_id,
-        conversation: conversation_id.to_string(),
+        session: session_id.to_string(),
         role: Role::System,
         actor: "caos".to_string(),
         model: None,
@@ -2934,10 +3098,10 @@ fn background_notice(conversation_id: &str, message_id: String, text: String) ->
 }
 
 fn pending_task_notices(
-    conversation_id: &str,
-    view: &Conversation<'_>,
+    session_id: &str,
+    view: &Session<'_>,
 ) -> Result<Vec<TranscriptEntry>, String> {
-    use conversation_protocol::v3::TaskRecord;
+    use session_protocol::v3::TaskRecord;
     let tasks = view
         .tasks()?
         .into_iter()
@@ -2967,7 +3131,7 @@ fn pending_task_notices(
                     ),
                 )
             }
-            TaskRecord::Conversation(child) => {
+            TaskRecord::Session(child) => {
                 let terminal = child
                     .terminal_head
                     .as_ref()
@@ -2987,7 +3151,7 @@ fn pending_task_notices(
             }
         };
         if !existing.contains(&message_id) {
-            notices.push(background_notice(conversation_id, message_id, text));
+            notices.push(background_notice(session_id, message_id, text));
         }
     }
     Ok(notices)
@@ -3008,7 +3172,7 @@ fn child_status_text(status: TaskStatus) -> &'static str {
 fn drain(cfg: &Config, state: &mut progress::State, turn: &Turn) -> Result<(), String> {
     loop {
         state.reload()?;
-        let declaration = working_declaration(cfg, &state.conversation()?)?;
+        let declaration = working_declaration(cfg, &state.session()?)?;
         let Some((declaration, call)) = declaration
             .as_ref()
             .and_then(|declaration| Some((declaration, declaration.pending.first()?)))
@@ -3038,7 +3202,7 @@ fn record_failure(
 ) -> Result<(), String> {
     loop {
         state.reload()?;
-        let declaration = working_declaration(cfg, &state.conversation()?)?;
+        let declaration = working_declaration(cfg, &state.session()?)?;
         let Some((declaration, call)) = declaration
             .as_ref()
             .and_then(|declaration| Some((declaration, declaration.pending.first()?)))
@@ -3057,7 +3221,7 @@ fn record_failure(
         state.append(Transition::MessageAppend {
             entry: TranscriptEntry {
                 message_id: client_key()?,
-                conversation: cfg.conversation.clone(),
+                session: cfg.session.clone(),
                 role: Role::System,
                 actor: "llm-step".to_string(),
                 model: None,
@@ -3075,14 +3239,14 @@ fn record_failure(
 
 fn forward_result(terminal: &Oid) -> Result<(), String> {
     let dir = scratch("llm-step-result")?;
-    let conversation_path = fresh("terminal-conversation");
-    caos(["get-hash", terminal.as_str(), &conversation_path])?;
-    link(&conversation_path, dir.join("conversation"))?;
+    let session_path = fresh("terminal-session");
+    caos(["get-hash", terminal.as_str(), &session_path])?;
+    link(&session_path, dir.join("session"))?;
     caos(["put", path(&dir), "/cas/out"])
 }
 
 fn source_tree_paths(state: &mut progress::State) -> Result<Vec<String>, String> {
-    let source_trees = state.conversation()?.source_trees()?;
+    let source_trees = state.session()?.source_trees()?;
     let mut paths = Vec::with_capacity(source_trees.len());
     for source_tree in source_trees.values() {
         paths.push(materialize_source_tree(state, &source_tree.commit)?.0);
@@ -3092,7 +3256,7 @@ fn source_tree_paths(state: &mut progress::State) -> Result<Vec<String>, String>
 
 fn registry(cfg: &Config) -> Result<Vec<Value>, String> {
     // WHAT IS REGISTERED IS WHAT HAS NO PATH. A tool that lives in `std/` is
-    // reachable as `caos-std/<name>` from any conversation whose tree mounts
+    // reachable as `caos-std/<name>` from any session whose tree mounts
     // caos, so `tool_help` describes it and `run_tool` runs it; registering it
     // as well is a second way to call one thing, and the two can disagree about
     // which version runs. `std/README.md` is the index a model reads instead.
@@ -3100,15 +3264,6 @@ fn registry(cfg: &Config) -> Result<Vec<Value>, String> {
     // Everything below implements no entry and has no path, so declaring it here
     // is the only way to reach it at all.
     let mut registry = tools::declarations();
-    let mut publish = with_source_tree(tools::tree_tool_declaration(&tools::builtin_tool(
-        "publish_source",
-        publish_source::HELP,
-    )));
-    // Help types are what a curried arg can carry, which has no boolean; this
-    // built-in reads its input as JSON, so it can take a real one.
-    publish["input_schema"]["properties"]["force"]["type"] = json!("boolean");
-    publish["input_schema"]["properties"]["allow_ignored"]["type"] = json!("boolean");
-    registry.push(publish);
     if cfg.run_and_update_ref_image.is_some() {
         registry.extend(subagents::declarations());
         registry.push(async_work::declaration());
@@ -3119,7 +3274,7 @@ fn registry(cfg: &Config) -> Result<Vec<Value>, String> {
     registry.extend(githist::declarations().into_iter().map(with_source_tree));
     registry.push(json!({
         "name":"run_tool",
-        "description":"Run a repository tool by conversation-relative path, e.g. feature/dirty/caos-tools/test. The tool runs with the containing source tree as its input. Nothing lists the available tools: each repository documents its own, and `tool_help` at a path gives that tool's parameters. Pass them under `arguments` as strings.",
+        "description":"Run a repository tool by session-relative path, e.g. feature/dirty/caos-tools/test. The tool runs with the containing source tree as its input. Nothing lists the available tools: each repository documents its own, and `tool_help` at a path gives that tool's parameters. Pass them under `arguments` as strings.",
         "input_schema":{"type":"object","properties":{
             "path":{"type":"string"}, "arguments":{"type":"object"}
         },"required":["path"]}
@@ -3130,12 +3285,12 @@ fn registry(cfg: &Config) -> Result<Vec<Value>, String> {
 /// Write the tool registry as JSON and stop.
 ///
 /// A harness that drives the model itself (`caos mcp`) has to publish these
-/// declarations to it. Nothing here reads a conversation: a listing describes
-/// what the step CAN run, and is asked for before there is a conversation to
+/// declarations to it. Nothing here reads a session: a listing describes
+/// what the step CAN run, and is asked for before there is a session to
 /// run it in. Repository tools are reached by PATH, through `tool_help` and
 /// `run_tool`, and are not enumerated here — which is what makes this listing
 /// TREE-INDEPENDENT, so it is the same answer whatever source trees a
-/// conversation gains, and a client that ignores `tools/list_changed` stays
+/// session gains, and a client that ignores `tools/list_changed` stays
 /// correct.
 fn list_tools(cfg: &Config) -> Result<(), String> {
     let registry = registry(cfg)?;
@@ -3156,7 +3311,7 @@ fn with_source_tree(mut declaration: Value) -> Value {
             "source_tree".to_string(),
             json!({
                 "type":"string",
-                "description":"Conversation-relative gitlink path to operate on, e.g. feature/dirty. Required even when only one source tree exists. Paths within this Git operation are relative to that source tree."
+                "description":"Session-relative gitlink path to operate on, e.g. feature/dirty. Required even when only one source tree exists. Paths within this Git operation are relative to that source tree."
             }),
         );
     }
@@ -3351,7 +3506,7 @@ fn client_key() -> Result<String, String> {
     fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|error| format!("minting transcript message id: {error}"))?;
-    let key = conversation_protocol::v3::oid::hex_lower(&bytes);
+    let key = session_protocol::v3::oid::hex_lower(&bytes);
     ids::validate_client_key(&key)?;
     Ok(key)
 }
@@ -3376,6 +3531,7 @@ fn self_curry(
         "tool-git",
         "tool-in",
         "tool-writer",
+        "tool-root",
         "op",
         "in",
         "result",
@@ -3414,15 +3570,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use conversation_protocol::v3::apply::{apply as apply_transition, client_signature, mint};
-    use conversation_protocol::v3::oid::ensure_genesis;
-    use conversation_protocol::v3::{
+    use session_protocol::v3::apply::{apply as apply_transition, client_signature, mint};
+    use session_protocol::v3::oid::ensure_genesis;
+    use session_protocol::v3::{
         GitStore, Identity, IdentityKind, MemoryStore, RefUpdate, TreeBuilder,
     };
 
     use super::*;
 
-    const CONVERSATION: &str = "conversation";
+    const SESSION: &str = "session";
     const USER_ID: &str = "11111111111111111111111111111111";
     const ASSISTANT_ID: &str = "22222222222222222222222222222222";
 
@@ -3514,13 +3670,13 @@ mod tests {
         for (name, commit) in source_trees {
             content.put_oid(&name, Mode::Commit, commit);
         }
-        let transition = Transition::ConversationRoot {
+        let transition = Transition::SessionRoot {
             identity: Identity {
-                id: CONVERSATION.to_string(),
+                id: SESSION.to_string(),
                 kind: IdentityKind::Root,
                 owner: None,
             },
-            title: "test conversation".to_string(),
+            title: "test session".to_string(),
             content: Some(content.build(store)?),
         };
         let applied = apply_transition(store, None, &transition)?;
@@ -3573,11 +3729,11 @@ mod tests {
         proposal_builder.put("proposal", Mode::Blob, b"proposal\n".to_vec());
         let proposal_tree = proposal_builder.build(&mut writer_store).unwrap();
         let root = root_with(&mut writer_store, BTreeMap::new()).unwrap();
-        let conversation_ref = conversation_protocol::v3::refs::head_ref(CONVERSATION).unwrap();
+        let session_ref = session_protocol::v3::refs::head_ref(SESSION).unwrap();
         writer_store
             .push(&[
                 RefUpdate {
-                    refname: conversation_ref.clone(),
+                    refname: session_ref.clone(),
                     expected: None,
                     new: Some(root.clone()),
                 },
@@ -3596,12 +3752,12 @@ mod tests {
 
         let client_store = GitStore::open(&client, Some("caos")).unwrap();
         assert_eq!(
-            client_store.fetch_ref(&conversation_ref).unwrap(),
+            client_store.fetch_ref(&session_ref).unwrap(),
             Some(root.clone())
         );
         client_store.fetch_object(&current).unwrap();
         assert!(!client_store.has_local(&proposal_tree).unwrap());
-        let mut state = progress::State::from_store(client_store, conversation_ref, root).unwrap();
+        let mut state = progress::State::from_store(client_store, session_ref, root).unwrap();
         let proposal = mint_source_tree_commit(&mut state, &proposal_tree, &base, "bash").unwrap();
         assert!(state.store().has_local(&proposal_tree).unwrap());
         let resolution = reconcile(
@@ -3645,7 +3801,7 @@ mod tests {
         current_files.put("unrelated", Mode::Blob, b"keep".to_vec());
         let current_files = current_files.build(state.store_mut()).unwrap();
         let changes =
-            conversation_protocol::v3::tree::diff(state.store(), Some(&before), &proposed).unwrap();
+            session_protocol::v3::tree::diff(state.store(), Some(&before), &proposed).unwrap();
         let FilePlan {
             files, conflicts, ..
         } = plan_file_changes(state.store_mut(), &changes, &current_files, None).unwrap();
@@ -3711,7 +3867,7 @@ mod tests {
     fn test_entry(message_id: &str, role: Role, blocks: Vec<Block>) -> TranscriptEntry {
         TranscriptEntry {
             message_id: message_id.to_string(),
-            conversation: CONVERSATION.to_string(),
+            session: SESSION.to_string(),
             role,
             actor: "test".to_string(),
             model: None,
@@ -3762,7 +3918,7 @@ mod tests {
             Transition::MessageAppend {
                 entry: TranscriptEntry {
                     message_id: ASSISTANT_ID.to_string(),
-                    conversation: CONVERSATION.to_string(),
+                    session: SESSION.to_string(),
                     role: Role::Assistant,
                     actor: "test-model".to_string(),
                     model: Some("test-model".to_string()),
@@ -3884,7 +4040,7 @@ mod tests {
         )
         .unwrap();
         golden.head = append_memory(&mut golden.store, &golden.head, first).unwrap();
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         let pending = declaration_of(&view, "second").unwrap().unwrap().pending;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "second");
@@ -3935,7 +4091,7 @@ mod tests {
             },
         )
         .unwrap();
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         assert!(declaration_of(&view, "first")
             .unwrap()
             .unwrap()
@@ -3957,7 +4113,7 @@ mod tests {
     fn drain_closes_every_pending_call() {
         let mut golden = golden_two_calls().unwrap();
         loop {
-            let view = Conversation::open(&golden.store, &golden.head).unwrap();
+            let view = Session::open(&golden.store, &golden.head).unwrap();
             let declaration = declaration_of(&view, "first").unwrap().unwrap();
             let Some(call) = declaration.pending.first() else {
                 break;
@@ -3975,7 +4131,7 @@ mod tests {
             .unwrap();
             golden.head = append_memory(&mut golden.store, &golden.head, transition).unwrap();
         }
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         for id in ["first", "second"] {
             assert_eq!(
                 view.tool(id).unwrap().unwrap().status,
@@ -3997,7 +4153,7 @@ mod tests {
                 record: AsyncRecord {
                     task: task.clone(),
                     status: TaskStatus::Pending,
-                    target_ref: Some("refs/caos/v3/conversations/conversation/head".to_string()),
+                    target_ref: Some("refs/caos/v4/sessions/session/head".to_string()),
                     result: None,
                     reason: None,
                 },
@@ -4015,8 +4171,8 @@ mod tests {
             },
         )
         .unwrap();
-        let view = Conversation::open(&store, &terminal).unwrap();
-        let notices = pending_task_notices(CONVERSATION, &view).unwrap();
+        let view = Session::open(&store, &terminal).unwrap();
+        let notices = pending_task_notices(SESSION, &view).unwrap();
         assert_eq!(notices.len(), 1);
         let notice_id = ids::protocol_id("async-notice", &json!({"task":task.as_str()})).unwrap();
         assert_eq!(notices[0].message_id, notice_id);
@@ -4039,8 +4195,8 @@ mod tests {
         )
         .unwrap();
         assert!(pending_task_notices(
-            CONVERSATION,
-            &Conversation::open(&store, &announced).unwrap()
+            SESSION,
+            &Session::open(&store, &announced).unwrap()
         )
         .unwrap()
         .is_empty());
@@ -4049,9 +4205,9 @@ mod tests {
     #[test]
     fn subagent_notice_is_idempotent_and_names_the_checkpoint() {
         let mut store = MemoryStore::new();
-        let fork = conversation_protocol::v3::fixtures::golden(&mut store);
+        let fork = session_protocol::v3::fixtures::golden(&mut store);
         let head = store.read_commit(&fork).unwrap().parents[0].clone();
-        let view = Conversation::open(&store, &head).unwrap();
+        let view = Session::open(&store, &head).unwrap();
         let child = view.children().unwrap().into_iter().next().unwrap();
         let terminal = child.terminal_head.clone().unwrap();
         let notices = pending_task_notices("golden-conversation", &view).unwrap();
@@ -4090,7 +4246,7 @@ mod tests {
         }
         assert!(pending_task_notices(
             "golden-conversation",
-            &Conversation::open(&store, &announced).unwrap()
+            &Session::open(&store, &announced).unwrap()
         )
         .unwrap()
         .is_empty());
@@ -4099,7 +4255,7 @@ mod tests {
     #[test]
     fn turn_state_is_read_from_the_transcript() {
         let mut golden = golden_two_calls().unwrap();
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         let turn = Turn {
             request: golden.request.clone(),
             prompt: Some(0),
@@ -4122,26 +4278,26 @@ mod tests {
 
         // A system notice does not answer a prompt.
         append_text(&mut golden, "33333333333333333333333333333333", Role::System, "notice");
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         assert!(!answered(&view, 0).unwrap());
         // A message with no call does, until a newer prompt arrives.
         append_answer(&mut golden, "44444444444444444444444444444444");
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         assert!(answered(&view, 0).unwrap());
         append_text(&mut golden, "55555555555555555555555555555555", Role::User, "and more");
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         assert!(!answered(&view, 0).unwrap());
         // An interruption after the prompt stops the turn; one before it does not.
         append_text(
             &mut golden,
             "66666666666666666666666666666666",
             Role::System,
-            conversation_protocol::v3::INTERRUPT_TEXT,
+            session_protocol::v3::INTERRUPT_TEXT,
         );
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         assert!(interrupted(&view, &turn).unwrap());
         append_text(&mut golden, "77777777777777777777777777777777", Role::User, "go on");
-        let view = Conversation::open(&golden.store, &golden.head).unwrap();
+        let view = Session::open(&golden.store, &golden.head).unwrap();
         let later = Turn {
             request: golden.request.clone(),
             prompt: Some(6),
@@ -4192,10 +4348,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_source_tree_files_paths_normalize_to_conversation_paths() {
+    fn explicit_source_tree_files_paths_normalize_to_session_paths() {
         let mut store = MemoryStore::default();
         let head = root_with(&mut store, BTreeMap::from([("main".into(), test_oid('a'))])).unwrap();
-        let view = Conversation::open(&store, &head).unwrap();
+        let view = Session::open(&store, &head).unwrap();
         let browse = Call {
             id: "browse".into(),
             name: "ls".into(),
@@ -4274,7 +4430,7 @@ mod tests {
             BTreeMap::from([("project/revision".into(), source.clone())]),
         )
         .unwrap();
-        let view = Conversation::open(&store, &head).unwrap();
+        let view = Session::open(&store, &head).unwrap();
         for name in ["run_tool", "tool_help"] {
             // The definition need not exist until evaluation. Input selection
             // uses only stored source boundaries and has no code/dirty rule.
@@ -4302,7 +4458,7 @@ mod tests {
             BTreeMap::from([("api".into(), test_oid('a')), ("web".into(), test_oid('b'))]),
         ] {
             let head = root_with(&mut store, trees).unwrap();
-            let view = Conversation::open(&store, &head).unwrap();
+            let view = Session::open(&store, &head).unwrap();
             let git_call = Call {
                 id: "git".into(),
                 name: "merge".into(),
@@ -4324,7 +4480,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_path_scopes_a_conversation_path_and_yields_to_an_explicit_root() {
+    fn eval_path_scopes_a_session_path_and_yields_to_an_explicit_root() {
         let mut store = MemoryStore::new();
         let source = test_oid('a');
         let head = root_with(
@@ -4332,7 +4488,7 @@ mod tests {
             BTreeMap::from([("project/revision".into(), source.clone())]),
         )
         .unwrap();
-        let view = Conversation::open(&store, &head).unwrap();
+        let view = Session::open(&store, &head).unwrap();
         let eval = |input| Call {
             id: "eval".into(),
             name: tools::EVAL_PATH.into(),
@@ -4370,7 +4526,7 @@ mod tests {
             Target::Files
         ));
 
-        // No path at all is the conversation root, and is not an error the way
+        // No path at all is the session root, and is not an error the way
         // it is for a tool that has nothing to run without one.
         let root = eval(json!({}));
         assert!(matches!(
@@ -4417,13 +4573,86 @@ mod tests {
         let error = lookup_theirs(Some(&refs), Some("missing")).unwrap_err();
         assert!(error.contains("main") && error.contains("origin/main"));
     }
+    /// A call a previous step left started is answered as unfinished, never run
+    /// again; and a step that finds another one finished it first leaves that
+    /// answer alone.
+    #[test]
+    fn a_call_left_started_is_closed_as_unfinished() {
+        for concurrent in [false, true] {
+            let args = json!({"path":"caos-std/github","arguments":{}});
+            let golden = golden_with_first("run_tool", args.clone()).unwrap();
+            let call = Call {
+                id: "first".into(),
+                name: "run_tool".into(),
+                input: args,
+            };
+            let site = CallSite::at(&golden.request, &call, ASSISTANT_ID);
+            let mut started = site.stub(None);
+            started.status = CallStatus::Started;
+            let mut objects = golden.store;
+            let head = append_memory(
+                &mut objects,
+                &golden.head,
+                Transition::ToolStart {
+                    record: started.clone(),
+                    payloads: Vec::new(),
+                },
+            )
+            .unwrap();
+            // The other step's answer, landing between this step's look and its push.
+            let race = concurrent.then(|| {
+                let record = completed_record(
+                    &started,
+                    ToolResult::Complete {
+                        observation: observation_path(&started),
+                        proposal: None,
+                    },
+                    None,
+                );
+                tool_complete_transition(
+                    record,
+                    &result_block("first", "done", false),
+                    Vec::new(),
+                )
+                .unwrap()
+            });
+            let store = ImportStore {
+                objects,
+                head: head.clone(),
+                race,
+                lost_ack: false,
+            };
+            let mut state = progress::State::from_store(
+                store,
+                "refs/conversations/session/head".into(),
+                head,
+            )
+            .unwrap();
+            close_unfinished(&mut state, &started).unwrap();
+            state.reload().unwrap();
+            let record = state.session().unwrap().tool("first").unwrap().unwrap();
+            assert_eq!(
+                record.status,
+                if concurrent {
+                    CallStatus::Complete
+                } else {
+                    CallStatus::Failed
+                }
+            );
+            // Looking again changes nothing.
+            let before = state.head().clone();
+            close_unfinished(&mut state, &started).unwrap();
+            assert_eq!(*state.head(), before);
+        }
+    }
+
     struct ImportStore {
         objects: MemoryStore,
         head: Oid,
         race: Option<Transition>,
         lost_ack: bool,
     }
-    conversation_protocol::delegate_object_store!(ImportStore, objects);
+    session_protocol::delegate_object_store!(ImportStore, objects);
     impl progress::RefStore for ImportStore {
         fn fetch_ref_value(&mut self, _: &str) -> Result<Option<Oid>, String> {
             Ok(Some(self.head.clone()))
@@ -4444,266 +4673,9 @@ mod tests {
             self.head = new.unwrap().clone();
             if self.lost_ack {
                 self.lost_ack = false;
-                return Err("lost acknowledgement".into());
+                return Err("lost acknowledgment".into());
             }
             Ok(())
-        }
-    }
-
-    #[test]
-    fn import_pin_survives_lost_ack_restart_and_a_competing_observation() {
-        for competing in [false, true] {
-            let args = json!({"source":"https://example.com/repo.git","revision":"main","into":"imports/base"});
-            let golden = golden_with_first("import_source", args.clone()).unwrap();
-            let call = Call {
-                id: "first".into(),
-                name: "import_source".into(),
-                input: args,
-            };
-            let site = CallSite::at(&golden.request, &call, ASSISTANT_ID);
-            let first = json!({"commit":"a".repeat(40)});
-            let second = json!({"commit":"b".repeat(40)});
-            let mut record = site.stub(None);
-            record.status = CallStatus::Started;
-            let race = competing.then(|| Transition::ToolStart {
-                record,
-                payloads: vec![(
-                    "import.json".into(),
-                    canonical_payload_bytes(&second).unwrap(),
-                )],
-            });
-            let store = ImportStore {
-                objects: golden.store,
-                head: golden.head.clone(),
-                race,
-                lost_ack: true,
-            };
-            let mut state = progress::State::from_store(
-                store,
-                "refs/conversations/conversation/head".into(),
-                golden.head,
-            )
-            .unwrap();
-            let expected = if competing { &second } else { &first };
-            assert_eq!(
-                import_source::pin(&mut state, &site, &first)
-                    .unwrap()
-                    .as_ref(),
-                Some(expected)
-            );
-            let head = state.head().clone();
-            // Reloading from the persisted head must preserve the first winning observation.
-            state.reload().unwrap();
-            assert_eq!(
-                import_source::pin(&mut state, &site, &json!({"commit":"c".repeat(40)}))
-                    .unwrap()
-                    .as_ref(),
-                Some(expected)
-            );
-            assert_eq!(*state.head(), head);
-            assert!(state
-                .conversation()
-                .unwrap()
-                .source_trees()
-                .unwrap()
-                .is_empty());
-            let imported = Oid::parse(expected["commit"].as_str().unwrap(), "import").unwrap();
-            import_source::attach(&mut state, &site, "imports/base", &imported, expected).unwrap();
-            assert!(import_source::pin(&mut state, &site, &first)
-                .unwrap()
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn publication_pin_keeps_commit_and_lease_across_source_edits_and_restart() {
-        use conversation_protocol::v3::{Descriptor, PublicationRecord, PublicationStatus};
-        for rejected in [false, true] {
-            let args = json!({"source_tree":"feature/lower","repository":"https://example.com/repo.git","branch":"topic"});
-            let golden = golden_with_first("publish_source", args.clone()).unwrap();
-            let call = Call {
-                id: "first".into(),
-                name: "publish_source".into(),
-                input: args,
-            };
-            let site = CallSite::at(&golden.request, &call, ASSISTANT_ID);
-            let store = ImportStore {
-                objects: golden.store,
-                head: golden.head.clone(),
-                race: None,
-                lost_ack: true,
-            };
-            let mut state = progress::State::from_store(
-                store,
-                "refs/conversations/conversation/head".into(),
-                golden.head,
-            )
-            .unwrap();
-            let commit = Oid::parse(&"a".repeat(40), "source").unwrap();
-            let old = Oid::parse(&"b".repeat(40), "old").unwrap();
-            let descriptor = Descriptor {
-                source_base: old.clone(),
-                source_head: commit.clone(),
-                target_base: old.clone(),
-                policy: "preserve".into(),
-                implementation: "caos/server-push".into(),
-                commit_policy: "preserve".into(),
-            };
-            let conversation = state.conversation().unwrap().identity().unwrap().id;
-            let key = publish_source::invocation(&conversation, &site).unwrap()[..32].to_string();
-            let id = ids::publication_id(
-                &conversation,
-                &key,
-                &ids::projection_id(&descriptor.to_value()).unwrap(),
-                &commit,
-                "https://example.com/repo.git",
-                "refs/heads/topic",
-                Some(&old),
-            )
-            .unwrap();
-            let pending = PublicationRecord {
-                id,
-                key,
-                descriptor,
-                planned_head: commit.clone(),
-                expected_old: Some(old.clone()),
-                repository: "https://example.com/repo.git".into(),
-                refname: "refs/heads/topic".into(),
-                source_tree_name: "feature/lower".into(),
-                status: PublicationStatus::Pending,
-                evidence: None,
-                observed: None,
-            };
-            let saved = publish_source::pin(&mut state, &site, &pending)
-                .unwrap()
-                .unwrap();
-            assert_eq!(saved, pending);
-            let newer = Oid::parse(&"c".repeat(40), "newer source").unwrap();
-            state
-                .append(Transition::FilesApply {
-                    files: vec![(
-                        "feature/lower".into(),
-                        Some((Mode::Commit, newer.encode_line())),
-                    )],
-                })
-                .unwrap();
-            state.reload().unwrap();
-            let mut competing = pending.clone();
-            competing.planned_head = newer.clone();
-            competing.expected_old = None;
-            let recovered = publish_source::pin(&mut state, &site, &competing)
-                .unwrap()
-                .unwrap();
-            assert_eq!(recovered, pending);
-            let outcome = if rejected {
-                publish_source::reconcile(
-                    &recovered,
-                    conversation_protocol::v3::publication::Outcome::new(
-                        PublicationStatus::Conflict,
-                        "validation-rejected",
-                        Some("Source contains ignored files".into()),
-                        None,
-                    ),
-                    || panic!("validation rejection must not observe the remote"),
-                )
-            } else {
-                // Git may resend after a lost acknowledgement and report a
-                // rejected old value even though its first push succeeded.
-                publish_source::reconcile(
-                    &recovered,
-                    conversation_protocol::v3::publication::Outcome::new(
-                        PublicationStatus::Conflict,
-                        "lease-rejected",
-                        None,
-                        None,
-                    ),
-                    || Ok(Some(commit.clone())),
-                )
-            };
-            publish_source::finish(&mut state, &site, &pending, Some(outcome)).unwrap();
-            let view = state.conversation().unwrap();
-            assert_eq!(
-                view.source_tree("feature/lower").unwrap().unwrap().commit,
-                newer
-            );
-            let receipt = view.publication(&pending.id).unwrap().unwrap();
-            assert_eq!(
-                receipt.status,
-                if rejected {
-                    PublicationStatus::Conflict
-                } else {
-                    PublicationStatus::Complete
-                }
-            );
-            assert_eq!(receipt.planned_head, commit);
-            assert_eq!(receipt.expected_old, Some(old));
-            assert!(publish_source::pin(&mut state, &site, &competing)
-                .unwrap()
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn import_attachment_is_atomic_replayable_and_does_not_overwrite() {
-        for race_path in [
-            None,
-            Some("imports/base"),
-            Some("imports/base.source.json"),
-            Some("imports"),
-        ] {
-            let args = json!({"source":"https://example.com/repo.git","into":"imports/base"});
-            let golden = golden_with_first("import_source", args.clone()).unwrap();
-            let imported = Oid::parse(&"b".repeat(40), "import").unwrap();
-            let race = race_path.map(|path| Transition::FilesApply {
-                files: vec![(path.to_string(), Some((Mode::Blob, b"keep".to_vec())))],
-            });
-            let store = ImportStore {
-                objects: golden.store,
-                head: golden.head.clone(),
-                race,
-                lost_ack: true,
-            };
-            let mut state = progress::State::from_store(
-                store,
-                "refs/conversations/conversation/head".into(),
-                golden.head,
-            )
-            .unwrap();
-            assert!(state
-                .conversation()
-                .unwrap()
-                .source_trees()
-                .unwrap()
-                .is_empty());
-            let call = Call {
-                id: "first".into(),
-                name: "import_source".into(),
-                input: args,
-            };
-            let site = CallSite::at(&golden.request, &call, ASSISTANT_ID);
-            let provenance = json!({"repository":"https://example.com/repo.git","commit":imported});
-            import_source::attach(&mut state, &site, "imports/base", &imported, &provenance)
-                .unwrap();
-            let head = state.head().clone();
-            import_source::attach(&mut state, &site, "imports/base", &imported, &provenance)
-                .unwrap();
-            assert_eq!(*state.head(), head, "replay added another transition");
-            let view = state.conversation().unwrap();
-            let record = view.tool("first").unwrap().unwrap();
-            let block: Value =
-                serde_json::from_slice(&view.payload(&observation_path(&record)).unwrap()).unwrap();
-            if let Some(path) = race_path {
-                assert_eq!(view.snapshot().read(path).unwrap().unwrap(), b"keep");
-                assert_eq!(block["is_error"], true);
-                assert!(record.files.is_empty());
-            } else {
-                assert_eq!(
-                    view.source_tree("imports/base").unwrap().unwrap().commit,
-                    imported
-                );
-                assert!(view.snapshot().exists("imports/base.source.json").unwrap());
-                assert_eq!(record.files.len(), 2);
-            }
         }
     }
 }

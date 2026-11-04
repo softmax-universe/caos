@@ -15,7 +15,7 @@
 # before the ArgTree carrying it exists — but the client no longer needs a
 # checkout, a credential or a network path to the foreign repo, and neither does
 # a worker. That is what lets an agent's SERVER-SIDE evaluation follow a pin at
-# all, which is the whole point: a conversation started from a client repo has
+# all, which is the whole point: a session started from a client repo has
 # no source tree on anyone's disk to fall back to.
 #
 # A REAL FETCH OVER THE NETWORK, deliberately. The fixtures are served by `git
@@ -23,7 +23,7 @@
 # for its stub LLM, reachable from the stack because a job's containers sit in
 # the stack's netns. This used to be a `git+file://` URL, which no longer proves
 # anything: the server is a different container, so a path here is not a path
-# there, and that asymmetry IS the behaviour under test. The one thing a real
+# there, and that asymmetry IS the behavior under test. The one thing a real
 # host adds is `uploadpack.allowReachableSHA1InWant` — GitHub sets it, which is
 # exactly why a locator pins a COMMIT and selects within it with `dir=` rather
 # than naming a subtree hash — so the fixtures set it too.

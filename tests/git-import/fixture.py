@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import resource
 import signal
 import shlex
 import shutil
@@ -182,8 +183,18 @@ def main():
         server = None
         log = open(root / "server.log", "wb")
         odb = root / "server.git"
+        def default_stack():
+            # 256 KiB, whatever this worker runs with: the server must raise it
+            # for its git itself (see the long-chain push below). Far below
+            # git's usual 8 MiB so the chain that overflows it can be short: at
+            # 8 MiB it took 30,000 commits, and pushing them was half this test.
+            _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+            soft = 256 << 10
+            if hard != resource.RLIM_INFINITY:
+                soft = min(soft, hard)
+            resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
         def start():
-            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True, preexec_fn=default_stack)
             def ready():
                 if process.poll() is not None:
                     raise AssertionError((root / "server.log").read_text())
@@ -264,12 +275,15 @@ def main():
             assert "index-pack" in checks and "rev-list" not in checks, checks
             visible(second[0])
             # Imported commits have no refs. Clients must still be able to
-            # fetch them before any conversation or branch has been created.
+            # fetch them before any session or branch has been created.
             consumer = root / "consumer"
             run("git", "init", "-q", str(consumer))
             run("git", "-C", str(consumer), "fetch", "-q", base, second[0])
             assert run("git", "-C", str(consumer), "rev-parse", "FETCH_HEAD") == second[0]
-            assert list((odb / "objects/pack").glob("*.pack"))
+            # The store is loose objects only (design/loose-object-store.md): the
+            # import published its objects loose, and left no pack behind.
+            assert not list((odb / "objects/pack").glob("*.pack"))
+            assert (odb / "objects" / second[0][:2] / second[0][2:]).is_file()
             before = len(observations)
             commands = git_commands.read_text()
             assert call(payload(second[0])) == {"commit": second[0]}
@@ -364,6 +378,23 @@ def main():
             visible(pushed[0])
             assert run("git", "--git-dir", str(odb), "config", "receive.fsckObjects") == "true"
             run("git", "--git-dir", str(origin), "push", base, ":refs/caos/test/closure")
+            # A long new history. receive-pack checks it with `unpack-objects
+            # --strict`, which recurses once per commit: 1,000 overflow a 256 KiB
+            # stack (the server is started under that limit), so this push of
+            # twice that lands only because the server raises it for its git.
+            chain = root / "chain.git"
+            run("git", "init", "--bare", "-q", str(chain))
+            stream = "".join(
+                f"commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"
+                + (f"from :{i - 1}\n" if i > 1 else "") + "\n"
+                for i in range(1, 2_001))
+            run("git", "--git-dir", str(chain), "fast-import", "--quiet", input=stream.encode())
+            tip = run("git", "--git-dir", str(chain), "rev-parse", "refs/heads/main")
+            first_commit = run("git", "--git-dir", str(chain), "rev-list", "--max-parents=0", tip)
+            run("git", "--git-dir", str(chain), "push", "-q", base, tip + ":refs/caos/test/chain")
+            for oid in [tip, first_commit]:
+                object_request(oid)
+            run("git", "--git-dir", str(chain), "push", "-q", base, ":refs/caos/test/chain")
             # A pack's surplus, unreferenced commits must also have parents.
             malformed = child_bytes.replace(posted_parent[0].encode(), ("2" * 40).encode())
             malformed_oid = run("git", "--git-dir", str(origin), "hash-object", "-t", "commit", "-w", "--stdin", input=malformed)
@@ -501,7 +532,7 @@ def main():
             assert remote_head("topic") == first[0]
             assert push(second[0], old=first[0])["status"] == "complete"
             assert remote_head("topic") == second[0]
-            # Equal destination converges even after a lost acknowledgement.
+            # Equal destination converges even after a lost acknowledgment.
             assert push(second[0], old=first[0])["kind"] == "ref-converged"
             assert push(third[0], old=first[0])["status"] == "conflict"
             assert json.loads(push(first[0], old=second[0], expected=422))["code"] == "not-fast-forward"
@@ -677,9 +708,9 @@ def main():
             genesis = run("git", "--git-dir", str(origin), "commit-tree", empty,
                           input=b"caos-conversation-genesis-v3\n", env=genesis_env)
             assert genesis == "a2519b3360c5b1ded9a8cb7e5869d32901eae743"
-            conversation = source_commit(empty, genesis)
-            assert push(conversation, branch="conversation")["status"] == "complete"
-            assert push(first[0], branch="code-after-conversation")["status"] == "complete"
+            session = source_commit(empty, genesis)
+            assert push(session, branch="session")["status"] == "complete"
+            assert push(first[0], branch="code-after-session")["status"] == "complete"
             # Authentication fails before git sends an update, so it is certain.
             refused = push(first[0], branch="private-test", dest=private, credential="wrong-token")
             assert refused["status"] == "conflict" and refused["code"] == "credential-rejected", refused
@@ -702,17 +733,20 @@ def main():
                 for extra in [[], ["--expected=main"], ["--expected=absent", "--expected=absent"]]:
                     invalid = subprocess.run([cli, "push-git", destination, second[0], "cli", *extra], env=cli_env, capture_output=True)
                     assert invalid.returncode != 0
-            # Small uploads now stay packed too. The live reader must discover
-            # more packs than gix's default capacity of 32 without a restart.
+            # Every push lands as loose objects, published by the server's own
+            # pre-receive hook, so the store gains no packs however many pushes
+            # arrive, and the live reader sees each push at once.
             for index in range(40):
                 packed = advance()
                 run("git", "--git-dir", str(origin), "push", "-q", base,
                     packed[0] + f":refs/heads/pack-growth-{index}")
                 for oid in packed:
                     object_request(oid)
-            assert len(list((odb / "objects/pack").glob("*.pack"))) > 32
-            # Commit staging must also work once its live-store alternate
-            # contains more than 32 packs.
+            assert not list((odb / "objects/pack").glob("*.pack"))
+            # The hook lives with the server process, never in the repository,
+            # which other servers may share.
+            assert not (odb / "hooks/pre-receive").exists()
+            # Commit staging must also work after many pushes.
             staged_tip = advance(packed[0])
             for kind, oid in [("blob", staged_tip[2]), ("tree", staged_tip[1]), ("commit", staged_tip[0])]:
                 post_from_origin(kind, oid)
@@ -720,26 +754,28 @@ def main():
             stop(server); server = None
             server = start()
             visible(posted_child[0])
-            # Trusting existing OIDs requires auditing old stores at startup,
-            # including orphan trees whose ordinary children are missing.
+            # `server doctor` audits a store by hand (`caosd doctor`), including
+            # orphan trees whose ordinary children are missing. Each damage
+            # scenario plants its damage in a fresh copy of the store.
             stop(server); server = None
-            # The audit only runs with CAOS_STORE_CHECK=yes, and then it repacks
-            # first, so a loose object planted in the store is packed before the
-            # audit and can no longer be unlinked. Each refusal scenario plants
-            # its damage in a fresh copy of the store instead.
             def damaged_store(name):
+                # HARD LINKS, not copies: the damage below only adds files,
+                # deletes one, and writes refs, so no file of the original is
+                # ever changed through a link, and a copy of every object in
+                # the store was most of this stage.
                 store = root / name
-                shutil.copytree(odb, store)
+                shutil.copytree(odb, store, copy_function=os.link)
                 return store
-            def start_refused(store):
-                return subprocess.run([binary], env=dict(os.environ,
-                    SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(store),
-                    CAOS_STORE_CHECK="yes"), capture_output=True, timeout=30)
+            def doctor(store):
+                return subprocess.run([binary, "doctor"], env=dict(os.environ,
+                    CAOS_GIT_DIR=str(store)), capture_output=True, timeout=30)
+            healthy = doctor(odb)
+            assert healthy.returncode == 0, healthy.stderr
             tree_store = damaged_store("server-broken-tree.git")
             broken_tree = b"100644 missing\0" + bytes.fromhex("3" * 40)
             broken_tree_oid = run("git", "--git-dir", str(tree_store), "hash-object", "-t", "tree", "-w", "--stdin", input=broken_tree)
-            refused = start_refused(tree_store)
-            assert refused.returncode != 0, "server trusted legacy incomplete tree"
+            refused = doctor(tree_store)
+            assert refused.returncode != 0, "doctor passed an incomplete tree"
             assert b"restore the missing objects" in refused.stderr, refused.stderr
             assert run("git", "--git-dir", str(tree_store), "cat-file", "-t", broken_tree_oid) == "tree"
             # Upgrades cannot silently trust orphan commits either.
@@ -751,11 +787,18 @@ def main():
             # A cached commit graph must not conceal a missing commit object.
             run("git", "--git-dir", str(commit_store), "commit-graph", "write", "--stdin-commits", input=(broken + "\n").encode())
             (commit_store / "objects" / legacy_parent[:2] / legacy_parent[2:]).unlink()
-            refused = start_refused(commit_store)
-            assert refused.returncode != 0, "server accepted legacy incomplete history"
+            refused = doctor(commit_store)
+            assert refused.returncode != 0, "doctor passed incomplete history"
             assert b"restore the missing objects" in refused.stderr, refused.stderr
             assert run("git", "--git-dir", str(commit_store), "cat-file", "-t", broken) == "commit"
-            print("git-import: complete history, upload ordering, quarantined imports/pushes, commit rejection, bounded validation, startup integrity, HTTPS credentials, reuse, concurrency and retry PASS")
+            # A ref git cannot read makes receive-pack refuse every push.
+            ref_store = damaged_store("server-broken-ref.git")
+            (ref_store / "refs" / "caos").mkdir(parents=True, exist_ok=True)
+            (ref_store / "refs" / "caos" / "doctor-broken").write_text("4" * 40 + "\n")
+            refused = doctor(ref_store)
+            assert refused.returncode != 0, "doctor passed a ref to a missing object"
+            assert b"refs/caos/doctor-broken" in refused.stderr, refused.stderr
+            print("git-import: complete history, upload ordering, quarantined imports/pushes, commit rejection, bounded validation, doctor integrity, HTTPS credentials, reuse, concurrency and retry PASS")
         finally:
             stop(server)
             remote.shutdown(); remote.server_close(); thread.join()

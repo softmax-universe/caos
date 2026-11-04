@@ -1,0 +1,55 @@
+100644 b179a15fd2214ce46d1e5cd3ccc340950d30cd8b 1	README.md
+100644 95fac41a640842a2138daae4bdae56f041d9c42b 2	README.md
+100644 5815b86cee27f203343f2183e84d0e8e638da942 3	README.md
+100644 7a07cbb8cc3b2bd5a258f90751f5e19c8c20f189 1	SPEC.md
+100644 26390fdaa9dec36a7151e1e54d1954d587d99d60 2	SPEC.md
+100644 447ee7a03172a819e5040988f9042558986aadb8 3	SPEC.md
+100644 c0de20089469fbcfd5a3e8cba6de04f01b2092cb 1	dev/README.md
+100644 dd5a14e800d1bd27b70feb1670df4b1673da6bf1 2	dev/README.md
+100644 48340dbf635e87ba176dcc34839599bb5a3df941 3	dev/README.md
+100644 ad1dd69d34bac54d77e897d0736ed4818b59a5e1 1	integrations/hermes/plugins/caos-hooks/__init__.py
+100644 7add262b0a3d41eba8a2f4a2e22a963f8868cc3f 2	integrations/hermes/plugins/caos-hooks/__init__.py
+100644 598122310b17617e43a66aea09a16ccc0afe757e 3	integrations/hermes/plugins/caos-hooks/__init__.py
+100644 a67915607d3a624d55f29916eede25e640c9261d 1	integrations/hermes/plugins/caos-hooks/plugin.yaml
+100644 cde392ec8bf04f25ec38813eb54cd07dc0c81e66 2	integrations/hermes/plugins/caos-hooks/plugin.yaml
+100644 e88a9332bc538d1d277143a97fd144cb098ddf88 3	integrations/hermes/plugins/caos-hooks/plugin.yaml
+100755 e92deaf166af9ba055b6a0ee70d89ab61ae80c22 1	integrations/hermes/scripts/caos-mcp-launch
+100755 777e25ea236dc4eb5650efeea577c64b8001a81d 2	integrations/hermes/scripts/caos-mcp-launch
+100755 1b622700a6a04e06e12534e3bc5ae61c23254366 3	integrations/hermes/scripts/caos-mcp-launch
+100644 e03dde668bfad0145b90bdaffa171fded53cdb34 1	std/llm-step/src/stack_publish.rs
+100644 7a773bc8b2ef37f5d3ba19c5d3e0b4860b4f6ea7 2	std/llm-step/src/stack_publish.rs
+
+Auto-merging README.md
+CONFLICT (content): Merge conflict in README.md
+Auto-merging SPEC.md
+CONFLICT (content): Merge conflict in SPEC.md
+Auto-merging design/agent-github.md
+Auto-merging design/cloud-setup.md
+Auto-merging design/daemons.md
+Auto-merging dev/README.md
+CONFLICT (content): Merge conflict in dev/README.md
+Auto-merging dev/caos-stack/.caos-expr
+Auto-merging flake.nix
+Auto-merging integrations/claude-code/cloud/README.md
+Auto-merging integrations/claude-code/cloud/bootstrap.go
+Auto-merging integrations/claude-code/drive/.caos-expr
+Auto-merging integrations/claude-code/drive/drive.go
+Auto-merging integrations/hermes/README.md
+Auto-merging integrations/hermes/distribution.yaml
+Auto-merging integrations/hermes/gateway
+Auto-merging integrations/hermes/plugins/caos-hooks/__init__.py
+CONFLICT (content): Merge conflict in integrations/hermes/plugins/caos-hooks/__init__.py
+Auto-merging integrations/hermes/plugins/caos-hooks/plugin.yaml
+CONFLICT (content): Merge conflict in integrations/hermes/plugins/caos-hooks/plugin.yaml
+Auto-merging integrations/hermes/scripts/caos-mcp-launch
+CONFLICT (content): Merge conflict in integrations/hermes/scripts/caos-mcp-launch
+Auto-merging prod/README.md
+Auto-merging prod/caosd/deploy/main.go
+Auto-merging prod/watchdog/runbook/CLAUDE.md
+Auto-merging rust/crates/caos-cli/TUI.md
+Auto-merging rust/crates/caos-cli/src/bin/tui/app.rs
+Auto-merging rust/crates/caos-cli/src/lib.rs
+Auto-merging spec/http-api.md
+Auto-merging std/GIT.md
+CONFLICT (modify/delete): std/llm-step/src/stack_publish.rs deleted in bef8c4b7bbc05b97c6637ff42b330050fbcb942a and modified in 9eda76ca898d3db8202c16046ed6e66e4b77d9b6.  Version 9eda76ca898d3db8202c16046ed6e66e4b77d9b6 of std/llm-step/src/stack_publish.rs left in tree.
+Auto-merging tests/cloud-setup/worker.go

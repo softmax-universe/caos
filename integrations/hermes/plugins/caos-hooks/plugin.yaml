@@ -5,11 +5,17 @@ description: >
   caos MCP server under Hermes: stamps caos_session/caos_tool_use_id/
   caos_prompt_id onto every caos tool call (PreToolUse's job), and drives
   `caos mcp hook` to record prompts and final messages into the durable
+<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
   caos conversation log (UserPromptSubmit/Stop's job).
 author: "softmax-universe/caos"
+=======
+  caos session log (UserPromptSubmit/Stop's job).
+author: "Metta-AI/caos"
+>>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
 capabilities:
   - tools.override
 provides_hooks:
   - pre_tool_call
   - pre_llm_call
+  - transform_llm_output
   - post_llm_call

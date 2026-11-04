@@ -368,7 +368,7 @@ A caller cannot set any of these.
 - A resident worker's result must still depend only on its ArgTree and the
   instance's *declared* state. Hidden in-memory state breaks cache
   correctness silently. That is the daemon author's responsibility, and the
-  opt-in is the acknowledgement.
+  opt-in is the acknowledgment.
 - Secrets are injected per job and removed at `caos next`. A daemon copies
   what it needs while its start job runs. A reply cannot carry a secret value:
   files added with `caos put` are checked for them.
@@ -528,7 +528,7 @@ In outline:
 4. Watch it: `drive info` and `drive conv` for the session; `status` and `logs`
    for the stack.
 5. Collect results with `harvest`, then read them with `log`, `show` and
-   `read` from the outer conversation.
+   `read` from the outer session.
 6. Clean up: `drive archive`, `drive env-delete`, then `stop`.
 
 The session's caos tools resolve against the inner stack, which is built from the
@@ -540,7 +540,7 @@ existing dev mode, `refs/caos/dev` and `--dev-commit`) is future work.
 
 ## Results: harvest
 
-The cloud session records its conversation into the inner stack's git, and that
+The cloud session records itself into the inner stack's git, and that
 dies with the container. `harvest` copies it out.
 
 - The daemon script, running with the outer `/bin/caos`, reads the inner stack's
@@ -559,7 +559,7 @@ dies with the container. `harvest` copies it out.
   records what happens when a pool fills with long-lived stacks: queued work
   dies on the pending timeout. Cap concurrent instances, and warm the registry
   once before starting many (the `warm-std` pattern there).
-- Eviction kills a stack. That is the intended behaviour, and the reason
+- Eviction kills a stack. That is the intended behavior, and the reason
   `harvest` runs during the grace period.
 - Cold start dominates: about 20 s on a warm registry, minutes on a cold one.
   `start` replies early; `status` shows progress.

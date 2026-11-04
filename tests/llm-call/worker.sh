@@ -3,7 +3,7 @@
 #
 # Exercises the generic stateless LLM call worker against the scripted API
 # stub: caller-owned prompt/messages/config in, plain text blob out, with no
-# agent tools, thinking mode, commits, or conversation refs.
+# agent tools, thinking mode, commits, or session refs.
 #
 # ONE STAGE, WHICH IS THE POINT. The stub only exists while this container does,
 # so everything that observes it has to happen here — and a worker may not block
@@ -113,7 +113,9 @@ caos sub-run "$relay" >/dev/null || fail "dispatching the relay"
 
 echo "== the call returns the reply's text blocks as a plain blob ==" >&2
 found=0
-for _ in $(seq 1 300); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues"): the relay is a
+# sub-run that waits for a runner slot on a busy host.
+for _ in $(seq 1 1200); do
   if caos get-hash "$oid" /cas/response 2>/dev/null; then found=1; break; fi
   sleep 0.25
 done

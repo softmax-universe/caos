@@ -128,7 +128,7 @@ git push -q caos "HEAD:refs/heads/${test_run_id}-secrets-test" \
 
 # --- the store (outside the repo, never committed) ---------------------------
 # Readers grant by LOCATOR: this commit, and a path in it. The client ingests
-# the committed tree, so what it evaluates has exactly that origin. The URL is
+# the committed tree, so what it evaluates is exactly that commit's. The URL is
 # never fetched — the server already holds the commit — so any well-formed one
 # names it.
 STORE=/tmp/secrets-test-store
@@ -197,13 +197,20 @@ out=$("$CAOS_CLI" run later --base:@=mytool) || fail "run at the later commit fa
   || fail "a changed tool off the granted branch was granted: $(cat later/verdict)"
 echo "  ok: a changed tool off the granted branch is not covered" >&2
 
-echo "== moving the granted branch moves the grant, with no new push ==" >&2
+echo "== a moved branch is granted by the next push, and not before ==" >&2
+# What a reader approves is fixed when the store is pushed (design/secrets.md):
+# the server holds the trees secrets-push asked it to evaluate, not a branch to
+# follow.
 git push -q caos "HEAD:refs/heads/${test_run_id}-secrets-test" || fail "moving the granted branch"
-out=$("$CAOS_CLI" run moved --base:@=mytool) || fail "run on the moved branch failed: $out"
+out=$("$CAOS_CLI" run unmoved --base:@=mytool) || fail "run on the moved branch failed: $out"
+[ "$(cat unmoved/verdict)" = "deploytok-missing" ] \
+  || fail "a moved branch was granted with no push: $(cat unmoved/verdict)"
+push || fail "pushing again after the branch moved failed"
+out=$("$CAOS_CLI" run moved --base:@=mytool) || fail "run after the new push failed: $out"
 [ "$(cat moved/verdict)" = "deploytok-ok" ] \
-  || fail "the moved branch did not carry the grant: $(cat moved/verdict)"
+  || fail "the new push did not grant the moved branch: $(cat moved/verdict)"
 git reset -q --hard "$head"
-echo "  ok: the grant follows the branch" >&2
+echo "  ok: the grant moves with a push" >&2
 
 echo "== a malformed reader is refused by secrets-push ==" >&2
 printf 'value=x\nreader:@@=%s until=never\n' "$(at mytool)" > "$STORE/badreader"
@@ -230,7 +237,9 @@ admitted=$("$CAOS_CLI" run --base:hash="$launcher") || fail "sub-run launcher fa
   || fail "sub-run launcher admitted the wrong request: $admitted"
 
 complete=0
-for _ in $(seq 1 150); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues"): the sub-run is a
+# cold job that waits for a runner slot on a busy host.
+for _ in $(seq 1 1200); do
   status=$(object_status "$expected_oid") || fail "server unreachable while waiting for sub-run"
   case "$status" in
     200) complete=1; break ;;
@@ -248,8 +257,8 @@ echo "  ok: a child received its reader-matched secret through server context" >
 
 echo "== a granted tool is marked, and so is anything embedding it ==" >&2
 # mytool matches the deploytok reader, so evaluating it marks it with
-# secret-hash. embedder/mytool is a byte-identical COPY, so it carries mytool's
-# origin and is marked too — which is what makes its embedder per-user.
+# secret-hash. embedder/mytool is a byte-identical COPY, so it is the same tree
+# and is marked too — which is what makes its embedder per-user.
 withsecret=$("$CAOS_CLI" eval-path mytool) || fail "eval-path mytool failed"
 emb_with=$("$CAOS_CLI" eval-path embedder) || fail "eval-path embedder failed"
 rm "$STORE/deploytok"

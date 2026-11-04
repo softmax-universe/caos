@@ -66,6 +66,9 @@ const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
 /// resolve rather than a final value (the hash names the continuation tree).
 const PROMISE_KIND: &str = "promise";
 
+/// How long a `ref-then` waits when it names no `--timeout`.
+const REF_WAIT_DEFAULT_SECS: u64 = 600;
+
 /// Marker entry naming a curry node — a tree pairing a `base` image ref with an
 /// `args` subtree of bound arguments (mirrors the client's `CURRY_MARKER`).
 /// Promise resolution unwraps these server-side so `map`/`then` can be
@@ -191,23 +194,9 @@ pub(crate) fn eval_endpoint(
                 return raw_root(config, &locator, &git_ref, &root).map(String::into_bytes);
             }
             let dir = git_ref.dir.as_deref().unwrap_or("");
-            let result = eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
+            eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
                 HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message()))
-            })?;
-            if let Some((_, hash)) = std::str::from_utf8(&result)
-                .ok()
-                .and_then(|r| r.split_once(' '))
-            {
-                crate::secrets::record_mount(
-                    config,
-                    hash.trim(),
-                    caos_eval::Origin {
-                        root: root.to_string(),
-                        path: dir.to_string(),
-                    },
-                );
-            }
-            Ok(result)
+            })
         }
     }
 }
@@ -365,19 +354,8 @@ fn evaluate_locator(
         return raw_root(config, locator, &git_ref, &root);
     }
     let dir = git_ref.dir.as_deref().unwrap_or("");
-    let result = evaluate(config, &root.to_string(), dir, secrets, parent)
-        .map_err(|e| HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message())))?;
-    if let Some((_, hash)) = result.split_once(' ') {
-        crate::secrets::record_mount(
-            config,
-            hash,
-            caos_eval::Origin {
-                root: root.to_string(),
-                path: dir.to_string(),
-            },
-        );
-    }
-    Ok(result)
+    evaluate(config, &root.to_string(), dir, secrets, parent)
+        .map_err(|e| HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message())))
 }
 
 /// `POST /submit` — form a request (SPEC, "Submitting work") and return
@@ -833,7 +811,7 @@ fn run_dispatch_inner(
 /// Admit an exact detached child request while the parent job is still in
 /// flight. Ownership crosses the thread boundary here: the server clones the
 /// current unhashed context, while the worker sends only the child hash and its
-/// job-scoped nonce. Validation happens before acknowledgement so a missing or
+/// job-scoped nonce. Validation happens before acknowledgment so a missing or
 /// malformed request is not reported as queued.
 fn start_sub_run(
     config: &Config,
@@ -1249,8 +1227,8 @@ fn broadcast(waiters: Vec<mpsc::Sender<Outcome>>, outcome: &Outcome) {
 /// — which blocks THIS request thread (never a worker slot), exactly as
 /// [`resolve_promise`]'s own `run` step does. This is what lets a worker request
 /// evaluation server-side, via an `eval` continuation, and get the byte-identical
-/// object a client `eval-path` would build, marked where a node's origin
-/// matches a grant ([`crate::secrets::evaluated`]).
+/// object a client `eval-path` would build, marked where a directory is one a
+/// secrets reader approves ([`crate::secrets::evaluated`]).
 struct ServerEvalHost<'a> {
     config: &'a Config,
     salt: &'a str,
@@ -1270,7 +1248,18 @@ struct ServerEvalHost<'a> {
     dispatches: std::sync::atomic::AtomicUsize,
 }
 
+impl ServerEvalHost<'_> {
+    /// Which of a tree's cached values this walk reads and writes: everything
+    /// an expression's value depends on that its tree does not hold.
+    fn cache_variant(&self) -> String {
+        crate::eval_cache::variant(self.salt, self.secrets.walk_key().as_deref())
+    }
+}
+
 impl caos_eval::EvalHost for ServerEvalHost<'_> {
+    fn concurrent(&self) -> Option<&(dyn caos_eval::EvalHost + Sync)> {
+        Some(self)
+    }
     fn get_object(&self, oid: &str) -> Result<(String, Vec<u8>), String> {
         fetch_object(self.config, oid)
     }
@@ -1308,7 +1297,7 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         store_git_tree(self.config, entries)
     }
     /// `:@@=`. This is what a worker's `eval` continuation ultimately reaches,
-    /// and it is why a conversation can evaluate a repository that pins caos:
+    /// and it is why a session can evaluate a repository that pins caos:
     /// the walk is the server's, so the fetch has to be too (`crate::locator`).
     ///
     /// The content-addressing rule is unchanged — the locator becomes an oid
@@ -1327,7 +1316,7 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         let root = crate::locator::resolve_root(self.config, &git_ref, None)
             .map_err(|e| format!("git ref {value:?}: {e}"))?;
         if git_ref.raw {
-            // The pinned commit's own tree, unevaluated: a conversation's content,
+            // The pinned commit's own tree, unevaluated: a session's content,
             // which is code to read, not an expression to run.
             let (kind, hash) = raw_walk(self.config, &root, git_ref.dir.as_deref().unwrap_or(""))
                 .map_err(|e| format!("git ref {value:?}: {e}"))?;
@@ -1336,29 +1325,31 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         let dir = git_ref.dir.as_deref().unwrap_or("");
         let (kind, hash) = caos_eval::eval_path(self, &root.to_string(), dir)
             .map_err(|e| format!("git ref {value:?}: {e}"))?;
-        crate::secrets::record_mount(
-            self.config,
-            &hash,
-            caos_eval::Origin {
-                root: root.to_string(),
-                path: dir.to_string(),
-            },
-        );
         Ok((
             caos_eval::mode_of_kind(&kind),
             gix::ObjectId::from_hex(hash.as_bytes())
                 .map_err(|_| format!("git ref {value:?}: {hash:?} is not an object id"))?,
         ))
     }
-    fn origins_of(&self, oid: &str) -> Vec<caos_eval::Origin> {
-        crate::secrets::origins_of(self.config, oid)
+    /// The eval cache, for one expression (`MemoKind::Node`). A whole walk
+    /// (`MemoKind::Path`) is left to [`evaluate`], which already keeps the
+    /// top-level ones; with every expression on the way a hit, the rest of a
+    /// walk is tree lookups.
+    fn memo_get(&self, kind: caos_eval::MemoKind, key: &str) -> Option<(String, String)> {
+        match kind {
+            caos_eval::MemoKind::Node => {
+                crate::eval_cache::get(self.config, key, &self.cache_variant())
+            }
+            caos_eval::MemoKind::Path => None,
+        }
     }
-    fn evaluated(
-        &self,
-        origins: &[caos_eval::Origin],
-        value: (String, String),
-    ) -> Result<(String, String), String> {
-        crate::secrets::evaluated(self.config, self, self.secrets, origins, value)
+    fn memo_put(&self, kind: caos_eval::MemoKind, key: &str, value: &(String, String)) {
+        if kind == caos_eval::MemoKind::Node {
+            crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
+        }
+    }
+    fn evaluated(&self, node: &str, value: (String, String)) -> Result<(String, String), String> {
+        crate::secrets::evaluated(self.config, self, self.secrets, node, value)
     }
     fn dispatch(
         &self,
@@ -1445,6 +1436,9 @@ fn resolve_promise(
     let mut request: Option<String> = None;
     let (mut map, mut run, mut then) = (None, None, None);
     let mut eval = None;
+    // `ref-then`: the ref to wait on, the value it is waiting to leave, and
+    // how long it may wait (design/refs.md).
+    let (mut ref_name, mut ref_expected, mut ref_timeout) = (None, None, None);
     let mut catch = false;
     let mut max_parallel: Option<usize> = None;
     for entry in fetch_tree(config, cont)
@@ -1465,6 +1459,11 @@ fn resolve_promise(
             // The PATH to evaluate (a blob, not an image): the middle step walks
             // `.caos-expr` from `in`'s root down to it. See `ServerEvalHost`.
             "eval" => eval = Some(blob_string(config, &entry.oid.to_string())?),
+            // A ref NAME, the value it is waiting to leave, and a timeout in
+            // seconds — all strings, recorded verbatim by `caos ref-then`.
+            "ref" => ref_name = Some(blob_string(config, &entry.oid.to_string())?),
+            "expected" => ref_expected = Some(blob_string(config, &entry.oid.to_string())?),
+            "timeout" => ref_timeout = Some(blob_string(config, &entry.oid.to_string())?),
             // Presence is the whole signal; the content is unread.
             "catch" => catch = true,
             // How many map children may be IN FLIGHT at once. Absent means all
@@ -1499,9 +1498,16 @@ fn resolve_promise(
         run.is_some(),
         request.is_some(),
         eval.is_some(),
+        ref_name.is_some(),
         then.is_some(),
         catch,
     )?;
+    if (ref_expected.is_some() || ref_timeout.is_some()) && ref_name.is_none() {
+        return Err(HttpError::new(
+            500,
+            format!("continuation {cont} has 'expected' or 'timeout' without 'ref'"),
+        ));
+    }
 
     // The middle step, if any: `map` fans out over `in`'s children and yields a
     // `children` tree; `run` builds one request from its image + `in`; `request`
@@ -1645,7 +1651,6 @@ fn resolve_promise(
             eval_path: path,
             dispatches: std::sync::atomic::AtomicUsize::new(0),
         };
-        crate::secrets::index_root(config, secrets, &input.oid.to_string());
         let evaluated = caos_eval::eval_path(&host, &input.oid.to_string(), path)
             .map(|(kind, hash)| format!("{kind} {hash}"))
             .map_err(|e| {
@@ -1655,20 +1660,74 @@ fn resolve_promise(
                 )
             });
         Some(continuation_result(config, cont, evaluated, catch)?)
+    } else if let Some(name) = &ref_name {
+        // Wait, on THIS request thread, for the ref to leave the value the
+        // worker saw. The worker has exited, so no runner slot is held while
+        // the writer it is waiting for runs. The new commit travels as
+        // `result`, a gitlink entry like any commit result; a deletion as a
+        // bare `absent` marker. A timeout is a failure `catch` can deliver.
+        crate::refs::validate_name(name)?;
+        let from =
+            crate::refs::Value::parse(ref_expected.as_deref().unwrap_or(crate::refs::ABSENT))
+                .map_err(|e| HttpError::new(400, format!("continuation {cont}: expected: {e}")))?;
+        let seconds = match ref_timeout.as_deref() {
+            None => REF_WAIT_DEFAULT_SECS,
+            Some(text) => match text.parse::<u64>() {
+                Ok(n) if (1..=crate::refs::MAX_WAIT_SECS).contains(&n) => n,
+                _ => {
+                    return Err(HttpError::new(
+                        400,
+                        format!(
+                            "continuation {cont}: timeout must be whole seconds from 1 to {}, got {text:?}",
+                            crate::refs::MAX_WAIT_SECS
+                        ),
+                    ))
+                }
+            },
+        };
+        let waited = crate::refs::wait_for_change(
+            &config.git_dir,
+            name,
+            &from,
+            Duration::from_secs(seconds),
+        )
+        .map_err(|e| HttpError::new(500, e));
+        match waited {
+            Ok(crate::refs::Value::Absent) => {
+                // Presence is the whole signal, as for `catch`. Without a
+                // `then` the empty blob is the request's result.
+                let oid = store_git_blob(config, b"")
+                    .map_err(|e| HttpError::new(500, format!("storing absent marker: {e}")))?;
+                Some((
+                    named_entry("absent", gix::objs::tree::EntryKind::Blob.into(), oid),
+                    format!("blob {oid}"),
+                    false,
+                ))
+            }
+            waited => {
+                let waited = waited.map(|value| format!("commit {}", value.text()));
+                Some(continuation_result(config, cont, waited, catch)?)
+            }
+        }
     } else {
         None
     };
 
-    let caught = mid.as_ref().is_some_and(|(_, _, caught)| *caught);
+    // A REF WAIT IS NEVER CACHED, caught or not: what it answers depends on
+    // when it ran, not on its ArgTree, so a memoized answer would hand the
+    // next caller a value the ref may no longer hold — and skip the wait. The
+    // same flag a caught failure sets keeps it out of the cache.
+    let caught = mid.as_ref().is_some_and(|(_, _, caught)| *caught) || ref_name.is_some();
 
     // The promise type, for the record. A continuation with only a `then` has
     // no middle step at all (a plain tail call), which is a shape in its own
     // right and not a missing one.
-    let kind = match (&map, &run, &request, &eval) {
-        (Some(_), _, _, _) => "map",
-        (_, Some(_), _, _) => "run",
-        (_, _, Some(_), _) => "request",
-        (_, _, _, Some(_)) => "eval",
+    let kind = match (&map, &run, &request, &eval, &ref_name) {
+        (Some(_), _, _, _, _) => "map",
+        (_, Some(_), _, _, _) => "run",
+        (_, _, Some(_), _, _) => "request",
+        (_, _, _, Some(_), _) => "eval",
+        (_, _, _, _, Some(_)) => "ref",
         _ => "then",
     };
 
@@ -1743,18 +1802,20 @@ fn validate_continuation_shape(
     has_run: bool,
     has_request: bool,
     has_eval: bool,
+    has_ref: bool,
     has_then: bool,
     catch: bool,
 ) -> Result<(), HttpError> {
     let middle_count = usize::from(has_map)
         + usize::from(has_run)
         + usize::from(has_request)
-        + usize::from(has_eval);
+        + usize::from(has_eval)
+        + usize::from(has_ref);
     if middle_count > 1 {
         return Err(HttpError::new(
             500,
             format!(
-                "continuation {cont} has more than one of 'map', 'run', 'request', and 'eval' (they are mutually exclusive)"
+                "continuation {cont} has more than one of 'map', 'run', 'request', 'eval' and 'ref' (they are mutually exclusive)"
             ),
         ));
     }
@@ -1764,7 +1825,14 @@ fn validate_continuation_shape(
             format!("continuation {cont} has both 'request' and 'in'"),
         ));
     }
-    if !has_request && !has_input {
+    // `ref-then` waits on a named ref: there is no data node to carry.
+    if has_ref && has_input {
+        return Err(HttpError::new(
+            500,
+            format!("continuation {cont} has both 'ref' and 'in'"),
+        ));
+    }
+    if !has_request && !has_ref && !has_input {
         return Err(HttpError::new(
             500,
             format!("continuation {cont} missing 'in'"),
@@ -1778,11 +1846,11 @@ fn validate_continuation_shape(
     }
     // Both checked here rather than client-side only: a continuation is a tree
     // any worker can hand us, so the interpreter states its own contract.
-    if catch && !has_run && !has_request && !has_eval {
+    if catch && !has_run && !has_request && !has_eval && !has_ref {
         return Err(HttpError::new(
             500,
             format!(
-                "continuation {cont} has 'catch' without 'run', 'request' or 'eval' (catch covers one fallible step)"
+                "continuation {cont} has 'catch' without 'run', 'request', 'eval' or 'ref' (catch covers one fallible step)"
             ),
         ));
     }
@@ -2151,9 +2219,10 @@ fn result_hash(result: &str) -> &str {
     result.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// Pin `refs/caos/res/<argTreeHash>` at the result so a client can fetch it by
-/// ref and it survives gc. This is part of top-level run success, particularly
-/// when the HTTP caller disconnected before the eventual result.
+/// Pin `refs/caos/res/<argTreeHash>` at the result, so receive-pack advertises
+/// it and a client's next push can build on a result it never fetched. Swept
+/// after a while with the request refs (`spawn_request_ref_pruner`); a result
+/// is fetched by hash. This is part of top-level run success.
 fn pin_result(config: &Config, arg_tree: &str, result: &str) -> Result<(), HttpError> {
     let hash = result_hash(result);
     if hash.is_empty() {
@@ -2171,6 +2240,7 @@ fn pin_result_in(git_dir: &str, refname: &str, hash: &str) -> Result<(), HttpErr
     let mut last_error = String::new();
     for attempt in 0..ATTEMPTS {
         match Command::new("git")
+            .envs(crate::git_env())
             .args(["-C", git_dir, "update-ref", refname, hash])
             .output()
         {
@@ -2832,6 +2902,16 @@ fn cache_set(addr: &str, key: &str, value: &str) -> Result<(), String> {
     read_status_reply(&mut BufReader::new(stream))
 }
 
+/// `SET key value EX secs` in Redis: a value that expires unless set again.
+fn cache_set_ex(addr: &str, key: &str, value: &str, secs: u64) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    let secs = secs.to_string();
+    stream
+        .write_all(&resp_command(&["SET", key, value, "EX", &secs]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_status_reply(&mut BufReader::new(stream))
+}
+
 /// `RPUSH key value` — append one element to a Redis list.
 ///
 /// The trace record ([`crate::status`]) is a list rather than a rewritten blob
@@ -2868,33 +2948,32 @@ pub(crate) fn list_append_many(addr: &str, pairs: &[(String, String)]) -> Result
     Ok(())
 }
 
-/// `SADD key member` for every pair, over one connection. A set, not a list,
-/// where a repeat must be free: the secrets origin index re-records the same
-/// fact on every re-index, and as list lines they grew to 25M entries per key.
-pub(crate) fn set_add_many(addr: &str, pairs: &[(String, String)]) -> Result<(), String> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let mut stream = redis_connect(addr)?;
-    let mut buf = Vec::new();
-    for (key, member) in pairs {
-        buf.extend_from_slice(&resp_command(&["SADD", key, member]));
-    }
-    stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
-    let mut reader = BufReader::new(stream);
-    for _ in pairs {
-        read_integer_reply(&mut reader)?;
-    }
-    Ok(())
-}
-
-/// `SMEMBERS key` — every member of the set, in no particular order.
-pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
+/// `HVALS key` — every value of a hash, in no particular order.
+pub(crate) fn hash_values(addr: &str, key: &str) -> Result<Vec<String>, String> {
     let mut stream = redis_connect(addr)?;
     stream
-        .write_all(&resp_command(&["SMEMBERS", key]))
+        .write_all(&resp_command(&["HVALS", key]))
         .map_err(|e| format!("write: {e}"))?;
     read_array_reply(&mut BufReader::new(stream))
+}
+
+/// `HGET key field` — one field of a hash, or None when the key or the field
+/// is absent.
+pub(crate) fn hash_get(addr: &str, key: &str, field: &str) -> Result<Option<String>, String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HGET", key, field]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_bulk_reply(&mut BufReader::new(stream))
+}
+
+/// `HSET key field value` — set one field of a hash, creating the hash.
+pub(crate) fn hash_set(addr: &str, key: &str, field: &str, value: &str) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HSET", key, field, value]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_integer_reply(&mut BufReader::new(stream)).map(|_| ())
 }
 
 /// `LRANGE key 0 -1` — the whole list, in insertion order.
@@ -3014,7 +3093,7 @@ fn read_reply_line(reader: &mut impl BufRead) -> Result<String, String> {
 }
 
 /// Find `name` in an `a=b&c=d` query string and percent-decode its value.
-fn query_param(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
         (k == name).then(|| percent_decode(v))
@@ -3167,8 +3246,27 @@ pub(crate) fn eval_expression_endpoint(
 /// dispatched: it reads what `GET /result/<ticket>` reads until that stops
 /// saying `pending`.
 pub(crate) fn wait_ticket(config: &Config, ticket: &str) -> Result<Vec<u8>, HttpError> {
+    // A READ THAT FAILS IS RETRIED, for a while: the work goes on without this
+    // waiter, and redis stalls under load (a fork for BGSAVE, a slow AOF fsync)
+    // past REDIS_TIMEOUT. Giving up at the first one ended a ten-minute suite
+    // run whose job was still going.
+    let mut failing_since: Option<std::time::Instant> = None;
     loop {
-        let state = expression_result(config, ticket)?;
+        let state = match expression_result(config, ticket) {
+            Ok(state) => {
+                failing_since = None;
+                state
+            }
+            Err(e) if e.status() == 500 => {
+                let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > std::time::Duration::from_secs(60) {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let state = String::from_utf8_lossy(&state).trim().to_string();
         if let Some(answer) = state.strip_prefix("ok ") {
             return Ok(format!("{answer}\n").into_bytes());
@@ -3181,11 +3279,98 @@ pub(crate) fn wait_ticket(config: &Config, ticket: &str) -> Result<Vec<u8>, Http
     }
 }
 
-/// Evaluations running in THIS process. A ticket recorded `pending` that is not
-/// in here belonged to a server that has since died.
+/// Evaluations running in THIS process.
+///
+/// NOT THE WHOLE ANSWER TO "IS IT RUNNING?". A ticket's state is in redis, and
+/// redis is shared by every server of one cache namespace: every dev stack of
+/// one build on a host is one (dev/stack-up), which is what a busy host running
+/// several sessions' suites of the same commit has. A ticket recorded `pending`
+/// that is not in here may be running on one of THOSE. Reading that as "the
+/// server restarted" failed calls that were fine (tests/expression-http,
+/// tests/std-files, and tests/tracing's retry), and only where more than one
+/// stack shared the redis, so never on a laptop. So `pending` names the server
+/// that owns it ([`server_instance`]), and every server that owns tickets holds
+/// a lease in redis ([`hold_lease`]): a pending ticket is dead only when its
+/// owner is neither this process nor a server whose lease is current.
 fn live_tickets() -> &'static Mutex<HashSet<String>> {
     static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// This server process's name as a ticket owner: random, so a restarted server
+/// is a different owner from the one that died.
+fn server_instance() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        let random = std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes));
+        if random.is_err() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            bytes = (nanos ^ ((std::process::id() as u128) << 64)).to_le_bytes();
+        }
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// How long an owner's lease lasts, and how often it is renewed. A server that
+/// dies is noticed within `TICKET_LEASE_SECS`; one that lives renews well
+/// inside it, so a slow redis round trip cannot expire it.
+const TICKET_LEASE_SECS: u64 = 30;
+const TICKET_LEASE_RENEW: Duration = Duration::from_secs(10);
+
+fn lease_key(instance: &str) -> String {
+    format!("caos:ticket-owner:{instance}")
+}
+
+/// Take this server's lease, and keep it for the life of the process. Taken
+/// once, synchronously, before the first ticket is recorded as ours, so a peer
+/// never sees one of our tickets without our lease.
+fn hold_lease(config: &Config) {
+    static HELD: OnceLock<()> = OnceLock::new();
+    HELD.get_or_init(|| {
+        let addr = config.redis_addr.clone();
+        let renew = |addr: &str| {
+            let key = lease_key(server_instance());
+            if let Err(e) = cache_set_ex(addr, &key, "1", TICKET_LEASE_SECS) {
+                eprintln!("ticket lease {key}: {e}");
+            }
+        };
+        renew(&addr);
+        let spawned = std::thread::Builder::new()
+            .name("ticket-lease".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(TICKET_LEASE_RENEW);
+                renew(&addr);
+            });
+        if let Err(e) = spawned {
+            eprintln!("ticket lease: cannot start its renewer: {e}");
+        }
+    });
+}
+
+/// The owner a ticket state names if it is pending: `pending <instance>`, or
+/// the empty owner for a bare `pending` (written by a server from before
+/// owners, so nobody can vouch for it).
+fn pending_owner(state: &str) -> Option<&str> {
+    if state == "pending" {
+        return Some("");
+    }
+    state.strip_prefix("pending ")
+}
+
+/// Whether `owner` is ANOTHER server that is alive now. This process's own
+/// tickets are [`live_tickets`]'s business, not the lease's.
+fn peer_alive(config: &Config, owner: &str) -> bool {
+    !owner.is_empty()
+        && owner != server_instance()
+        && matches!(
+            cache_get(&config.redis_addr, &lease_key(owner)),
+            Ok(Some(_))
+        )
 }
 
 fn ticket_key(config: &Config, ticket: &str) -> String {
@@ -3354,9 +3539,22 @@ fn start_work(
             if state.starts_with("ok ") {
                 return Ok(());
             }
+            // Running on a peer that shares this redis: join it, as a second
+            // start joins one running here. Overwriting its `pending` with ours
+            // is check-then-act across processes: if the peer finishes in
+            // between, its answer is replaced by a pending one its own waiters
+            // cannot account for.
+            if pending_owner(&state).is_some_and(|owner| peer_alive(config, owner)) {
+                return Ok(());
+            }
         }
-        cache_set(&config.redis_addr, &key, "pending")
-            .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
+        hold_lease(config);
+        cache_set(
+            &config.redis_addr,
+            &key,
+            &format!("pending {}", server_instance()),
+        )
+        .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
         live.insert(ticket.to_string());
     }
     let guard = TicketGuard {
@@ -3395,13 +3593,36 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
     if ticket.len() != 40 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(HttpError::new(400, format!("invalid ticket: {ticket:?}")));
     }
-    let state = cache_get(&config.redis_addr, &ticket_key(config, ticket))
-        .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
-        .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))?;
-    let state = if state == "pending" && !live_tickets().lock().unwrap().contains(ticket) {
-        "failed 500 the server restarted before this finished; start it again".to_string()
-    } else {
-        state
+    let read = || {
+        cache_get(&config.redis_addr, &ticket_key(config, ticket))
+            .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
+            .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))
+    };
+    let state = read()?;
+    // What callers read is a bare `pending`: the owner is the servers' business.
+    let state = match pending_owner(&state) {
+        None => state,
+        Some(owner) => {
+            // Its own statement, so the lock is not held across the lease read.
+            let here = live_tickets().lock().unwrap().contains(ticket);
+            if here || peer_alive(config, owner) {
+                "pending".to_string()
+            } else {
+                // READ AGAIN before calling it dead: a ticket of this server's
+                // that finished between the read above and the look at
+                // `live_tickets` has left the set, and TicketGuard records the
+                // outcome before it leaves, so the second read has it. One read
+                // answered a call that had just succeeded as a restart (seen
+                // failing tests/mcp-serve in a loaded suite run).
+                let again = read()?;
+                if pending_owner(&again).is_none() {
+                    again
+                } else {
+                    "failed 500 the server restarted before this finished; start it again"
+                        .to_string()
+                }
+            }
+        }
     };
     Ok(format!("{state}\n").into_bytes())
 }
@@ -3429,6 +3650,17 @@ mod expression_tests {
             "base%3A%40%40=github%3Ao%2Fr%3Frev%3Dabc&msg=a%20b%3Dc",
         );
         assert_eq!(e.args, vec!["--base:@@=github:o/r?rev=abc", "--msg=a b=c"]);
+    }
+
+    #[test]
+    fn a_pending_ticket_names_its_owner() {
+        assert_eq!(pending_owner("pending"), Some(""));
+        assert_eq!(pending_owner("pending 0a1b"), Some("0a1b"));
+        assert_eq!(pending_owner("ok tree abc"), None);
+        assert_eq!(pending_owner("failed 500 pending"), None);
+        // One name for the life of the process, 128 random bits in hex.
+        assert_eq!(server_instance().len(), 32);
+        assert_eq!(server_instance(), server_instance());
     }
 
     #[test]
@@ -3807,9 +4039,49 @@ mod continuation_shape_tests {
             has_run,
             has_request,
             false,
+            false,
             has_then,
             catch,
         )
+    }
+
+    /// The `ref` middle step (`caos ref-then`): exclusive with the others,
+    /// carries no `in`, and a `catch` needs a `then`.
+    fn ref_shape(
+        has_input: bool,
+        has_other_middle: bool,
+        has_then: bool,
+        catch: bool,
+    ) -> Result<(), HttpError> {
+        validate_continuation_shape(
+            "test-continuation",
+            has_input,
+            has_other_middle,
+            false,
+            false,
+            false,
+            true,
+            has_then,
+            catch,
+        )
+    }
+
+    #[test]
+    fn ref_waits_on_a_name_and_obeys_the_middle_step_rules() {
+        ref_shape(false, false, false, false).unwrap();
+        ref_shape(false, false, true, true).unwrap();
+        assert!(ref_shape(true, false, true, false)
+            .unwrap_err()
+            .message()
+            .contains("both 'ref' and 'in'"));
+        assert!(ref_shape(false, true, true, false)
+            .unwrap_err()
+            .message()
+            .contains("mutually exclusive"));
+        assert!(ref_shape(false, false, false, true)
+            .unwrap_err()
+            .message()
+            .contains("without 'then'"));
     }
 
     /// The `eval` middle step obeys the same shape rules as `run`: exclusive
@@ -3827,6 +4099,7 @@ mod continuation_shape_tests {
             false,
             false,
             true,
+            false,
             has_then,
             catch,
         )

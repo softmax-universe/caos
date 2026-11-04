@@ -50,7 +50,7 @@ advertises a private address and makes every client fall back to an iroh relay
 ## What the machine needs first
 
 * **A NixOS EC2 instance.** Any recent NixOS AMI.
-* **A data volume labelled `caos-data`.** It carries docker's `data-root`, the
+* **A data volume labeled `caos-data`.** It carries docker's `data-root`, the
   registry, redis and the server's git repo; without it they land on the small
   root disk. Label it once — this **erases** that disk:
 
@@ -76,7 +76,11 @@ later. `journalctl -u caosd` shows "the caos-stack container exited".
 systemctl status caosd          # the stack
 journalctl -u caosd             # why it did not start
 sudo cat /data/caos/stack/iroh/ticket
+sudo -u caos caosd doctor       # is every stored object's history stored?
 ```
+
+`caosd doctor` reads every object in the store: about 14 minutes on 1.38M
+loose objects (2026-11-10). It is read-only and runs beside the live stack.
 
 The ticket is the one string a client needs, and it survives restarts:
 
@@ -133,7 +137,7 @@ all of it are code in metta, `devops/tf/datadog-monitors/caos_monitors.tf`,
 tagged `service:caos`.
 
 Response is `caos-watchdog respond`, a daemon that polls those monitors.
-When any alert, it posts to Slack #proj-caos at once (no model in that path),
+When any alert, it posts to Slack #alerts-caos at once (no model in that path),
 waits 90 s for the rest of the storm, then runs ONE Claude Code session over
 the whole set with `watchdog/runbook/CLAUDE.md` as its instructions. The
 session reaches the host only through `caos-watchdog ssh`, which refuses

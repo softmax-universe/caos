@@ -32,8 +32,13 @@
 #      tree's full `.caos-expr` chain, which is "exactly right for an image
 #      locator" like this one (rust/crates/caos-cli/src/mcp/session_base.rs's
 #      own words -- it was only wrong for THAT module's different purpose,
+<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
 #      resolving a conversation's raw content commit, not an image). So
 #      `:@@=github:softmax-universe/caos-session?rev=<sha>&dir=caos-std/llm-step`
+=======
+#      resolving a session's raw content commit, not an image). So
+#      `:@@=github:Metta-AI/caos-session?rev=<sha>&dir=caos-std/llm-step`
+>>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
 #      lets the evaluation mount caos's std/ from caos-session's OWN
 #      flake.lock pin itself, exactly like Claude Code's own
 #      `--llm-step:@=caos-std/llm-step` does for a local checkout -- no
@@ -167,14 +172,18 @@ else
     exit 1
 fi
 
-# The server is an argument, not an environment variable. Without one the tool
-# server still starts and `help` says what is missing.
+# The server is an argument, not an environment variable: the client's global
+# --server, which goes BEFORE `mcp`. Without one the tool server still starts and
+# `help` says what is missing.
 server_arg=()
 if resolved "${CAOS_MCP_DEFAULT_SERVER:-}"; then
     server_arg=("--server=$CAOS_MCP_DEFAULT_SERVER")
 fi
-# The reader keys too: without them every tool runs with no secret granted.
+# The reader keys too, after `mcp`: without them every tool runs with no secret
+# granted.
+reader_arg=()
 if resolved "${CAOS_SECRET_READERS:-}"; then
-    server_arg+=("--secret-readers=$CAOS_SECRET_READERS")
+    reader_arg=("--secret-readers=$CAOS_SECRET_READERS")
 fi
-exec "$bin" mcp serve ${server_arg[@]+"${server_arg[@]}"} "$llm_step"
+exec "$bin" ${server_arg[@]+"${server_arg[@]}"} mcp serve \
+    ${reader_arg[@]+"${reader_arg[@]}"} "$llm_step"

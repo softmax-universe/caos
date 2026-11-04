@@ -94,7 +94,9 @@ runner=$!
 # identically, which costs a whole debugging round trip to tell apart.
 poll() { # <jq-predicate> <what>
   local i=0
-  while [ "$i" -lt 60 ]; do
+  # A queue, not a latency (AGENTS.md, "A salted suite queues"): what is
+  # polled for is a job reaching a runner on a busy host.
+  while [ "$i" -lt 600 ]; do
     if "$CAOS_CLI" status "$req" > live.json 2> live.err; then
       if [ -s live.json ] && jq -e "$1" live.json > /dev/null 2>&1; then
         return 0

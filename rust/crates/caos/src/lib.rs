@@ -9,7 +9,7 @@
 //! Everything that doesn't depend on *how* objects move — the object model,
 //! currying, args-tree assembly, CAS materialization, image import — lives here,
 //! written against the [`Transport`] trait. The worker picks [`HttpTransport`];
-//! host clients use [`GitTransport`]. Conversation semantics and presentation
+//! host clients use [`GitTransport`]. Session semantics and presentation
 //! live in the separate `caos-cli` crate.
 //!
 //! Every materialized path is tagged with the git hash it came from in the
@@ -64,8 +64,8 @@ pub use eval::cli_eval_path;
 /// say — `caos-cli get <hash> <path>` checks it out.
 ///
 /// Conventions on the result: a BLOB result is printed verbatim (a tool whose
-/// answer is text, like `test-result`), and a `report` file is printed (a
-/// FAILED banner fails the command). Everything else just gets the printed
+/// answer is text, like `test-result`), and a `stdout` file is printed (a
+/// `failed` marker fails the command). Everything else just gets the printed
 /// result hash. Exactly what an agent is shown for the same call — the report
 /// is the tool's whole answer to both, so neither reader sees more than the
 /// other.
@@ -114,7 +114,16 @@ pub fn cli_run_tool(t: &dyn Transport, args: &[String]) -> Result<(), String> {
     // gets the tree under test and builds from source; handing it prebuilt host
     // binaries would couple every invocation to the deploy and let the suite
     // pass against something other than the tree it was given.
-    let mut all: Vec<String> = vec!["--in:@=.".to_string()];
+    //
+    // The worktree is `root` (design/tool-contract.md, "The argument") unless
+    // the caller names one.
+    let names_root = kvs
+        .iter()
+        .any(|kv| kv.starts_with("--root=") || kv.starts_with("--root:"));
+    let mut all: Vec<String> = Vec::new();
+    if !names_root {
+        all.push("--root:@=.".to_string());
+    }
     all.extend(kvs.iter().cloned());
     let (kind, result) = run_request(t, &base, None, &all, &Secrets::current())?;
     // The result's identity, on stdout, so a script can thread it onward — the
@@ -125,8 +134,8 @@ pub fn cli_run_tool(t: &dyn Transport, args: &[String]) -> Result<(), String> {
 }
 
 /// Print a tool result's report conventions, reading ONLY the objects they
-/// name: the top tree and a `report` blob, or the result itself when it is one.
-/// A tool with no `report` (`build` returns an image) costs exactly one object.
+/// name: the top tree and its `stdout` blob, or the result itself when it is one.
+/// A tool with no `stdout` (`build` returns an image) costs exactly one object.
 fn report_conventions(t: &dyn Transport, name: &str, result: &str) -> Result<(), String> {
     let Some(entries) = fetch_tree_entries(t, result)? else {
         // Not a tree: the tool's whole answer IS the blob. Print it — the same
@@ -148,17 +157,17 @@ fn report_conventions(t: &dyn Transport, name: &str, result: &str) -> Result<(),
             .find(|e| entry_name(e) == want.as_bytes())
             .map(|e| e.oid.to_string())
     };
-    let Some(report) = find(&entries, "report") else {
+    let Some(stdout) = find(&entries, "stdout") else {
         return Ok(());
     };
-    // The report is printed verbatim, so read the blob rather than
+    // `stdout` is printed verbatim, so read the blob rather than
     // fetch_blob_string (which trims).
-    let (_, text) = t.get_object(&report)?;
-    let text = String::from_utf8(text).map_err(|_| format!("{name}'s report is not UTF-8"))?;
+    let (_, text) = t.get_object(&stdout)?;
+    let text = String::from_utf8(text).map_err(|_| format!("{name}'s stdout is not UTF-8"))?;
     eprintln!();
     eprint!("{text}");
 
-    // THE REPORT IS THE WHOLE OUTPUT. There used to be a second pass here that
+    // `stdout` IS THE WHOLE OUTPUT. There used to be a second pass here that
     // walked `results/<rec>` and dumped the full `output` of every record whose
     // verdict wasn't a PASS. Once the report itself carried each failure's tail
     // and its record hash, that printed the same failure twice — and, worse,
@@ -166,8 +175,8 @@ fn report_conventions(t: &dyn Transport, name: &str, result: &str) -> Result<(),
     // callers is that a tool cannot behave differently depending on who ran it.
     // The full output is one `run-tool caos-test-result <hash>` away, which the
     // report says.
-    if text.contains("FAILED") {
-        return Err(format!("{name} reported FAILED"));
+    if find(&entries, "failed").is_some() {
+        return Err(format!("{name} failed"));
     }
     Ok(())
 }
@@ -275,12 +284,12 @@ pub fn cli_watch(t: &dyn Transport, ticket: &str) -> Result<(), String> {
 pub const SERVER_ENV: &str = "CAOS_SERVER_URL";
 
 /// What a request presents for secrets (SPEC, "Secrets"): SecretReaderKeys,
-/// and the conversation it is for. Sent as headers, never in an ArgTree — a
+/// and the session it is for. Sent as headers, never in an ArgTree — a
 /// key is a credential.
 #[derive(Clone, Debug, Default)]
 pub struct Secrets {
     readers: Vec<String>,
-    conversation: Option<String>,
+    session: Option<String>,
 }
 
 static SECRET_READERS: OnceLock<Vec<String>> = OnceLock::new();
@@ -292,19 +301,19 @@ pub fn set_secret_readers(keys: Vec<String>) {
 }
 
 impl Secrets {
-    /// This process's SecretReaderKeys, for no particular conversation.
+    /// This process's SecretReaderKeys, for no particular session.
     pub fn current() -> Secrets {
         Secrets {
             readers: SECRET_READERS.get().cloned().unwrap_or_default(),
-            conversation: None,
+            session: None,
         }
     }
 
-    /// The same keys, for conversation `id`.
-    pub fn for_conversation(&self, id: &str) -> Secrets {
+    /// The same keys, for session `id`.
+    pub fn for_session(&self, id: &str) -> Secrets {
         Secrets {
             readers: self.readers.clone(),
-            conversation: Some(id.to_string()),
+            session: Some(id.to_string()),
         }
     }
 
@@ -317,11 +326,9 @@ impl Secrets {
         if !self.readers.is_empty() {
             headers.push((caos_world::secrets::READERS_HEADER, self.readers.join(" ")));
         }
-        if let Some(conversation) = &self.conversation {
-            headers.push((
-                caos_world::secrets::CONVERSATION_HEADER,
-                conversation.clone(),
-            ));
+        if let Some(session) = &self.session {
+            headers.push((caos_world::secrets::SESSION_HEADER, session.clone()));
+            headers.push((caos_world::secrets::LEGACY_SESSION_HEADER, session.clone()));
         }
         headers
     }
@@ -563,6 +570,35 @@ pub fn check_server_reachable(url: &str) -> Result<(), String> {
 /// caos <url>`). Push/fetch use it.
 pub const CAOS_REMOTE: &str = "caos";
 
+/// A server URL that replaces the `caos` remote for this whole process: what
+/// `caos-cli --server=<url> <command> ...` sets, before any transport exists.
+///
+/// Process-wide rather than threaded through each command, because the flag
+/// applies to every command and transports are opened in many places (the
+/// tui, its launcher, `secrets-push`), each by discovering the checkout. A
+/// transport reads it once, when it is opened ([`GitTransport::discover`]).
+static SERVER_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+/// Make every transport this process opens talk to `url` instead of the
+/// checkout's `caos` remote. Git takes a URL wherever it takes a remote name,
+/// and every push, fetch and `ls-remote` names its refspecs explicitly, so the
+/// URL stands in for the remote with no configuration written to the repo.
+/// Set once; a second call is an error rather than a silent switch.
+pub fn set_server_override(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("--server needs a URL".to_string());
+    }
+    SERVER_OVERRIDE
+        .set(url.to_string())
+        .map_err(|_| "the server is already set for this process".to_string())
+}
+
+/// The override [`set_server_override`] installed, if any.
+pub fn server_override() -> Option<&'static str> {
+    SERVER_OVERRIDE.get().map(String::as_str)
+}
+
 /// Transport over the server as a `caos` git remote, used by `caos-cli`. Objects
 /// are built in the local working repo (cheap, in-process via gix) and exchanged
 /// with the server by negotiated git push/fetch — so a large unchanged tree costs
@@ -582,6 +618,9 @@ pub struct GitTransport {
     /// Keeping it here prevents a transport from silently switching repos if
     /// the process working directory changes after discovery.
     work_dir: PathBuf,
+    /// What git is told to push to and fetch from: the `caos` remote's name,
+    /// or the URL of a [`set_server_override`] in force when this was opened.
+    remote: String,
 }
 
 impl GitTransport {
@@ -606,16 +645,24 @@ impl GitTransport {
             })?
             .canonicalize()
             .map_err(|e| format!("resolving the git working tree: {e}"))?;
+        let remote = server_override().unwrap_or(CAOS_REMOTE).to_string();
         Ok(Self {
             repo,
             git_dir,
             work_dir,
+            remote,
         })
     }
 
     /// The worktree this transport and its subprocess Git commands operate on.
     pub fn work_dir(&self) -> &Path {
         &self.work_dir
+    }
+
+    /// The remote argument for this transport's Git network commands: the
+    /// `caos` remote's name, or the `--server` URL that overrides it.
+    pub fn remote(&self) -> &str {
+        &self.remote
     }
 
     /// Verify that the configured CAOS server accepts connections.
@@ -626,11 +673,16 @@ impl GitTransport {
     /// low-level Git transport error into one concise diagnosis.
     pub fn ensure_server_reachable(&self) -> Result<(), String> {
         let url = self.server_url()?;
+        let overridden = self.remote != CAOS_REMOTE;
         check_server_reachable(&url).map_err(|error| {
-            format!(
-                "{error}\n\
-                 check that it is running and that the `{CAOS_REMOTE}` git remote points to the right URL"
-            )
+            if overridden {
+                format!("{error}\ncheck that it is running and that --server names the right URL")
+            } else {
+                format!(
+                    "{error}\n\
+                     check that it is running and that the `{CAOS_REMOTE}` git remote points to the right URL"
+                )
+            }
         })
     }
 
@@ -673,9 +725,9 @@ impl GitTransport {
     /// reproduction above, not by that measurement.
     ///
     /// Processes, not threads, so the claim is a file. Bounded, and a stale claim
-    /// is ignored rather than honoured — a killed pusher must not park every
+    /// is ignored rather than honored — a killed pusher must not park every
     /// later one — and if the wait runs out we push anyway, which is exactly the
-    /// behaviour this replaces.
+    /// behavior this replaces.
     fn with_push_claim<T>(&self, hash: &str, body: impl FnOnce() -> T) -> T {
         /// Long enough to cover a large first push over a relayed path (measured:
         /// 300 MB in 4m56s), because waiting out the winner is strictly cheaper
@@ -907,10 +959,14 @@ impl Transport for GitTransport {
         // The `caos` remote's URL *is* the server: the CLI already pushes/fetches
         // objects there, and /run lives at the same host. So a person configures
         // the server once (`git remote add caos <url>`) and never sets an env var.
+        // `--server=<url>` replaces it for one invocation.
+        if self.remote != CAOS_REMOTE {
+            return Ok(self.remote.clone());
+        }
         let remote = self.repo.find_remote(CAOS_REMOTE).map_err(|e| {
             format!(
                 "no `{CAOS_REMOTE}` git remote (add it with \
-                 `git remote add {CAOS_REMOTE} <server-url>`): {e}"
+                 `git remote add {CAOS_REMOTE} <server-url>`, or pass `--server=<url>`): {e}"
             )
         })?;
         let url = remote
@@ -1129,7 +1185,7 @@ impl GitTransport {
         // whatever actually defeated the retries, which is the only interesting
         // one (it cost a debugging session — the visible error said "reference
         // already exists" while the real failure was unknown).
-        Err(format!("pushing {hash} to {CAOS_REMOTE}: {last}"))
+        Err(format!("pushing {hash} to {}: {last}", self.remote()))
     }
 
     fn push_req_ref(&self, hash: &str) -> Result<(), String> {
@@ -1166,7 +1222,7 @@ impl GitTransport {
         // proceeding anyway` and the full closure back.
         let negotiate = self.is_commit_object(hash);
         let mut args: Vec<&str> = push_negotiation_args(negotiate);
-        args.extend(["push", "--porcelain", "--progress", CAOS_REMOTE, &refspec]);
+        args.extend(["push", "--porcelain", "--progress", self.remote(), &refspec]);
 
         let started = std::time::Instant::now();
         let outcome = self.git_capture_stderr(&args);
@@ -1254,7 +1310,7 @@ impl GitTransport {
     ///
     /// Read from the odb rather than shelled out, and false for anything it
     /// cannot answer: the only caller uses it to decide whether to negotiate, so
-    /// an uncertain answer must mean "don't", which is today's behaviour.
+    /// an uncertain answer must mean "don't", which is today's behavior.
     fn is_commit_object(&self, hash: &str) -> bool {
         parse_oid(hash)
             .ok()
@@ -1389,10 +1445,10 @@ impl GitTransport {
             "fetch",
             "--quiet",
             "--no-write-fetch-head",
-            CAOS_REMOTE,
+            self.remote(),
             hash,
         ])
-        .map_err(|e| format!("fetching {hash} from {CAOS_REMOTE}: {e}"))
+        .map_err(|e| format!("fetching {hash} from {}: {e}", self.remote()))
     }
 
     /// Fetch object `hash` like [`Self::fetch_object`], but negotiate with `tip`
@@ -1417,10 +1473,10 @@ impl GitTransport {
             "--no-write-fetch-head",
             "--negotiation-tip",
             tip,
-            CAOS_REMOTE,
+            self.remote(),
             hash,
         ])
-        .map_err(|e| format!("fetching {hash} from {CAOS_REMOTE}: {e}"))
+        .map_err(|e| format!("fetching {hash} from {}: {e}", self.remote()))
     }
 }
 
@@ -3244,7 +3300,7 @@ pub use git_locator::{parse_git_ref, GitRef};
 /// ssh-vs-https key identical content differently. That is still exactly where
 /// this happens; only the process doing the fetching moved. What moving it buys
 /// is the case that had no client at all: an agent's tree is evaluated
-/// server-side, so a conversation whose root expression pins caos used to die on
+/// server-side, so a session whose root expression pins caos used to die on
 /// its own repository (`eval_path ./caos-std`), and `caos mcp serve` had to
 /// pre-resolve tool paths on the session's disk to work around it.
 ///
@@ -3559,7 +3615,7 @@ pub fn prepare_client_request_granted(
 /// Prepare and synchronously run one host-side request presenting `secrets`.
 /// This is the non-streaming client equivalent of [`cli_run`], for callers
 /// that need the result identity rather than CLI output handling. Durable
-/// conversation turns deliberately use the split prepare and compute APIs
+/// session turns deliberately use the split prepare and compute APIs
 /// instead so they can record the request before dispatching it.
 pub fn run_client_request_with_secrets(
     t: &dyn Transport,
@@ -3866,6 +3922,256 @@ pub fn caos_sub_run(t: &dyn Transport, arg_tree: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How a missing ref is spelled by `ref-get`, `ref-set` and `ref-then` (and by
+/// `push-git --expected`): the server's `refs::ABSENT`.
+pub const REF_ABSENT: &str = "absent";
+
+/// The one ref namespace a worker may read and write; the server refuses the
+/// rest (`refs/keys/` is its secret store). Checked here too, so a typo fails
+/// in the worker that made it rather than as a 400 from far away.
+pub const REF_PREFIX: &str = "refs/heads/";
+
+fn check_ref_name(verb: &str, name: &str) -> Result<(), String> {
+    if name.starts_with(REF_PREFIX) && name.len() > REF_PREFIX.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{verb}` takes a ref under {REF_PREFIX}, got {name:?}"
+        ))
+    }
+}
+
+/// A ref value as given on a command line: a lowercase 40-character hash or
+/// [`REF_ABSENT`].
+fn check_ref_value(verb: &str, what: &str, value: &str) -> Result<(), String> {
+    if value == REF_ABSENT
+        || (value.len() == 40
+            && value
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{verb}` wants {what} to be a lowercase 40-character hash or {REF_ABSENT:?}, got {value:?}"
+        ))
+    }
+}
+
+/// The commit recorded at a CAS path (a `put-commit` or `ref-get` result, a
+/// commit-valued arg), as a hash. How `ref-set` and `ref-then` read a
+/// `--<flag>:@=<cas path>`; a path holding anything but a commit is refused.
+fn cas_commit(verb: &str, flag: &str, path: &str) -> Result<String, String> {
+    let target = validate_descendant(&cas_dir(), path)
+        .map_err(|e| format!("`{verb}` --{flag}:@={path}: {e}"))?;
+    let kind = result_kind(&target)?;
+    if kind != "commit" {
+        return Err(format!(
+            "`{verb}` --{flag}:@={path} is a {kind}, but a ref names a commit (`put-commit` mints one, `ref-get` reads one)"
+        ));
+    }
+    read_hash(&target)
+}
+
+/// One of a ref verb's commit-valued flags, `--<flag>=<hash>` or
+/// `--<flag>:@=<cas path>` (the spellings `run` and `curry` use), as the value
+/// the server takes. `--<flag>=absent` is accepted only where `absent` says.
+/// `None` if `arg` is some other flag.
+fn ref_flag(verb: &str, flag: &str, absent: bool, arg: &str) -> Option<Result<String, String>> {
+    let rest = arg.strip_prefix("--")?.strip_prefix(flag)?;
+    if let Some(path) = rest.strip_prefix(":@=") {
+        return Some(cas_commit(verb, flag, path));
+    }
+    let value = rest.strip_prefix('=')?;
+    if let Err(e) = check_ref_value(verb, &format!("--{flag}"), value) {
+        return Some(Err(e));
+    }
+    if value == REF_ABSENT && !absent {
+        return Some(Err(format!(
+            "`{verb}` --{flag} takes a commit, not {REF_ABSENT:?}"
+        )));
+    }
+    Some(Ok(value.to_string()))
+}
+
+/// The exit status of `ref-get` on a ref that does not exist: not 0 (nothing
+/// was written) and not 1 (nothing broke).
+pub const REF_ABSENT_EXIT: u8 = 2;
+
+/// `ref-get <ref> <cas-path>` — record the commit the ref names at
+/// `<cas-path>`, a direct child of the CAS, kind-tagged `commit` the way
+/// `put-commit` records one: `hash` gives its id, `--name:@=` passes it on.
+///
+/// A MISSING REF IS NOT AN ERROR AND NOT A SUCCESS: nothing is written and the
+/// answer is `Ok(false)`, which the binary turns into exit status
+/// [`REF_ABSENT_EXIT`], so ABSENT and BROKEN (status 1) stay apart
+/// (AGENTS.md). Reading never waits; `ref-then` is how a worker waits for a
+/// ref to change, without holding its runner slot.
+pub fn caos_ref_get(t: &dyn Transport, args: &[String]) -> Result<bool, String> {
+    let [name, path] = args else {
+        return Err("usage: ref-get <ref> <cas-path>".to_string());
+    };
+    check_ref_name("ref-get", name)?;
+    let cas = cas_dir();
+    let target = validate_target(&cas, path)?;
+    probe_xattr(&cas)?;
+    let body = server_get(
+        &t.server_url()?,
+        &format!("/ref?name={}", percent_encode(name)),
+    )?;
+    let value = String::from_utf8_lossy(&body).trim().to_string();
+    if value == REF_ABSENT {
+        return Ok(false);
+    }
+    check_ref_value("ref-get", "the server's answer", &value)?;
+    write_placeholder(&target, "commit", &value)?;
+    Ok(true)
+}
+
+const REF_SET_USAGE: &str = "usage: ref-set <ref> (--new=<hash> | --new:@=<cas-path> | --delete)
+         (--expected=<hash|absent> | --expected:@=<cas-path> | --force)";
+
+/// `ref-set <ref> (--new=<hash> | --new:@=<cas-path> | --delete)
+/// (--expected=<hash|absent> | --expected:@=<cas-path> | --force)` — move a
+/// ref to a commit, or delete it.
+///
+/// A COMMIT IS GIVEN AS A HASH (`=`) OR AS THE CAS PATH IT IS RECORDED AT
+/// (`:@=`), the spellings `run` and `curry` use. So the commit `put-commit`
+/// just minted and the head `ref-get` just read pass straight through, and a
+/// script need never handle a hash.
+///
+/// A COMPARE-AND-SWAP BY DEFAULT: `--expected` names the value being replaced
+/// (`absent` for create-only) and the server checks it under the ref's lock.
+/// An unconditional write has to say `--force`, so leaving the expectation out
+/// is an error rather than a silent overwrite. A lost race fails with the
+/// value the ref actually holds. The new commit must already be in the store.
+pub fn caos_ref_set(t: &dyn Transport, args: &[String]) -> Result<(), String> {
+    let mut name: Option<&str> = None;
+    let mut new: Option<String> = None;
+    let mut expected: Option<String> = None;
+    let mut force = false;
+    for arg in args {
+        let value = if arg == "--delete" {
+            Some(REF_ABSENT.to_string())
+        } else {
+            ref_flag("ref-set", "new", false, arg).transpose()?
+        };
+        if let Some(value) = value {
+            if new.replace(value).is_some() {
+                return Err("`ref-set` takes one --new or --delete".to_string());
+            }
+        } else if let Some(value) = ref_flag("ref-set", "expected", true, arg) {
+            if expected.replace(value?).is_some() {
+                return Err("`ref-set` --expected given twice".to_string());
+            }
+        } else if arg == "--force" {
+            force = true;
+        } else if arg.starts_with("--") || name.replace(arg.as_str()).is_some() {
+            return Err(format!("`ref-set` does not take {arg:?}\n{REF_SET_USAGE}"));
+        }
+    }
+    let (Some(name), Some(new)) = (name, new) else {
+        return Err(REF_SET_USAGE.to_string());
+    };
+    check_ref_name("ref-set", name)?;
+    let mut body = serde_json::json!({"name": name, "value": new});
+    match (expected, force) {
+        (Some(_), true) => {
+            return Err("`ref-set` takes --expected or --force, not both".to_string())
+        }
+        (None, false) => {
+            return Err(format!(
+                "`ref-set` needs --expected (a compare-and-swap) or --force (an unconditional write)\n{REF_SET_USAGE}"
+            ))
+        }
+        (Some(old), false) => body["expected"] = serde_json::Value::String(old),
+        (None, true) => {}
+    }
+    let body = body.to_string();
+    server_call(
+        &t.server_url()?,
+        &ServerRequest {
+            method: "POST",
+            path: "/ref",
+            headers: &[("content-type", "application/json".to_string())],
+            body: Some(body.as_bytes()),
+            timeout_secs: Some(30),
+        },
+    )?;
+    Ok(())
+}
+
+/// The longest `ref-then --timeout` the server accepts (its `refs::MAX_WAIT_SECS`).
+pub const REF_MAX_WAIT_SECS: u64 = 24 * 60 * 60;
+
+/// `ref-then <ref> [--expected=<hash|absent> | --expected:@=<cas-path>]
+/// [--timeout=<secs>] [--then:<type>=<image>] [--catch]` — record a
+/// continuation that waits for `<ref>` to hold something other than
+/// `--expected` (default `absent`: wait for it to be set), then delivers the
+/// new value. `--expected:@=` names the commit by the CAS path it is recorded
+/// at, like `ref-set`'s: a `ref-get` result, or the `--result` an earlier
+/// `ref-then` delivered, to wait for the change after that one.
+///
+/// THE WAITING IS THE SERVER'S. Like every continuation this is the worker's
+/// final act: it exits, its runner slot is free, and the server's promise
+/// interpreter blocks a request thread on the ref instead. A worker that
+/// polled with `ref-get` in a loop would hold its slot while the writer it is
+/// waiting for may be queued for one — the hold-and-wait design/map-then.md
+/// rules out.
+///
+/// The new commit reaches `--then` as `--result`, a commit entry exactly like
+/// what `ref-get` records, so the callback reads `/cas/args/result` as it
+/// would any commit-valued arg. A ref DELETED while it was waited on (only
+/// possible when `--expected` names a commit) arrives instead as a bare
+/// `--absent` flag and no `--result`. With no `--then`, the commit is this
+/// request's result (an empty blob for a deletion). If `--timeout` (default
+/// 600s, at most a day) passes first the wait fails, and `--catch` delivers
+/// that failure to `--then` as `--error` instead. A request that waited on a
+/// ref is never cached: its answer depends on when it ran.
+pub fn caos_ref_then(t: &dyn Transport, name: &str, kvs: &[String]) -> Result<(), String> {
+    check_ref_name("ref-then", name)?;
+    // The continuation records `expected` verbatim, as a hash or `absent`, so
+    // a `--expected:@=<cas path>` is resolved to its commit's hash here.
+    let mut resolved = Vec::with_capacity(kvs.len());
+    for kv in kvs {
+        match ref_flag("ref-then", "expected", true, kv).transpose()? {
+            Some(value) => resolved.push(format!("--expected={value}")),
+            None => resolved.push(kv.clone()),
+        }
+    }
+    let kvs = &resolved[..];
+    for kv in kvs {
+        if let Some(value) = kv.strip_prefix("--timeout=") {
+            match value.parse::<u64>() {
+                Ok(seconds) if (1..=REF_MAX_WAIT_SECS).contains(&seconds) => {}
+                _ => {
+                    return Err(format!(
+                        "`ref-then --timeout` wants whole seconds from 1 to {REF_MAX_WAIT_SECS}, got {value:?}"
+                    ))
+                }
+            }
+        }
+    }
+    record_continuation(
+        t,
+        "ref-then",
+        ContinuationSubject::Ref(name),
+        kvs,
+        &["then"],
+        &["expected", "timeout"],
+        &["catch"],
+        |given| {
+            if given.contains(&"catch") && !given.contains(&"then") {
+                return Err(
+                    "`ref-then --catch` needs --then: the error has to be delivered somewhere"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        },
+    )
+}
+
 /// `trace-child <name> <arg-tree>` — record, under THIS job's trace record, that
 /// it started `arg-tree` under `name`.
 ///
@@ -3904,6 +4210,8 @@ pub fn caos_trace_child(t: &dyn Transport, name: &str, arg_tree: &str) -> Result
 enum ContinuationSubject<'a> {
     Input(&'a str),
     Request(&'a str),
+    /// The name of a ref to wait on (`ref-then`), recorded as a blob.
+    Ref(&'a str),
 }
 
 /// Shared body of [`caos_map_then`] / [`caos_run_then`] / [`caos_eval_then`] /
@@ -3984,6 +4292,12 @@ fn record_continuation(
                 oid,
             }
         }
+        // `ref` is the NAME of the ref to wait on: a string, not an object.
+        ContinuationSubject::Ref(name) => Entry {
+            mode: EntryKind::Blob.into(),
+            filename: b"ref".to_vec().into(),
+            oid: post_object(t, "blob", name.as_bytes())?,
+        },
     };
     let mut entries = vec![subject];
 
@@ -4290,7 +4604,7 @@ pub fn eval_cli_image_arg(
 }
 
 /// [`eval_cli_image`] presenting `secrets`, so the image comes back marked
-/// wherever a grant matches (SPEC, "Secrets"). Conversation setup uses this
+/// wherever a grant matches (SPEC, "Secrets"). Session setup uses this
 /// form: the step it resolves is what the model key is granted to.
 pub fn eval_cli_image_with(
     t: &dyn Transport,
@@ -4962,8 +5276,8 @@ fn parse_line_result(text: &str) -> Result<LineResult, String> {
 }
 
 /// The blob entries of the tree `hash`, by name, with their contents. Entries
-/// that are not blobs (subtrees, a conversation's gitlink) are left out, so a
-/// result that names a conversation can be read without fetching it.
+/// that are not blobs (subtrees, a session's gitlink) are left out, so a
+/// result that names a session can be read without fetching it.
 pub fn tree_blobs(
     t: &dyn Transport,
     hash: &str,
@@ -5110,7 +5424,7 @@ gpgsig -----BEGIN PGP SIGNATURE-----
         std::fs::create_dir_all(&cas).unwrap();
         let original = cas.join("original");
         get_hash(&t, &base, original.to_str().unwrap()).unwrap();
-        let root = dir.path().join("conversation");
+        let root = dir.path().join("session");
         std::fs::create_dir(&root).unwrap();
         std::os::unix::fs::symlink(&original, root.join("dirty")).unwrap();
         std::fs::write(root.join("memory"), "remember").unwrap();
@@ -5237,7 +5551,7 @@ gpgsig -----BEGIN PGP SIGNATURE-----
             merge
         );
 
-        // Ordinary conversation files are outside this cleanup rule.
+        // Ordinary session files are outside this cleanup rule.
         std::fs::create_dir(projection.join(".caos")).unwrap();
         std::fs::write(projection.join(".caos/conflicts"), "").unwrap();
         for remove_ledger in [false, true] {

@@ -14,8 +14,13 @@ tools a model calls are under `std/`.)
 ## Driving a cloud session at a test stack
 
 A worked pass from an agent session. Import caos's `main` once, UNEDITED, as
+<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
 `imports/caos/main` (`import_source` with `source=https://github.com/softmax-universe/caos`,
 `into=imports/caos/main`). That import is where you RUN the tools from. If you
+=======
+`imports/caos/main` (`caos-std/import-source` with `root=imports/caos`,
+`source=https://github.com/Metta-AI/caos`, `into=main`). That import is where you RUN the tools from. If you
+>>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
 are changing caos, `copy` it to `feature/<name>` and edit THAT: it is the tree
 under test, not the place the tools run.
 
@@ -49,6 +54,6 @@ under test, not the place the tools run.
   untouched.
 - Not understood yet: `harvest` returned `harvested=0` and `drive conv` found no
   head on the host server, even after a session had completed turns against the
-  stack. Do not rely on either to retrieve the conversation until that is
+  stack. Do not rely on either to retrieve the session until that is
   explained.
 - Clean up: `drive archive`, `drive env-delete`, then `caos-stack stop`.

@@ -24,6 +24,9 @@ pub(crate) struct Stored {
     pub(crate) entropy: String,
     pub(crate) value: String,
     pub(crate) readers: Vec<Reader>,
+    /// The trees the push approved: each tool a `reader:@@=` names, as the
+    /// server evaluated it when `secrets-push` asked, and any written by hand.
+    pub(crate) trees: Vec<String>,
 }
 
 /// `secrets.git` beside the main repository.
@@ -239,6 +242,7 @@ fn read_tree(dir: &str, tree: &str) -> Result<Vec<Stored>, String> {
             entropy: spec.entropy.unwrap_or_default(),
             value: blob(part(fmt::PUSHED_VALUE)?)?,
             readers: spec.readers,
+            trees: spec.trees,
         });
     }
     Ok(out)
@@ -335,7 +339,7 @@ mod tests {
         init(dir).unwrap();
         let key = "a".repeat(64);
 
-        let first = write_tree(dir, &[spec("gh", "reader:@=x conversation=c\n")]).unwrap();
+        let first = write_tree(dir, &[spec("gh", "reader:@=x session=c\n")]).unwrap();
         git(
             Some(dir),
             &["update-ref", &format!("refs/keys/{key}"), &first],

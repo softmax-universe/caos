@@ -37,7 +37,7 @@ printf '{"content":[{"text":"%s","type":"text"}],"stop_reason":"end_turn"}' \
   "$ASYNC_OBSERVED_TEXT" > /tmp/stub/response-3.json
 start_stub /tmp/stub
 
-new_llm_conversation llm-async "$STUB_PORT" "$ws" \
+new_llm_session llm-async "$STUB_PORT" "$ws" \
   "You are a coding agent operating on a git source_tree."
 
 stage "primary turn records pending work and becomes idle"
@@ -59,15 +59,18 @@ grep -qF "$task" /tmp/stub/request-2.json \
 
 wait_for_file /tmp/async-gate/request-1.json \
   || fail "independent worker never reached its barrier"
-[ "$(remote_tip "$conversation_ref")" = "$head1" ] \
-  || fail "conversation advanced while independent work was blocked"
+[ "$(remote_tip "$session_ref")" = "$head1" ] \
+  || fail "session advanced while independent work was blocked"
 
 stage "completion changes only the async record"
 printf '%s\n' '{"content":[],"stop_reason":"end_turn"}' > /tmp/async-gate/response-1.json
 completion_head=""
 seen=$head1
-for _ in $(seq 1 300); do
-  candidate=$(remote_tip "$conversation_ref")
+# A queue, not a latency (AGENTS.md, "A salted suite queues"): the completion is
+# a cold job that waits for a runner slot on a busy host. The loop leaves on
+# success, so the bound costs nothing on a healthy run.
+for _ in $(seq 1 1500); do
+  candidate=$(remote_tip "$session_ref")
   if [ "$candidate" != "$seen" ]; then
     seen=$candidate
     if $TOOL async --repo /tmp/repo --head "$candidate" --task "$task" \

@@ -72,13 +72,13 @@ inputs=""
 for a in "$@"; do
   case "$a" in
     --inputs=*) inputs=${a#--inputs=} ;;
-    *) fail "unrecognised argument: $a" ;;
+    *) fail "unrecognized argument: $a" ;;
   esac
 done
 [ -n "$inputs" ] || fail "stack-up needs --inputs=<dir>; the caller builds, this does not"
 
 state=/caos-dev
-[ -d "$state" ] || fail "no $state — this image must declare it in CAOS_GRANT_VOLUMES"
+[ -d "$state" ] || fail "no $state — this image must declare it in CAOS_GRANT_VOLUMES, and the job must carry --required-caosd=true (only the caosd runner grants volumes)"
 [ -f flake.nix ] || fail "no flake.nix in $PWD; run me from a materialized workspace"
 
 # ---- this stack's own corner of the shared volume ---------------------------
@@ -118,7 +118,7 @@ find "$state/runs" -mindepth 1 -maxdepth 1 -type d -mtime +2 \
 # its eval cache on the rev when a `.git` is present.
 #
 # `add -Af`: the tree is the truth. A caos `--in` carries what the client
-# pushed, so honouring the extracted `.gitignore` would drop real content.
+# pushed, so honoring the extracted `.gitignore` would drop real content.
 phase "git-init the workspace"
 if [ ! -d .git ]; then
   git init -q -b main
@@ -181,39 +181,46 @@ namespace=${namespace%%-*}
 # binary and where its store lives. The store is a granted volume so images
 # survive the container; otherwise every run would re-pull std.
 engine_store=/caos-images
-mkdir -p "$engine_store/store" "$engine_store/run"
+#
+# CONTAINER STATE IS THIS STACK'S OWN, AND IN MEMORY. A container's metadata
+# (podman's sqlite db, containers.json, the container layers' records) is
+# written and fsynced on every create, start and remove — ~55 fsyncs per job,
+# measured — and on the store's btrfs those fsyncs took up to 20s under a
+# suite's load, while podman held the store lock that every other container
+# start waits on: a trivial `podman run` went from 0.1s idle to a 0.7s median
+# and 4s p90. `--transient-store` keeps all of it under runroot instead, and a
+# runroot on tmpfs makes those fsyncs free. Images stay in the shared store; a
+# worker container never outlives this stack, so nothing is lost with it.
+engine_run=/dev/shm/caos-engine-run
+mkdir -p "$engine_store/store" "$engine_run"
 command -v podman >/dev/null 2>&1 || fail "no podman in this image"
 [ -e /dev/fuse ] || fail "no /dev/fuse — the image must declare CAOS_GRANT_DEVICES"
 
-# CONSOLIDATE THE SHARED REPO, but only when no peer can be reading it. The
-# repo gains one pack per push (a suite adds ~400), and every object read costs
-# more with each of them: at 8,000 packs the dev stack's server sat at 900% CPU
-# and the same suite went from 2.5 minutes to over an hour. gix's object store
-# is opened by every dev stack's server, and a repack REWRITES it, so doing it
-# with a peer alive is that peer's request thread panicking into a body-less 500
-# (the failure `gc.auto 0` exists to prevent, crates/server/src/main.rs).
+# EXPLODE THE SHARED REPO'S PACKS, but only when no peer can be reading it.
+# The server keeps every object loose and writes no packs
+# (design/loose-object-store.md), but a dev stack runs its own branch's build,
+# and one from before that adds a pack per push (a suite adds ~400). Every object
+# read costs more with each of them: at 8,000 packs the dev stack's server sat
+# at 900% CPU and the same suite went from 2.5 minutes to over an hour. gix's
+# object store is opened by every dev stack's server, and exploding REWRITES it,
+# so doing it with a peer alive is that peer's request thread panicking into a
+# body-less 500 (the failure `gc.auto 0` exists to prevent,
+# crates/server/src/main.rs).
 #
 # So the lock is the proof. Every stack holds $state/.users.lock SHARED for as
 # long as anything it started is alive (the fd is inherited by serve and its
-# children), and takes it EXCLUSIVE, without waiting, only to repack: success
+# children), and takes it EXCLUSIVE, without waiting, only to explode: success
 # means no other stack is up. Failure is fine and silent; the next stack that
-# starts alone does it.
-#
-# `--geometric=2`, not `-a`: it merges only the small recent packs, leaving the
-# big one alone, so a suite's worth is 0.5s where `-a` rewrites the whole repo
-# (12 min at 8,000 packs, 3-9 min at any size). It keeps unreachable objects,
-# which nearly every object here is, because it works from the packs and never
-# walks refs; 285,609 objects before and after, measured. It also packs loose
-# objects. No bitmaps or multi-pack-index come out of it, and neither is wanted:
-# gix's multi-pack-index path compares every pack's path against every other's
-# on each refresh and was slower than the 8,000 packs it replaced.
+# starts alone does it. stack/explode-packs says why it is crash-safe.
 exec 8>"$state/.users.lock"
 if flock -xn 8; then
-  if [ -d "$state/git/objects/pack" ]; then
-    phase "consolidating $state/git: no other stack is using it"
-    git -C "$state/git" -c gc.auto=0 repack --geometric=2 -dq \
-      || fail "repacking $state/git"
-  fi
+  phase "exploding packs in $state/git: no other stack is using it"
+  bash ./stack/explode-packs "$state/git" || fail "exploding packs in $state/git"
+  # The same proof lets the refs earlier runs left go too (stack/prune-dev-refs
+  # says why that is most of a push's cost). A failure only costs speed.
+  bash ./stack/prune-dev-refs "$state/git" --alone || echo "stack-up: pruning refs failed" >&2
+else
+  bash ./stack/prune-dev-refs "$state/git" || echo "stack-up: pruning refs failed" >&2
 fi
 flock -s 8
 
@@ -251,7 +258,7 @@ CAOS_CACHE_NAMESPACE="$namespace" \
 CAOS_RUNNER_SLOTS="${CAOS_RUNNER_SLOTS:-48}" \
 CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
 CAOS_DOCKER_BIN=podman \
-CAOS_DOCKER_ARGS="--root $engine_store/store --runroot $engine_store/run" \
+CAOS_DOCKER_ARGS="--root $engine_store/store --runroot $engine_run --transient-store" \
 CAOS_DOCKER_NETWORK=host \
 CAOS_STACK_RUNNER_SERVER_URL=http://127.0.0.1 \
 CAOS_REGISTRY_PULL_HOST="${CAOS_DEV_REGISTRY:-caos-registry:5000}" \

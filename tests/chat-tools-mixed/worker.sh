@@ -16,8 +16,8 @@ cp -R /tmp/ws /tmp/feat
 echo "merged" > /tmp/feat/feature.txt
 feature_tree=$(publish_tree /tmp/feat /cas/feat "publishing the feature tree")
 
-# THE SHELL IS A TOOL AT THE CONVERSATION ROOT, and that position is the whole
-# point of this test: a path outside every source tree runs over the conversation
+# THE SHELL IS A TOOL AT THE SESSION ROOT, and that position is the whole
+# point of this test: a path outside every source tree runs over the session
 # tree, which is the one scope from which `cp -a main side`, `mv side review` and
 # a write into `memories/` are all reachable at once. A tool inside `main` would
 # see only `main`. The model stages it here with `write`, which is all a tool is
@@ -26,29 +26,29 @@ bash_tool_img=$(caos hash /cas/args/bash-tool)
 merge_img=$(caos hash /cas/args/merge)
 # The stub reads its scripted responses when the turn asks for them, so it can
 # start empty: the merge call below names the feature commit by hash, and that
-# commit is made on top of the conversation's own base, which needs the stub's port.
+# commit is made on top of the session's own base, which needs the stub's port.
 mkdir -p /tmp/stub
 start_stub /tmp/stub
 
-new_llm_conversation tools-mixed "$STUB_PORT" "$ws"
+new_llm_session tools-mixed "$STUB_PORT" "$ws"
 feature=$(mint_commit /cas/feature "$feature_tree" feature "$base")
 fetch_code "$feature" "fetching the feature commit"
 git push -q caos "$feature:refs/caos/req/$feature" || fail "pushing feature closure"
 
-# THE MERGE IS A TOOL TOO, at the conversation root like the shell, and it picks
-# the source tree it advances by ARGUMENT (`source-tree`), not by where it sits:
-# `@scope` in its help. `theirs` is a commit hash, the one thing the tool cannot
+# THE MERGE IS A TOOL TOO, at the session root like the shell, and it takes
+# the source tree it advances as its `root` argument, not from where it sits:
+# `@root` in its help. `theirs` is a commit hash, the one thing the tool cannot
 # find for itself.
 MIXED_CALLS='[
  {"id":"tu_tool","input":{"file-path":"tools/sh/.caos-expr","content":"curry --base:hash='"$bash_tool_img"'\n"},"name":"write","type":"tool_use"},
  {"id":"tu_mtool","input":{"file-path":"tools/merge/.caos-expr","content":"curry --base:hash='"$merge_img"'\n"},"name":"write","type":"tool_use"},
  {"id":"tu_mw","input":{"file-path":"main/mix.txt","content":"hello"},"name":"write","type":"tool_use"},
- {"id":"tu_create","input":{"arguments":{"cmd":"cp -a main side; mkdir -p memories; echo remembered > memories/test.txt","paths":["main"]},"path":"tools/sh"},"name":"run_tool","type":"tool_use"},
- {"id":"tu_mb","input":{"arguments":{"cmd":"tr a-z A-Z < side/mix.txt > main/mix3.txt; echo second > side/second.txt; mv side review; cp -a review side","paths":["main","side"]},"path":"tools/sh"},"name":"run_tool","type":"tool_use"},
+ {"id":"tu_create","input":{"arguments":{"root":".","cmd":"cp -a main side; mkdir -p memories; echo remembered > memories/test.txt","paths":["main"]},"path":"tools/sh"},"name":"run_tool","type":"tool_use"},
+ {"id":"tu_mb","input":{"arguments":{"root":".","cmd":"tr a-z A-Z < side/mix.txt > main/mix3.txt; echo second > side/second.txt; mv side review; cp -a review side","paths":["main","side"]},"path":"tools/sh"},"name":"run_tool","type":"tool_use"},
  {"id":"tu_me","input":{"source_tree":"main","file-path":"mix.txt","old-string":"hello","new-string":"world"},"name":"edit","type":"tool_use"},
  {"id":"tu_mg","input":{"pattern":"world"},"name":"grep","type":"tool_use"},
- {"id":"tu_mm","input":{"arguments":{"source-tree":"main","theirs":"'"$feature"'"},"path":"tools/merge"},"name":"run_tool","type":"tool_use"},
- {"id":"tu_mp","input":{"arguments":{"source-tree":"main","theirs":"side"},"path":"tools/merge"},"name":"run_tool","type":"tool_use"},
+ {"id":"tu_mm","input":{"arguments":{"root":"main","theirs":"'"$feature"'"},"path":"tools/merge"},"name":"run_tool","type":"tool_use"},
+ {"id":"tu_mp","input":{"arguments":{"root":"main","theirs":"side"},"path":"tools/merge"},"name":"run_tool","type":"tool_use"},
  {"id":"tu_side","input":{"source_tree":"side","file-path":"side.txt","content":"isolated"},"name":"write","type":"tool_use"}]'
 printf '{"content":%s,"stop_reason":"tool_use"}' \
   "$(printf '%s' "$MIXED_CALLS" | tr -d '\n')" > /tmp/stub/response-1.json
@@ -84,11 +84,9 @@ jq -s -e '
   (map(select(.id == "tu_mg"))[0] |
     .status == "complete" and .result.proposal == null) and
   (map(select(.id == "tu_mm"))[0] |
-    .status == "complete" and
-    (.source_tree_resolution.kind == "merged" or .source_tree_resolution.kind == "direct")) and
+    .status == "complete" and .source_tree_name == null and .files_outcome.applied == ["main"]) and
   (map(select(.id == "tu_mp"))[0] |
-    .status == "complete" and .source_tree_name == "main" and
-    (.source_tree_resolution.kind == "merged" or .source_tree_resolution.kind == "direct"))
+    .status == "complete" and .source_tree_name == null and .files_outcome.applied == ["main"])
 ' /tmp/mixed-tools.jsonl >/dev/null || { cat /tmp/mixed-tools.jsonl >&2; fail "mixed tool records are wrong"; }
 $TOOL parents --repo /tmp/repo --head "$head" > /tmp/mixed.parents
 start_found=0
@@ -116,7 +114,7 @@ if git cat-file -e "$source_tree:side.txt" 2>/dev/null; then fail "side edit lea
 [ "$(git show "$side_source_tree:mix.txt")" = hello ] || fail "input snapshot changed with main"
 grep -qF 'side' /tmp/stub/request-2.json || fail "new source_tree missing from model context"
 
-[ "$(git show "$head:memories/test.txt")" = remembered ] || fail "conversation memory was not staged"
+[ "$(git show "$head:memories/test.txt")" = remembered ] || fail "session memory was not staged"
 [ "$(git show "$side_source_tree:second.txt")" = second ] || fail "second source tree edit lost"
 review=$(source_tree_commit "$head" review)
 fetch_code "$review" "fetching copied source tree"

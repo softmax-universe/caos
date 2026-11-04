@@ -38,6 +38,12 @@ import (
 // worth failing over.
 const sharedStep = "CAOS_MCP_ARGS_HERE"
 
+// The placeholder the shared assets carry BEFORE `mcp`, where the client's
+// global `--server=<url>` goes: the client takes the server only ahead of the
+// command (`caos --server=<url> mcp hook ...`). It becomes nothing when no
+// server is named.
+const sharedServer = "CAOS_SERVER_ARG_HERE"
+
 func say(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "caos-install: "+format+"\n", a...)
 }
@@ -85,7 +91,7 @@ func parseArgs(argv []string) args {
 			a.step = value
 		case "--server":
 			a.server = value
-		// What a NEW conversation starts from, as a locator the server fetches.
+		// What a NEW session starts from, as a locator the server fetches.
 		case "--content":
 			a.content = value
 		case "--secret-readers":
@@ -261,14 +267,20 @@ func stepLocator(a args) string {
 	return "--llm-step:@@=github:" + a.repo + "?rev=" + a.commit + "&dir=std/llm-step"
 }
 
-// What every `caos mcp` process is told beyond the step, each as its own argument:
-// the server, where a new conversation's content comes from, and the secret
+// The client's global flags, which go BEFORE `mcp`: the server, when one is
+// named. Each its own argument.
+func serverArgs(a args) []string {
+	if a.server == "" {
+		return nil
+	}
+	return []string{"--server=" + a.server}
+}
+
+// What every `caos mcp` process is told after `mcp` beyond the step, each as its
+// own argument: where a new session's content comes from, and the secret
 // readers it presents. None of it is read from the checkout.
 func sharedArgs(a args) []string {
 	var list []string
-	if a.server != "" {
-		list = append(list, "--server="+a.server)
-	}
 	if a.content != "" {
 		list = append(list, "--base:@@="+a.content)
 	}
@@ -282,9 +294,9 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// THE HOOK NEEDS THEM TOO: the HOOK creates the conversation (`on_user_prompt`),
+// THE HOOK NEEDS THEM TOO: the HOOK creates the session (`on_user_prompt`),
 // not the tool server, so a content locator put only on `mcp serve` -- where it
-// looks like it belongs -- leaves every conversation without code.
+// looks like it belongs -- leaves every session without code.
 func settingsJSON(a args, locator string) []byte {
 	settings := readJSON(filepath.Join(a.assets, "settings.json"))
 	// In a hook command the locator is a SHELL WORD, so its `&` and `?` are
@@ -294,9 +306,14 @@ func settingsJSON(a args, locator string) []byte {
 	for _, extra := range sharedArgs(a) {
 		shellStep += " " + shellQuote(extra)
 	}
+	shellServer := ""
+	for _, global := range serverArgs(a) {
+		shellServer += shellQuote(global) + " "
+	}
 	walkStrings(settings, func(s string) string {
 		s = strings.ReplaceAll(s, `"${CAOS_BIN:-caos}"`, "caos")
 		s = strings.ReplaceAll(s, "${CAOS_BIN:-caos}", "caos")
+		s = strings.ReplaceAll(s, sharedServer+" ", shellServer)
 		return strings.ReplaceAll(s, sharedStep, shellStep)
 	})
 
@@ -357,7 +374,19 @@ func mcpServers(a args, locator string) map[string]any {
 	// EACH ITS OWN ARGV ELEMENT. Appended to the locator's string they are a
 	// single argument (`--llm-step:@@=… --server=…`), which the client reads as
 	// one flag with a nonsense value.
-	list, _ := caos["args"].([]any)
+	// The server's placeholder is an element of its own, ahead of `mcp`, and
+	// becomes the global flags: one argument, or none.
+	var list []any
+	given, _ := caos["args"].([]any)
+	for _, item := range given {
+		if item == sharedServer {
+			for _, global := range serverArgs(a) {
+				list = append(list, global)
+			}
+			continue
+		}
+		list = append(list, item)
+	}
 	for _, extra := range sharedArgs(a) {
 		list = append(list, extra)
 	}
@@ -410,8 +439,8 @@ func contains(haystack []string, needle string) bool {
 }
 
 // The slash command that starts a session from an earlier recorded
-// conversation. THE HOOK is what acts on it -- `caos mcp hook` sees the
-// first prompt and forks the conversation before the model's first
+// session. THE HOOK is what acts on it -- `caos mcp hook` sees the
+// first prompt and forks the session before the model's first
 // turn (rust/crates/caos-cli/src/mcp/fork.rs) -- so the marker line below is
 // load-bearing: it is what the hook finds if Claude Code hands it the command's
 // expansion rather than the `/name <hash>` that was typed. The rest is for the
@@ -423,19 +452,19 @@ func contains(haystack []string, needle string) bool {
 const commandFooter = `
 The earlier session's context is not in your head, so recover it before doing anything else:
 
-1. Read the recorded history of commit $ARGUMENTS with the std/caos-conversation tool: call "run_tool" with path "caos-std/caos-conversation" and arguments {"hash": "$ARGUMENTS"}, and read all of its output. It cuts long tool arguments and results; to see one call in full, run it again with "call" set to that call's toolu_ id ("tool_help" at the same path lists its parameters).
+1. Read the recorded history of commit $ARGUMENTS with the std/caos-session tool: call "run_tool" with path "caos-std/caos-session" and arguments {"hash": "$ARGUMENTS"}, and read all of its output. It cuts long tool arguments and results; to see one call in full, run it again with "call" set to that call's toolu_ id ("tool_help" at the same path lists its parameters).
 2. The last turn may be unfinished. A call the earlier session never got a result for is recorded as cancelled ("the session that ran this call ended before it finished"). If its result matters, run it again.
-3. Tell me in a few lines what the conversation was doing and where it stopped, then wait for my next instruction.
+3. Tell me in a few lines what the session was doing and where it stopped, then wait for my next instruction.
 `
 
 var commands = map[string]string{
-	"fork-caos-conversation.md": `---
-description: Fork a recorded caos conversation into this session (a new branch from the same commit)
-argument-hint: <conversation-commit-hash>
+	"fork-caos-session.md": `---
+description: Fork a recorded caos session into this Claude Code session (a new branch from the same commit)
+argument-hint: <session-commit-hash>
 ---
-caos-conversation-command: fork $ARGUMENTS
+caos-session-command: fork $ARGUMENTS
 
-You are picking up work recorded in another caos conversation. This session's conversation is a FORK of commit $ARGUMENTS: it starts with that conversation's whole history and its workspace (imports/, feature/, and so on) and is its own branch from here. Nothing you do changes the original. The fork also merged in this session's client repo, so the tools under caos-std/ and the instructions are this session's, not the ones the earlier conversation ran with.
+You are picking up work recorded in another caos session. This Claude Code session records into a FORK of commit $ARGUMENTS: it starts with that session's whole history and its workspace (imports/, feature/, and so on) and is its own branch from here. Nothing you do changes the original. The fork also merged in this session's client repo, so the tools under caos-std/ and the instructions are this session's, not the ones the earlier session ran with.
 ` + commandFooter,
 }
 
@@ -460,7 +489,7 @@ func writeUserConfig(a args, locator string) {
 			}
 		}
 		// An earlier install wrote a resume command, which no longer exists.
-		stale := filepath.Join(home, ".claude/commands/resume-caos-conversation.md")
+		stale := filepath.Join(home, ".claude/commands/resume-caos-session.md")
 		if err := os.Remove(stale); err == nil {
 			changed = true
 		}

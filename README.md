@@ -15,11 +15,7 @@ functions, cached by redis
 - `CAOS_SECRETS_DIR` is the directory on your computer where you keep caos secrets
 - On your computer, make some secrets:
   - `mkdir $CAOS_SECRETS_DIR` and then cd there
-<<<<<<< 9eda76ca898d3db8202c16046ed6e66e4b77d9b6
-  - `nix run github:softmax-universe/caos#caos-cli -- secrets-push --dir=$CAOS_SECRETS_DIR`
-=======
-  - `nix run github:Metta-AI/caos#caos-cli -- secrets-init --dir=$CAOS_SECRETS_DIR`
->>>>>>> bef8c4b7bbc05b97c6637ff42b330050fbcb942a
+  - `nix run github:softmax-universe/caos#caos-cli -- secrets-init --dir=$CAOS_SECRETS_DIR`
   - Github:
     - If you need to make a github token
         - Go to https://github.com/settings/personal-access-tokens

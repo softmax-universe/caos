@@ -458,6 +458,10 @@ fn verify_object_closure(git_dir: &str) -> Result<(), String> {
 /// accepts.
 const UNPACK_ALWAYS: &str = "2147483647";
 
+/// `core.looseCompression`: [`loose::LEVEL`], so git's loose objects and the
+/// server's are written alike (a unit test holds the two together).
+const LOOSE_LEVEL: &str = "1";
+
 /// The git settings this server runs with, as `(key, value)` pairs.
 ///
 /// They reach git through this process's environment (`settings_env`, applied

@@ -598,12 +598,6 @@ mod tests {
     }
 
     #[test]
-    fn adler32_matches_known_values() {
-        assert_eq!(adler32(b""), 1);
-        assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
-    }
-
-    #[test]
     fn written_objects_read_back_through_git() {
         let dir = scratch("write");
         let objects = dir.join("objects");

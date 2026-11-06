@@ -2,12 +2,12 @@
 //! (design/loose-object-store.md).
 //!
 //! Every object is one file, `objects/xx/yyyy...`, holding a zlib stream of
-//! `<type> <size>\0<content>` written at level 0 (deflate "stored" blocks):
-//! the raw bytes plus a few bytes of framing. The filesystem compresses (prod
-//! runs btrfs with zstd); level 0 keeps that compression effective and makes
-//! inflating a copy. Every git and gix reader handles it, and since an object
-//! id hashes the UNCOMPRESSED bytes, the level never changes an id: objects
-//! written by git at other levels sit beside these.
+//! `<type> <size>\0<content>` written at level 1 ([`LEVEL`]), git's own
+//! default for loose objects. The store's filesystem (ext4) does not compress,
+//! so this is the only compression the store gets; level 1 roughly halves it
+//! for a few microseconds of inflate per object. Since an object id hashes the
+//! UNCOMPRESSED bytes, the level never changes an id: objects written at other
+//! levels (git's, or this server's earlier level 0) sit beside these.
 //!
 //! Nothing packs this store, so nothing ever rewrites an object under a
 //! reader. What packs used to give for free is ATOMIC PUBLICATION: a pack

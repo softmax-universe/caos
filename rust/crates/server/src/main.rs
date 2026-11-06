@@ -966,6 +966,11 @@ fn spawn_request_ref_pruner(git_dir: String) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn git_writes_loose_objects_at_the_servers_level() {
+        assert_eq!(super::LOOSE_LEVEL, super::loose::LEVEL.to_string());
+    }
+
+    #[test]
     fn a_form_body_decodes_plus_as_space_and_a_query_does_not() {
         use super::join_params;
         // curl --data-urlencode "cmd=echo written > out.txt"

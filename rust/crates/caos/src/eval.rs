@@ -23,7 +23,7 @@ pub(crate) use caos_eval::mode_of_kind;
 ///
 /// Every key stored through this is built from object hashes — a tree and a path
 /// within it, a commit sha — so an entry cannot go stale: the same key names the
-/// same bytes for the life of the world. That is the whole licence for a global
+/// same bytes for the life of the world. That is the whole license for a global
 /// here. A cache keyed on a NAME would need invalidation; this one has nothing
 /// to invalidate, and a long-lived process (the TUI) accumulates one small entry
 /// per distinct object it evaluated.
@@ -82,7 +82,7 @@ pub(crate) fn eval_path(
 /// `eval-path [--tree=<oid>] <path>` — evaluate the `.caos-expr` files from the
 /// root of the tree down to `<path>` and print the resulting object's
 /// `"<kind> <hash>"`. With no `--tree`, the tracked source tree is the start
-/// (dirty edits included, like `run-tool`'s `--in:@=.`).
+/// (dirty edits included, like `run-tool`'s `--root:@=.`).
 pub fn cli_eval_path(t: &dyn Transport, tree: Option<&str>, path: &str) -> Result<(), String> {
     let start = match tree {
         Some(oid) => {

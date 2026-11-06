@@ -208,8 +208,9 @@ The source index, branches, and files stay unchanged. Each import's
 portable repository details live in `<path>.source.json` when available. The
 agent preserves imports and organizes feature work with ordinary file operations.
 
-There is no publish command. Ask the agent for a PR: it pushes the branch with
-`publish_source` and opens or updates the PR with `caos-std/github`
+There is no publish command. Ask the agent for a PR: it publishes a stack with
+`caos-std/stack-publish`, or pushes one branch with `caos-std/publish-source`
+and opens or updates the PR with `caos-std/github`
 (design/agent-github.md, "PRs"). Ctrl+P and Ctrl+L have no bindings.
 
 Session text renders `**bold**` and `_italic_` emphasis. Unmatched markers
@@ -319,5 +320,5 @@ For manual copying, press `Ctrl+Y`, select text with the terminal, and use its
 Copy action; Escape resumes the TUI. In iTerm2, automatic clipboard writes
 require Settings > General > Selection > Applications in terminal may access
 clipboard. This setting is required even when CAOS reports “Copy requested”;
-the request has no acknowledgement. If iTerm2's clipboard-access warning was
+the request has no acknowledgment. If iTerm2's clipboard-access warning was
 previously dismissed, copying can fail silently until the setting is enabled.

@@ -8,11 +8,11 @@ tests plus every `tests/<name>`:
 
 ```
 run_tool(path="caos-std/caos-test",
-         arguments={"in": "sources/caos/<layer>", "only": "git-import"})
+         arguments={"root": "sources/caos/<layer>", "only": "git-import"})
 ```
 
-- `in` is the source tree you edited. Omitting it tests the tree the tool sits
-  in, which is not your change.
+- `root` is the source tree you edited. It is required: nothing is implied by
+  where the tool sits.
 - `only` takes bare `tests/` directory names, space-separated, no `tests/`
   prefix. Use it while iterating; run the whole suite before you finish.
 - `test-salt=<fresh value>` re-runs cached tests. Use it for anything on a push
@@ -429,7 +429,7 @@ concurrency.
 - **A test is an ENTRY, not a script the harness interprets.** `tests/<name>/`
   carries a `.caos-expr`, a `DEPS` and a `worker.sh`, exactly like a std entry,
   and running a test is EVALUATING it (`dev/run-test` does nothing else, plus
-  turning the outcome into a verdict). Two consequences worth internalising:
+  turning the outcome into a verdict). Two consequences worth internalizing:
   - **Naming a dependency resolves it.** `:@=` evaluates any tree carrying a
     `.caos-expr`, not just `--base` (caos-eval's `eval_if_evaluable`), so
     `--rustc:@=DEEP-DEPS/rustc` hands the worker the BUILT image. A worker

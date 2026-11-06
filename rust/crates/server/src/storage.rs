@@ -82,7 +82,7 @@ pub(crate) fn post_object(config: &Config, body: &[u8]) -> Result<Vec<u8>, HttpE
     Ok(format!("{id}\n").into_bytes())
 }
 
-/// Store one object, durably, as a level-0 loose object (see [`crate::loose`]).
+/// Store one object, durably, as a loose object (see [`crate::loose`]).
 /// Its references are the caller's to have checked.
 fn write(config: &Config, kind: gix::object::Kind, data: &[u8]) -> std::io::Result<gix::ObjectId> {
     crate::loose::write_durable(

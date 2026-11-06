@@ -69,49 +69,21 @@ fn object_path(objects: &Path, id: &Id) -> (PathBuf, PathBuf) {
     (dir, path)
 }
 
-/// A zlib stream of `data` at level 0: stored blocks of at most 65,535 bytes.
-fn deflate_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + (data.len() / 65_535 + 1) * 5 + 6);
-    // CMF 0x78 (deflate, 32K window), FLG 0x01 (level 0; 0x7801 % 31 == 0).
-    out.extend_from_slice(&[0x78, 0x01]);
-    if data.is_empty() {
-        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
-    } else {
-        let mut chunks = data.chunks(65_535).peekable();
-        while let Some(chunk) = chunks.next() {
-            out.push(u8::from(chunks.peek().is_none()));
-            let len = chunk.len() as u16;
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(&(!len).to_le_bytes());
-            out.extend_from_slice(chunk);
-        }
-    }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
-    out
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65_521;
-    let (mut a, mut b) = (1u32, 0u32);
-    // 5,552 bytes is the most that can be summed before `b` could overflow.
-    for chunk in data.chunks(5_552) {
-        for &byte in chunk {
-            a += u32::from(byte);
-            b += a;
-        }
-        a %= MOD;
-        b %= MOD;
-    }
-    (b << 16) | a
-}
+/// The zlib level of every object the server writes: git's own default for
+/// loose objects (`core.looseCompression`, which the server also hands git).
+pub(crate) const LEVEL: u32 = 1;
 
 /// The id of `(kind, data)` and its loose-object file contents.
 fn encode(kind: Kind, data: &[u8]) -> io::Result<(Id, Vec<u8>)> {
     let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, data)
         .map_err(|error| other(format!("hashing {kind}: {error}")))?;
-    let mut raw = format!("{kind} {}\0", data.len()).into_bytes();
-    raw.extend_from_slice(data);
-    Ok((id, deflate_stored(&raw)))
+    let mut zlib = flate2::write::ZlibEncoder::new(
+        Vec::with_capacity(data.len() / 2 + 64),
+        flate2::Compression::new(LEVEL),
+    );
+    zlib.write_all(format!("{kind} {}\0", data.len()).as_bytes())?;
+    zlib.write_all(data)?;
+    Ok((id, zlib.finish()?))
 }
 
 /// A fresh name for a temporary file in `dir`, unique across threads and

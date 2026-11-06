@@ -497,12 +497,12 @@ fn git_settings(hooks: Option<&std::path::Path>) -> Vec<(&'static str, String)> 
         // The store is loose objects only and is never packed
         // (design/loose-object-store.md, `mod loose`). Every transfer unpacks
         // into loose objects, however small or large; a push lands in git's
-        // quarantine and the hook publishes it children first. Objects are
-        // written at zlib level 0: the filesystem compresses.
+        // quarantine and the hook publishes it children first. git writes
+        // them at the same zlib level as the server's own writer.
         ("receive.unpackLimit", UNPACK_ALWAYS),
         ("transfer.unpackLimit", UNPACK_ALWAYS),
         ("fetch.unpackLimit", UNPACK_ALWAYS),
-        ("core.looseCompression", "0"),
+        ("core.looseCompression", LOOSE_LEVEL),
         // Never let git rewrite this repo's object store behind our back.
         // receive-pack forks a background repack after a push; that rewrites
         // the store while a concurrent upload-pack streams from it (a client

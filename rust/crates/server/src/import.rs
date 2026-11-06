@@ -120,7 +120,7 @@ pub(crate) fn endpoint(
                 .into_sync(),
             ..config.clone()
         };
-        // Each received object is exploded into a level-0 loose object as it is
+        // Each received object is exploded into a loose object as it is
         // checked, and published children first once all are (`mod loose`):
         // the store is never packed.
         let mut loose = crate::loose::Staging::new(incoming.path.join("loose"))?;

@@ -601,7 +601,7 @@ mod tests {
     fn written_objects_read_back_through_git() {
         let dir = scratch("write");
         let objects = dir.join("objects");
-        // Empty, small, and larger than one stored block (65,535 bytes).
+        // Empty, small, and large (well past deflate's 32 KiB window).
         let large: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
         for content in [&b""[..], b"hello\n", &large] {
             let id = write_durable(&objects, Kind::Blob, content).unwrap();

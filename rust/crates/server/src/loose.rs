@@ -612,10 +612,12 @@ mod tests {
                 String::from_utf8_lossy(&shown.stderr)
             );
             assert_eq!(shown.stdout, content);
-            let (_, path) = object_path(&objects, &id);
-            let size = fs::metadata(&path).unwrap().len() as usize;
-            assert!(size >= content.len(), "level 0 never shrinks the content");
         }
+        // Written compressed: the repetitive large blob shrinks to a fraction.
+        let id = write_durable(&objects, Kind::Blob, &large).unwrap();
+        let (_, path) = object_path(&objects, &id);
+        let size = fs::metadata(&path).unwrap().len() as usize;
+        assert!(size < large.len() / 10, "{size} bytes on disk");
         // Writing again is a no-op.
         write_durable(&objects, Kind::Blob, b"hello\n").unwrap();
         let fsck = git(&dir, &["fsck", "--strict"]);

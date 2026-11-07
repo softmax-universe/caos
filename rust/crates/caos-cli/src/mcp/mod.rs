@@ -796,6 +796,38 @@ fn on_stop_failure(config: &Config, payload: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// A hook's work that answers in time is passed through, error included.
+    #[test]
+    fn bounded_passes_the_answer_through() {
+        let budget = std::time::Duration::from_secs(5);
+        assert_eq!(bounded(budget, || Ok(())), Ok(()));
+        assert_eq!(
+            bounded(budget, || Err("no record".to_string())),
+            Err("no record".to_string())
+        );
+    }
+
+    /// Work that outlasts the budget is an error naming it, returned when the
+    /// budget runs out rather than when the work ends.
+    #[test]
+    fn bounded_gives_up_at_the_budget() {
+        let started = std::time::Instant::now();
+        let error = bounded(std::time::Duration::from_millis(100), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(error.contains("did not finish recording within"), "{error}");
+    }
+
+    /// A panic in the work is an error, not a hang or a silent success.
+    #[test]
+    fn bounded_reports_a_panic() {
+        let error = bounded(std::time::Duration::from_secs(5), || panic!("boom")).unwrap_err();
+        assert!(error.contains("panicked"), "{error}");
+    }
+
     /// The limit is an argument, not an environment variable, and it is the
     /// server that applies it; this process only forwards it.
     #[test]

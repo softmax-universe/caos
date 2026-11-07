@@ -387,12 +387,7 @@ fn bounded(
 /// - `PreToolUse`: unchanged; its failure is the tool call's.
 ///
 /// Every one goes to the diag journal first, so `help` can show it later.
-fn report_failure(
-    event: &str,
-    payload: &Value,
-    session: &str,
-    error: &str,
-) -> Result<(), String> {
+fn report_failure(event: &str, payload: &Value, session: &str, error: &str) -> Result<(), String> {
     if event == "PreToolUse" {
         return Err(error.to_string());
     }

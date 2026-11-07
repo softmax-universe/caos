@@ -44,8 +44,35 @@ func next(stage string) string {
 		"--update:@=/cas/args/update", "--flake:@=/cas/args/flake")
 }
 
-// result is the run's result, which must be the lock alone: a blob of JSON.
+// update runs std/flake-update over flake with extra args, its failure caught
+// and handed to the `then` stage as --error.
+func update(flake, stage string, extra ...string) {
+	run := w.Caos(append([]string{"curry", "--base:@=/cas/args/update"}, extra...)...)
+	w.Caos("run-then", flake, "--run:hash="+run, "--then:hash="+next(stage), "--catch")
+}
+
+// What nix (through libcurl) says when the fetch itself broke: the network, or
+// GitHub refusing or failing the request. Matched case-insensitively.
+var unreachable = []string{
+	"unable to download", "http error", "rate limit",
+	"could not resolve host", "couldn't resolve host", "failed to connect",
+	"connection reset", "connection refused", "timed out", "timeout was reached",
+}
+
+// result is the run's result, which must be the lock alone: a blob of JSON. A
+// caught failure ends the test here: Infra when GitHub could not be reached,
+// FAIL otherwise.
 func result() (raw []byte, lock map[string]any) {
+	if e := "/cas/args/error"; w.Exists(e) {
+		text := w.Read(e)
+		lower := strings.ToLower(text)
+		for _, s := range unreachable {
+			if strings.Contains(lower, s) {
+				w.Infra("std/flake-update could not fetch from GitHub (%q):\n%s", s, text)
+			}
+		}
+		w.True(false, "std/flake-update failed:\n%s", text)
+	}
 	const r = "/cas/args/result"
 	w.Get(r)
 	w.True(w.Check(os.Lstat(r)).Mode().IsRegular(), "the result is not a blob")

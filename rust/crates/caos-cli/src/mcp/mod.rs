@@ -341,7 +341,6 @@ fn run_bounded(
     event: &str,
     budget: std::time::Duration,
 ) -> Result<(), String> {
-    let (sender, receiver) = std::sync::mpsc::channel();
     let config = config.clone();
     let payload = payload.clone();
     let event = event.to_string();

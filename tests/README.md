@@ -30,6 +30,22 @@ A new test is a Go worker: `worker.go` curried onto `DEEP-DEPS/go`, importing
 `tests/flake-update` are. The `worker.sh` tests predate `std/go`; do not copy
 them for a new one.
 
+# Failing versus erroring
+
+A test's FAIL is a value and caches: the same tree replays it until
+`--test-salt` changes. That is right when the code under test is wrong, and
+wrong when the test's environment broke (GitHub refused a fetch, the network
+dropped, a runner died). For those, end the test as an infrastructure failure:
+
+- Go: `w.Infra("why", ...)`. It prints `RUN-TEST INFRA: why` and exits 70.
+- bash: `echo "RUN-TEST INFRA: why" >&2; exit 70`.
+
+`dev/run-test` looks for that line in a failed test's error text and fails the
+suite job itself, uncached, so a re-run retries. Only call it where the test can
+tell the environment broke. A failure inside a sub-run reaches the test only if
+the test catches it (`run-then --catch`) and reads `--error`; `tests/flake-update`
+does this. Misclassifying costs a re-run, never a false pass.
+
 # Disabling a test
 
 Disable a test by making its worker return early. Do not move or delete it.

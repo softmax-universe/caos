@@ -405,7 +405,9 @@ fn report_failure(event: &str, payload: &Value, session: &str, error: &str) -> R
         );
         std::process::exit(2);
     }
-    announce(&format!("caos did NOT record the end of this turn: {error}"))
+    announce(&format!(
+        "caos did NOT record the end of this turn: {error}"
+    ))
 }
 
 /// The hook debug log, when `CAOS_CC_HOOK_LOG` names one -- OFF by default.

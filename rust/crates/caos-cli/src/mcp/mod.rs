@@ -313,14 +313,97 @@ fn hook(config: &Config) -> Result<(), String> {
             std::process::exit(2);
         }
     }
-    let result = match event {
-        "UserPromptSubmit" => on_user_prompt(config, &payload),
-        "PreToolUse" => on_pre_tool_use(&payload),
-        "Stop" => on_stop(config, &payload),
-        _ => on_stop_failure(config, &payload),
-    };
+    let result = run_bounded(config, &payload, event, HOOK_BUDGET);
     debug_log_hook("end", event, &payload, Some((started.elapsed(), &result)));
-    result
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => report_failure(event, &payload, session, &error),
+    }
+}
+
+/// How long a hook may take before it gives up and says so. Shorter than the
+/// 300s `timeout` `integrations/claude-code/shared/settings.json` gives the
+/// hooks that talk to the server, so the hook always outlives its own budget and
+/// reports why: a hook that Claude Code kills lets the prompt through and says
+/// nothing. It cannot be much shorter: a session's first prompt (a fork, or a
+/// cold content fetch over iroh) has taken over 60s.
+const HOOK_BUDGET: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// Run one hook event on a thread and wait for it, at most `budget`.
+///
+/// The work is a chain of server requests, several with no timeout of their
+/// own (`eval_line_request` waits for the step), so the bound is on the whole
+/// event rather than on any one request. On timeout the thread is abandoned:
+/// the caller reports the failure and the process exits with it.
+fn run_bounded(
+    config: &Config,
+    payload: &Value,
+    event: &str,
+    budget: std::time::Duration,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let config = config.clone();
+    let payload = payload.clone();
+    let event = event.to_string();
+    std::thread::spawn(move || {
+        let result = match event.as_str() {
+            "UserPromptSubmit" => on_user_prompt(&config, &payload),
+            "PreToolUse" => on_pre_tool_use(&payload),
+            "Stop" => on_stop(&config, &payload),
+            _ => on_stop_failure(&config, &payload),
+        };
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "the caos server did not finish recording within {}s",
+            budget.as_secs()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the hook's worker stopped without an answer (it panicked)".to_string())
+        }
+    }
+}
+
+/// Make a failed hook VISIBLE. Claude Code shows a hook's reason only for exit 2
+/// (or in a `systemMessage`); any other failure is a bare "hook error" at
+/// most, and for `UserPromptSubmit` nothing at all, so a session whose
+/// recording broke ran on for hours with every turn missing from caos and no
+/// one told why.
+///
+/// - `UserPromptSubmit`: refused, exit 2, as for a session with no server: a
+///   prompt caos did not record is a session running on with nothing behind
+///   it. The person sees the reason and can send the prompt again.
+/// - `Stop` / `StopFailure`: a `systemMessage` with the reason, exit 0. Exit 2
+///   on `Stop` would force the turn to continue.
+/// - `PreToolUse`: unchanged; its failure is the tool call's.
+///
+/// Every one goes to the diag journal first, so `help` can show it later.
+fn report_failure(
+    event: &str,
+    payload: &Value,
+    session: &str,
+    error: &str,
+) -> Result<(), String> {
+    if event == "PreToolUse" {
+        return Err(error.to_string());
+    }
+    diag::emit(&diag::Context {
+        event,
+        source: payload.get("source").and_then(Value::as_str),
+        session: Some(session),
+        reason: Some(error),
+    });
+    if event == "UserPromptSubmit" {
+        eprintln!(
+            "caos: this prompt was NOT recorded, so it was not sent: {error}\n\
+             Send it again once caos answers. If it keeps failing, this session can no longer \
+             record: fork its last recorded head into a new session."
+        );
+        std::process::exit(2);
+    }
+    announce(&format!("caos did NOT record the end of this turn: {error}"))
 }
 
 /// The hook debug log, when `CAOS_CC_HOOK_LOG` names one -- OFF by default.

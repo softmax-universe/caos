@@ -141,6 +141,12 @@ launch)
 verdict)
   if [ -e /cas/args/error ]; then
     caos get /cas/args/error || fail "reading --error"
+    # An INFRASTRUCTURE failure is not a verdict (see the header): fail this
+    # job, so nothing caches it and a re-run retries.
+    if grep -q 'RUN-TEST INFRA:' /cas/args/error; then
+      cat /cas/args/error >&2
+      fail "an infrastructure failure, not a test verdict (RUN-TEST INFRA above)"
+    fi
     # The error text is the failing worker's stderr, relayed by the runner — so
     # the report's excerpt is the diagnostic from wherever in the test's chain
     # it actually broke, not this job's view of it.

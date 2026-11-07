@@ -36,6 +36,22 @@
 # fails the map, which discards every OTHER test's result — one broken test
 # would report as a suite with no results at all. Caught, a failure is a value:
 # this test's FAIL, with the failing worker's own stderr as the diagnostic.
+#
+# BUT ONLY A TEST OUTCOME IS A VALUE. A FAIL caches like any result, and the
+# stages above it with it (a catch keeps only the request that caught it out of
+# the cache), so a re-run replays it until the salt changes. That is right for
+# a test that is wrong and wrong for one whose ENVIRONMENT broke — GitHub
+# refused a fetch, a runner died. The test says which broke:
+#
+#   result            the test passed                   -> PASS verdict (value)
+#   fail / w.True     the thing UNDER TEST was wrong    -> FAIL verdict (value)
+#   RUN-TEST INFRA:   the environment broke             -> job error (uncached)
+#
+# The third is a line in the failure text: `w.Infra` writes it (and exits 70),
+# and a bash test writes `echo "RUN-TEST INFRA: <why>" >&2; exit 70`. A line,
+# not an exit status, because a failed sub-run reaches its caller as the
+# callee's text. On it `verdict` fails, which fails the map and so the whole
+# suite, loudly and uncached, rather than hiding under a cached red.
 set -euo pipefail
 
 fail() { echo "RUN-TEST FAIL: $*" >&2; exit 1; }

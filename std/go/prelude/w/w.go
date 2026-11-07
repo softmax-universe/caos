@@ -100,12 +100,16 @@ func Main(body func()) {
 		if r == nil {
 			return
 		}
-		f, ok := r.(failed)
-		if !ok {
+		switch f := r.(type) {
+		case failed:
+			fmt.Fprintln(os.Stderr, "FAIL: "+f.msg)
+			os.Exit(1)
+		case infra:
+			fmt.Fprintln(os.Stderr, InfraMarker+" "+f.msg)
+			os.Exit(InfraExit)
+		default:
 			panic(r)
 		}
-		fmt.Fprintln(os.Stderr, "FAIL: "+f.msg)
-		os.Exit(1)
 	}()
 	body()
 }

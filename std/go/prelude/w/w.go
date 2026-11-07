@@ -74,6 +74,14 @@ func True(ok bool, format string, a ...any) {
 	}
 }
 
+// Infra ends the worker as an INFRASTRUCTURE failure: something the test
+// relied on (GitHub, the network, a runner) broke, so the test reached no
+// verdict. Use it where a test can tell which broke; `True` and `Must` stay the
+// test's own FAIL. Getting the split wrong costs a re-run, never a false green.
+func Infra(format string, a ...any) {
+	panic(infra{fmt.Sprintf(format, a...)})
+}
+
 // Step announces a group of claims on stderr; stdout belongs to the result.
 func Step(heading string) { fmt.Fprintf(os.Stderr, "== %s ==\n", heading) }
 

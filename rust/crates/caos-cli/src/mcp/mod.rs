@@ -345,14 +345,22 @@ fn run_bounded(
     let config = config.clone();
     let payload = payload.clone();
     let event = event.to_string();
+    bounded(budget, move || match event.as_str() {
+        "UserPromptSubmit" => on_user_prompt(&config, &payload),
+        "PreToolUse" => on_pre_tool_use(&payload),
+        "Stop" => on_stop(&config, &payload),
+        _ => on_stop_failure(&config, &payload),
+    })
+}
+
+/// `work` on a thread, its answer if it comes within `budget`, else an error.
+fn bounded(
+    budget: std::time::Duration,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = match event.as_str() {
-            "UserPromptSubmit" => on_user_prompt(&config, &payload),
-            "PreToolUse" => on_pre_tool_use(&payload),
-            "Stop" => on_stop(&config, &payload),
-            _ => on_stop_failure(&config, &payload),
-        };
-        let _ = sender.send(result);
+        let _ = sender.send(work());
     });
     match receiver.recv_timeout(budget) {
         Ok(result) => result,

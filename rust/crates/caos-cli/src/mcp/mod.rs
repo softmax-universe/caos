@@ -279,9 +279,9 @@ pub(super) fn wait_server_reachable(server: &str) -> Result<(), String> {
 /// A prompt with no server to record into is refused outright (exit 2): the
 /// diagnostics go first (stderr and the diag journal), because exit 2 is the
 /// one status with which Claude Code shows the reason, and a session that runs
-/// on with nothing recorded is worse than one that stops. Elsewhere a failed
-/// hook is shown only as an error line, and exit 2 on `Stop` would force the
-/// session on.
+/// on with nothing recorded is worse than one that stops. The same holds for a
+/// prompt the server failed to record, and every failure is bounded in time and
+/// reported where the person sees it ([`report_failure`]).
 fn hook(config: &Config) -> Result<(), String> {
     let mut input = String::new();
     std::io::stdin()

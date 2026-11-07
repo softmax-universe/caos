@@ -93,7 +93,8 @@ func Report(body string) {
 	Do(script.Exec("caos put " + path + " /cas/out"))
 }
 
-// Main gives the script `set -e`'s default.
+// Main gives the script `set -e`'s default: a failed claim prints `FAIL:` and
+// exits 1, an Infra prints InfraMarker and exits InfraExit.
 func Main(body func()) {
 	defer func() {
 		r := recover()

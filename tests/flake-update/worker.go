@@ -11,6 +11,12 @@
 //
 // Staged: a run cannot be waited on, so each assertion is the `then` of the run
 // it is about.
+//
+// Every run is CAUGHT, because this test reaches GitHub and GitHub sometimes
+// refuses (a rate limit, a 5xx, a fetch that times out). That is no verdict on
+// std/flake-update, so it ends the test with `w.Infra`, which dev/run-test
+// turns into an uncached error instead of a cached FAIL. Any other failure of
+// the run is still this test's FAIL.
 package main
 
 import (

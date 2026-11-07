@@ -14,6 +14,20 @@ import (
 
 type failed struct{ msg string }
 
+// infra is a failure of the ENVIRONMENT, not of the thing under test.
+type infra struct{ msg string }
+
+// InfraMarker opens the line Infra prints. dev/run-test looks for it in a
+// failed test's error text and turns that test into a job error, uncached,
+// rather than a FAIL verdict, which caches. It is the marker and not the exit
+// code that carries the classification: a sub-run's failure reaches its caller
+// as the callee's text, and only the marker survives that.
+const InfraMarker = "RUN-TEST INFRA:"
+
+// InfraExit is the exit status Infra ends the worker with: not 1, which is
+// `True`'s, so the two read apart in a runner log as well.
+const InfraExit = 70
+
 // Out runs a pipe and returns its output, failing on error with the command's
 // OWN output as the diagnostic. A sink returns the output ALONGSIDE the error
 // — script interleaves stderr into the pipe — so the failing command's message

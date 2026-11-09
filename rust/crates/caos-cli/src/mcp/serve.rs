@@ -146,23 +146,16 @@ fn answer(
         }
         (Err(error), _) | (_, Err(error)) => Err(error.clone()),
     };
-        let response = match answer {
-            Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(message) => Some(with_local_facts(&line, message)),
-                Err(error) => Some(degraded(
-                    &line,
-                    &format!("the server's answer was not JSON: {error}"),
-                )),
-            },
-            Ok(None) => None,
-            Err(error) => degraded_or_none(&line, &error),
-        };
-        if let Some(response) = response {
-            let round_trip = started.elapsed().as_secs_f64();
-            write_message(&out, &with_client_timing(&line, response, received, round_trip))?;
-        }
-    }
-    Ok(())
+    let response = match answer {
+        Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
+            Ok(message) => with_local_facts(line, message),
+            Err(error) => degraded(line, &format!("the server's answer was not JSON: {error}")),
+        },
+        Ok(None) => return None,
+        Err(error) => degraded_or_none(line, &error)?,
+    };
+    let round_trip = started.elapsed().as_secs_f64();
+    Some(with_client_timing(line, response, received, round_trip))
 }
 
 /// A `tools/call` answer with the client's part of the timing appended: when

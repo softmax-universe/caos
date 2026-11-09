@@ -1024,6 +1024,75 @@ mod tests {
         output
     }
 
+    /// What a push of a long new history costs git under `receive.fsckObjects`:
+    /// `unpack-objects --strict` walks it recursively, a frame or more per
+    /// commit. Measured: 10,000 commits fit git's default 8 MiB stack, 30,000
+    /// overflow it (SIGSEGV), and 100,000 unpack in 6 s under
+    /// [`super::GIT_STACK_BYTES`]. Both halves run, so the test fails if the
+    /// chain ever stops reaching the overflow, not only if the fix stops working.
+    #[test]
+    fn a_long_commit_chain_unpacks_only_with_the_raised_stack() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        const COMMITS: u32 = 30_000;
+        let base = std::env::temp_dir().join(format!("caos-stack-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let init = |name: &str| {
+            let dir = base.join(name);
+            let status = Command::new("git")
+                .args(["init", "-q", "--bare"])
+                .arg(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            dir
+        };
+        let source = init("source");
+        let mut stream = String::new();
+        for i in 1..=COMMITS {
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"
+            ));
+            if i > 1 {
+                stream.push_str(&format!("from :{}\n", i - 1));
+            }
+            stream.push('\n');
+        }
+        let mut import = Command::new("git");
+        import
+            .arg("--git-dir")
+            .arg(&source)
+            .args(["fast-import", "--quiet"]);
+        let imported = with_stdin(import, stream.as_bytes());
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let mut pack = Command::new("git");
+        pack.arg("--git-dir")
+            .arg(&source)
+            .args(["pack-objects", "--revs", "--stdout", "-q"]);
+        let pack = with_stdin(pack, b"refs/heads/main\n");
+        assert!(pack.status.success());
+        let unpack = |name: &str, stack: u64| {
+            let target = init(name);
+            let mut command = Command::new("git");
+            command
+                .arg("--git-dir")
+                .arg(&target)
+                .args(["unpack-objects", "--strict", "-q"]);
+            unsafe {
+                command.pre_exec(move || super::set_stack_limit(stack).map(|_| ()));
+            }
+            with_stdin(command, &pack.stdout).status
+        };
+        let default = unpack("default", 8 << 20);
+        assert!(!default.success(), "{COMMITS} commits no longer overflow 8 MiB");
+        let raised = unpack("raised", super::GIT_STACK_BYTES);
+        assert!(raised.success(), "{raised:?} under the raised stack");
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn git_writes_loose_objects_at_the_servers_level() {

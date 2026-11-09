@@ -94,6 +94,8 @@ pub fn serve(config: Config) -> Result<(), String> {
                 continue;
             }
         }
+        let received = std::time::SystemTime::now();
+        let started = std::time::Instant::now();
         let answer = match (&server, &step) {
             (Ok(server), Ok(step)) => caos::mcp_post(
                 server,

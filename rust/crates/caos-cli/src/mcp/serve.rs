@@ -475,6 +475,44 @@ fn write_message(out: &Out, message: &Value) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn utc_is_iso_8601_to_the_second() {
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        assert_eq!(utc(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(at(951_782_400)), "2000-02-29T00:00:00Z");
+        assert_eq!(utc(at(1_793_992_805)), "2026-11-06T19:20:05Z");
+    }
+
+    #[test]
+    fn a_tool_call_answer_gets_the_client_timing_last() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run","arguments":{"path":"caos-std/read"}}}"#;
+        let answer = json!({"jsonrpc": "2.0", "id": 7, "result": {"content": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "timing: server 1.0s (step 0.9s, decode 0.1s); step trace: t"},
+        ]}});
+        let received = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_992_805);
+        let timed = with_client_timing(line, answer, received, 1.25);
+        let content = timed["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(
+            content[2]["text"],
+            "timing: received 2026-11-06T19:20:05Z; round trip 1.2s"
+        );
+    }
+
+    #[test]
+    fn only_tool_calls_are_timed() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let answer = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        let timed = with_client_timing(line, answer.clone(), std::time::UNIX_EPOCH, 0.1);
+        assert_eq!(timed, answer);
+    }
+}
+
+#[cfg(test)]
 mod redaction_tests {
     use super::*;
 

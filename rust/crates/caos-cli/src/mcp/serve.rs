@@ -126,38 +126,6 @@ pub fn serve(config: Config) -> Result<(), String> {
     // are still owed their answers.
     for call in in_flight {
         let _ = call.join();
-=======
-        let received = std::time::SystemTime::now();
-        let started = std::time::Instant::now();
-        let answer = match (&server, &step) {
-            (Ok(server), Ok(step)) => caos::mcp_post(
-                server,
-                step.as_deref(),
-                &secrets,
-                config.max_result_chars,
-                &line,
-            ),
-            (Err(error), _) | (_, Err(error)) => Err(error.clone()),
-        };
-        let response = match answer {
-            Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(message) => Some(with_local_facts(&line, message)),
-                Err(error) => Some(degraded(
-                    &line,
-                    &format!("the server's answer was not JSON: {error}"),
-                )),
-            },
-            Ok(None) => None,
-            Err(error) => degraded_or_none(&line, &error),
-        };
-        if let Some(response) = response {
-            let round_trip = started.elapsed().as_secs_f64();
-            write_message(
-                &out,
-                &with_client_timing(&line, response, received, round_trip),
-            )?;
-        }
->>>>>>> 2004473ae01ff9c52013d0204094b030e661fba6
     }
     Ok(())
 }

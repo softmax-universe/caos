@@ -515,6 +515,22 @@ mod tests {
         }
     }
 
+    /// The timing goes in a block of its own, after the tool's text, and names
+    /// the step's ticket so `read-trace` can find the whole run.
+    #[test]
+    fn the_timing_line_follows_the_tool_text() {
+        let mut result = text_result("hello".into(), false);
+        let ticket = "0123456789abcdef0123456789abcdef01234567";
+        append_text(&mut result, server_timing(75.4, 75.1, ticket));
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["text"], "hello");
+        assert_eq!(
+            content[1]["text"],
+            format!("timing: server 75.4s (step 75.1s, decode 0.3s); step trace: {ticket}")
+        );
+    }
+
     #[test]
     fn the_tools_are_the_steps_under_the_names_the_model_reads() {
         assert_eq!(step_tool("run"), Some("run_tool"));

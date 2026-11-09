@@ -141,6 +141,42 @@ struct Config {
     repo: gix::ThreadSafeRepository,
 }
 
+/// The stack limit (`RLIMIT_STACK`, soft) this process runs with, and so
+/// every git it spawns: a child's main stack is sized by the limit it inherits
+/// at exec. Every push is now unpacked by `unpack-objects --strict`, whose fsck
+/// walk recurses once per commit of a new chain, so a push of a long history
+/// overflows git's default 8 MiB and dies with SIGSEGV. 1 GiB is address space,
+/// not memory: only what a walk actually touches is ever mapped.
+const GIT_STACK_BYTES: u64 = 1 << 30;
+
+/// Set this process's soft stack limit to `bytes`, capped at the hard limit,
+/// and return the value set. Async-signal-safe, so a `pre_exec` may call it.
+fn set_stack_limit(bytes: u64) -> std::io::Result<u64> {
+    #[repr(C)]
+    struct Rlimit {
+        current: u64,
+        maximum: u64,
+    }
+    extern "C" {
+        fn getrlimit(resource: std::ffi::c_int, limit: *mut Rlimit) -> std::ffi::c_int;
+        fn setrlimit(resource: std::ffi::c_int, limit: *const Rlimit) -> std::ffi::c_int;
+    }
+    const RLIMIT_STACK: std::ffi::c_int = 3;
+    let mut limit = Rlimit {
+        current: 0,
+        maximum: 0,
+    };
+    if unsafe { getrlimit(RLIMIT_STACK, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The hard limit reads as u64::MAX when unlimited.
+    limit.current = bytes.min(limit.maximum);
+    if unsafe { setrlimit(RLIMIT_STACK, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(limit.current)
+}
+
 /// Install handlers so the process terminates on `SIGINT`/`SIGTERM`. This matters
 /// in a container, where the daemon is PID 1: the kernel applies no default
 /// disposition for these signals to PID 1, so without an explicit handler

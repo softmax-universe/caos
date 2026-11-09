@@ -1138,9 +1138,16 @@ sandbox = false''
             # of source instead of 1.6 GB of tarballs, and `nix build` out here
             # no longer has to produce any of them.
 
-            # ---- repack, and ONLY here ------------------------------------
-            # A caos server repo accumulates one pack per push — a suite adds
-            # hundreds — and gix's object store has a fixed 32 slots. At 33
+            # ---- repack the DEV repo, and ONLY here -----------------------
+            # NOT the host's own repo. Its server keeps every object loose and
+            # writes no packs (design/loose-object-store.md), so there is
+            # nothing to consolidate, and a repack would only fold the loose
+            # store back into a pack at every restart.
+            #
+            # The dev repo still needs it, until every branch carries the
+            # loose-object server: a dev stack runs its own branch's build, an
+            # older one adds one pack per push, and a suite adds hundreds.
+            # gix's object store has a fixed 32 slots. At 33
             # packs the server starts answering `reading arg tree: object <oid>
             # not found: The slotmap turned out to be too small with 32
             # entries`, which reads as a missing object and is really a full
@@ -1161,20 +1168,17 @@ sandbox = false''
             #
             # Here, nothing is reading: `up` has just removed the stack, and we
             # refuse if any worker is still alive. So this is the one moment a
-            # rewrite is safe, and it covers BOTH repos — the host's own, and
-            # the one every dev stack shares.
+            # rewrite is safe for the repo every dev stack shares.
             #
             # `-a -d -k` and the `-k` is load-bearing: GC is off precisely
             # because almost every object here is unreachable from any ref
             # (SPEC), so a repack that dropped unreachable objects would delete
             # most of the store.
             #
-            # IN A CONTAINER, for both, even though the host repo is a plain
-            # bind. It keeps one mechanism rather than two, and it is the only
-            # way to reach the dev repo at all — that one lives in a named
-            # volume, which on macOS is inside the engine's VM and has no host
-            # path. It also means this command needs no `git` of its own, which
-            # is why it now carries almost no runtime inputs.
+            # IN A CONTAINER: it is the only way to reach the dev repo at all.
+            # It lives in a named volume, which on macOS is inside the engine's
+            # VM and has no host path. It also means this command needs no
+            # `git` of its own, which is why it carries almost no runtime inputs.
             DEV_VOLUME=caos-vol-caos-dev
 
             # Is anything alive that could be READING a server repo? Two
@@ -1199,13 +1203,13 @@ sandbox = false''
               [ -n "$running" ]
             }
 
-            # ONE container for both repos. `--geometric=2` merges only the
+            # `--geometric=2` merges only the
             # small recent packs and keeps unreachable objects (nearly every
             # object here), so it is cheap enough to run on every `up` without a
             # pack-count threshold: 0.5s for a suite's 400 packs, where `-a`
             # rewrote the whole store (12 minutes at 8,000 packs). It is a no-op
             # on an already-consolidated repo.
-            repack_repos() {
+            repack_dev_repo() {
               # Skipped rather than fatal: a person running `up` while a suite
               # is in flight wants a stack, not homework, and the next idle
               # `up` will do it.
@@ -1214,15 +1218,14 @@ sandbox = false''
                 return 0
               fi
               docker run --rm --entrypoint /bin/bash \
-                -v "$CAOS_DATA/stack:/host" -v "$DEV_VOLUME:/dev-stack" \
+                -v "$DEV_VOLUME:/dev-stack" \
                 caos-stack:latest -c '
-                  for d in /host/git /dev-stack/git; do
-                    [ -d "$d" ] || continue
-                    echo "==> consolidating $d ($(ls "$d"/objects/pack/*.pack 2>/dev/null | wc -l) packs)" >&2
-                    git -C "$d" -c gc.auto=0 repack --geometric=2 -dq || exit 1
-                  done
+                  d=/dev-stack/git
+                  [ -d "$d" ] || exit 0
+                  echo "==> consolidating $d ($(ls "$d"/objects/pack/*.pack 2>/dev/null | wc -l) packs)" >&2
+                  git -C "$d" -c gc.auto=0 repack --geometric=2 -dq
                 ' \
-                || die "repacking the server repos"
+                || die "repacking the dev repo"
             }
 
             # The registry and Redis are caches: git holds the image inputs and
@@ -1427,9 +1430,9 @@ sandbox = false''
               fi
 
               # Docker creates a missing bind source as root. Create it as the
-              # invoking user before repack_repos mounts it and tree staging writes it.
+              # invoking user before tree staging writes it.
               mkdir -p "$CAOS_DATA/stack"
-              repack_repos
+              repack_dev_repo
 
               # THE TREE, copied rather than mounted: a bind's source is
               # resolved by the ENGINE, which on macOS is a VM that sees only

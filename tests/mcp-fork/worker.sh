@@ -146,4 +146,26 @@ err=$(env -u CAOS_SERVER_URL -u CAOS_MCP_DEFAULT_SERVER "$CAOS_CLI" mcp hook \
 [ "$rc" = 2 ] || fail "a first prompt with no server exited $rc, not 2"
 case "$err" in *"--server=<url>"*) ;; *) fail "the refusal does not say how to name a server: $err" ;; esac
 
+echo "== a prompt the server fails to record is refused, saying why ==" >&2
+# A server that answers, with a step it cannot run: every record fails. The
+# prompt is refused with exit 2 (it used to exit 1, which Claude Code lets
+# through and shows nobody), and Stop answers a systemMessage with the reason
+# and exits 0 (it used to be a bare "Stop hook error").
+broken_hook() {
+  "$CAOS_CLI" --server="$CAOS_SERVER_URL" mcp hook \
+    --llm-step:hash=0000000000000000000000000000000000000000
+}
+y="resume-y-$stamp"
+rc=0
+err=$(broken_hook 2>&1 >/dev/null \
+  <<<"$(jq -nc --arg s "$y" '{hook_event_name:"UserPromptSubmit",session_id:$s,prompt:"hi"}')") || rc=$?
+[ "$rc" = 2 ] || fail "a prompt that was not recorded exited $rc, not 2: $err"
+case "$err" in *"NOT recorded"*) ;; *) fail "the refusal does not say the prompt was not recorded: $err" ;; esac
+rc=0
+out=$(broken_hook 2>/dev/null \
+  <<<"$(jq -nc --arg s "$y" '{hook_event_name:"Stop",session_id:$s,last_assistant_message:"done"}')") || rc=$?
+[ "$rc" = 0 ] || fail "a Stop that was not recorded exited $rc, not 0"
+message=$(jq -r '.systemMessage // empty' <<<"$out")
+case "$message" in *"did NOT record"*) ;; *) fail "Stop did not tell the user it failed: $out" ;; esac
+
 echo "mcp-fork: ALL PASS" >&2

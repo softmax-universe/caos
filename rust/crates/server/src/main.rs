@@ -1088,7 +1088,10 @@ mod tests {
             with_stdin(command, &pack.stdout).status
         };
         let default = unpack("default", 8 << 20);
-        assert!(!default.success(), "{COMMITS} commits no longer overflow 8 MiB");
+        assert!(
+            !default.success(),
+            "{COMMITS} commits no longer overflow 8 MiB"
+        );
         let raised = unpack("raised", super::GIT_STACK_BYTES);
         assert!(raised.success(), "{raised:?} under the raised stack");
         std::fs::remove_dir_all(&base).ok();

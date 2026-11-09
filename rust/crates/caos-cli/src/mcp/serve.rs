@@ -118,10 +118,78 @@ pub fn serve(config: Config) -> Result<(), String> {
             Err(error) => degraded_or_none(&line, &error),
         };
         if let Some(response) = response {
-            write_message(&out, &response)?;
+            let round_trip = started.elapsed().as_secs_f64();
+            write_message(&out, &with_client_timing(&line, response, received, round_trip))?;
         }
     }
     Ok(())
+}
+
+/// A `tools/call` answer with the client's part of the timing appended: when
+/// the call arrived here (UTC) and how long the server took to answer it. The
+/// server's own line, when there is one, comes just before and says where that
+/// time went. Also one journal line per call, naming the tool, so `help`'s phase
+/// journal says which call each slow request was.
+///
+/// In the result, not in a hook's message to the user: the harness shows it
+/// only when the call is expanded, which is where a reader looks for it.
+fn with_client_timing(
+    line: &str,
+    mut message: Value,
+    received: std::time::SystemTime,
+    round_trip: f64,
+) -> Value {
+    let Some((_, method, params)) = request_of(line) else {
+        return message;
+    };
+    if method != "tools/call" {
+        return message;
+    }
+    let tool = params.get("name").and_then(Value::as_str).unwrap_or("?");
+    let path = params
+        .pointer("/arguments/path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let what = format!("{tool} {path}");
+    caos::timing::record(
+        "mcp-call",
+        &format!("{} in {round_trip:.1}s", what.trim_end()),
+    );
+    if let Some(content) = message
+        .pointer_mut("/result/content")
+        .and_then(Value::as_array_mut)
+    {
+        content.push(json!({
+            "type": "text",
+            "text": format!("timing: received {}; round trip {round_trip:.1}s", utc(received)),
+        }));
+    }
+    message
+}
+
+/// `at` as an ISO 8601 UTC timestamp to the second, without a date crate:
+/// days since the epoch to a civil date is Howard Hinnant's `civil_from_days`.
+fn utc(at: std::time::SystemTime) -> String {
+    let secs = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
 }
 
 fn request_of(line: &str) -> Option<(Value, String, Value)> {

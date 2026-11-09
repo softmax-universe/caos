@@ -5,8 +5,9 @@ Status: proposal for discussion. Written against `Metta-AI/caos` at
 2026-10-27) read separately.
 
 Update 2026-11-06: the store question (sections 6 and 8 step 4) is decided
-in `design/loose-object-store.md`: loose objects only, never packed, on a
-btrfs volume, with the measurements behind it. Retention and the collector
+in `design/loose-object-store.md`: loose objects only, never packed, on
+the existing ext4 volume (power-cut tests ruled out btrfs), with the
+measurements behind it. Retention and the collector
 (sections 4, 5 and 7) are still open here.
 
 ## Summary

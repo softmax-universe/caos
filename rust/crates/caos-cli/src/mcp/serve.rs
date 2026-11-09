@@ -95,7 +95,6 @@ pub fn serve(config: Config) -> Result<(), String> {
                 continue;
             }
         }
-<<<<<<< 8e2769f67a1f925be148f339cae7a01d0fdd4073
         // EACH REQUEST IS ANSWERED ON A THREAD OF ITS OWN, so calls run side by
         // side. A harness issues the calls of one assistant message together,
         // and Claude Code starts each call's clock when it issues it: answered

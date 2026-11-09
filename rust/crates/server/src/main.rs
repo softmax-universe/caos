@@ -1024,56 +1024,6 @@ mod tests {
         output
     }
 
-    #[test]
-    fn probe_stack_depth() {
-        use std::os::unix::process::CommandExt;
-        use std::process::Command;
-        let base = std::env::temp_dir().join(format!("caos-probe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let init = |dir: &std::path::Path| {
-            assert!(Command::new("git").args(["init", "-q", "--bare"]).arg(dir).status().unwrap().success());
-        };
-        let mut report = String::new();
-        for n in [2_000u32, 10_000, 30_000, 100_000] {
-            let source = base.join(format!("src-{n}"));
-            init(&source);
-            let mut stream = String::new();
-            for i in 1..=n {
-                stream.push_str(&format!("commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"));
-                if i > 1 {
-                    stream.push_str(&format!("from :{}\n", i - 1));
-                }
-                stream.push('\n');
-            }
-            let mut import = Command::new("git");
-            import.arg("--git-dir").arg(&source).args(["fast-import", "--quiet"]);
-            let imported = with_stdin(import, stream.as_bytes());
-            assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
-            let mut pack = Command::new("git");
-            pack.arg("--git-dir").arg(&source).args(["pack-objects", "--revs", "--stdout", "-q"]);
-            let packed = with_stdin(pack, b"refs/heads/main\n");
-            assert!(packed.status.success());
-            for bytes in [8u64 << 20, super::GIT_STACK_BYTES] {
-                let target = base.join(format!("dst-{n}-{bytes}"));
-                init(&target);
-                let mut unpack = Command::new("git");
-                unpack.arg("--git-dir").arg(&target).args(["unpack-objects", "--strict", "-q"]);
-                unsafe {
-                    unpack.pre_exec(move || super::set_stack_limit(bytes).map(|_| ()));
-                }
-                let started = std::time::Instant::now();
-                let out = with_stdin(unpack, &packed.stdout);
-                report.push_str(&format!(
-                    "n={n} stack={bytes} {:?} in {:?}: {}\n",
-                    out.status,
-                    started.elapsed(),
-                    String::from_utf8_lossy(&out.stderr).chars().take(200).collect::<String>()
-                ));
-            }
-        }
-        let _ = std::fs::remove_dir_all(&base);
-        panic!("PROBE REPORT\n{report}");
-    }
 
     #[test]
     fn git_writes_loose_objects_at_the_servers_level() {

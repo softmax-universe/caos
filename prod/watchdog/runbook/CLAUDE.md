@@ -113,13 +113,13 @@ action to fix and how to verify it afterwards.
    `thread 'ticket-...' has overflowed its stack`: a deep promise chain
    (~13 KB per hop). Known; caos#370 mitigates. Restart `caosd` and report
    the request that triggered it if the log names one.
-5. **A new pack in the store.** The server keeps every object loose and
-   nothing repacks its repo (`design/loose-object-store.md`), so the packs in
-   `/data/caos/stack/git/objects/pack` only ever predate that: one on
-   2026-11-09. A pack file newer than the last `caosd up` is a bug: some path
-   still writes packs. `ls -lt /data/caos/stack/git/objects/pack | head`.
-   Report the files and their times; never repack or delete them (that
-   touches stack state).
+5. **A pack in the store.** The server keeps every object loose, and every
+   `caosd up` explodes any pack it finds into loose objects
+   (`stack/explode-packs`; `journalctl -u caosd` shows `==> exploding`). So a
+   file in `/data/caos/stack/git/objects/pack` is a bug: either `up` skipped
+   it (it does while worker containers are alive) or some path still writes
+   packs. `ls -lt /data/caos/stack/git/objects/pack | head`. Report the files
+   and their times; never repack or delete them (that touches stack state).
 6. **ls-remote failing with the host otherwise fine.** Check `iroh-relay` is
    active and that the ticket on disk matches
    `caos-watchdog ticket --refresh`; a stack wipe re-keys the server and

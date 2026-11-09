@@ -1138,22 +1138,16 @@ sandbox = false''
             # of source instead of 1.6 GB of tarballs, and `nix build` out here
             # no longer has to produce any of them.
 
-            # ---- repack the DEV repo, and ONLY here -----------------------
-            # NOT the host's own repo. Its server keeps every object loose and
-            # writes no packs (design/loose-object-store.md), so there is
-            # nothing to consolidate, and a repack would only fold the loose
-            # store back into a pack at every restart.
+            # ---- explode packs into loose objects, and ONLY here ---------
+            # The server keeps every object loose and writes no packs
+            # (design/loose-object-store.md). A pack in a server repo predates
+            # that, or came from a server of an older build: a dev stack runs
+            # its own branch's build against the repo every dev stack shares.
+            # Packs cost every read (gix probes each pack's index; the dev repo
+            # once reached 8,583 and a 2.5-minute suite took 68), so each `up`
+            # turns any it finds into loose objects (stack/explode-packs).
             #
-            # The dev repo still needs it, until every branch carries the
-            # loose-object server: a dev stack runs its own branch's build, an
-            # older one adds one pack per push, and a suite adds hundreds.
-            # gix's object store has a fixed 32 slots. At 33
-            # packs the server starts answering `reading arg tree: object <oid>
-            # not found: The slotmap turned out to be too small with 32
-            # entries`, which reads as a missing object and is really a full
-            # table. Measured, not predicted.
-            #
-            # WHY THIS IS THE ONLY SAFE PLACE. A repack REWRITES the object
+            # WHY THIS IS THE ONLY SAFE PLACE. Exploding REWRITES the object
             # store, and this repo's whole config exists to stop anything doing
             # that behind a live reader's back: `gc.auto 0`, `receive.autogc
             # false` and `maintenance.geometric-repack.enabled false` are three
@@ -1162,23 +1156,19 @@ sandbox = false''
             # object database re-consolidates against packs that moved under
             # it, gix asserts and the request thread panics — the caller gets a
             # body-less 500 and the log says nothing (see the server config
-            # above). `dev/stack-up` used to do this at every dev bring-up,
-            # which was harmless while one stack existed at a time and became a
-            # live peer's silent 500 as soon as two did.
+            # above).
             #
             # Here, nothing is reading: `up` has just removed the stack, and we
             # refuse if any worker is still alive. So this is the one moment a
-            # rewrite is safe for the repo every dev stack shares.
+            # rewrite is safe, and it covers BOTH repos — the host's own, and
+            # the one every dev stack shares.
             #
-            # `-a -d -k` and the `-k` is load-bearing: GC is off precisely
-            # because almost every object here is unreachable from any ref
-            # (SPEC), so a repack that dropped unreachable objects would delete
-            # most of the store.
-            #
-            # IN A CONTAINER: it is the only way to reach the dev repo at all.
-            # It lives in a named volume, which on macOS is inside the engine's
-            # VM and has no host path. It also means this command needs no
-            # `git` of its own, which is why it carries almost no runtime inputs.
+            # IN A CONTAINER, for both, even though the host repo is a plain
+            # bind. It keeps one mechanism rather than two, and it is the only
+            # way to reach the dev repo at all — that one lives in a named
+            # volume, which on macOS is inside the engine's VM and has no host
+            # path. It also means this command needs no `git` of its own, which
+            # is why it carries almost no runtime inputs.
             DEV_VOLUME=caos-vol-caos-dev
 
             # Is anything alive that could be READING a server repo? Two
@@ -1203,29 +1193,21 @@ sandbox = false''
               [ -n "$running" ]
             }
 
-            # `--geometric=2` merges only the
-            # small recent packs and keeps unreachable objects (nearly every
-            # object here), so it is cheap enough to run on every `up` without a
-            # pack-count threshold: 0.5s for a suite's 400 packs, where `-a`
-            # rewrote the whole store (12 minutes at 8,000 packs). It is a no-op
-            # on an already-consolidated repo.
-            repack_dev_repo() {
+            # The script is the staged tree's (below), so it is this revision's.
+            # A repo with no packs costs nothing; the first `up` after packs
+            # appear pays about 5 minutes per million objects.
+            explode_packs() {
               # Skipped rather than fatal: a person running `up` while a suite
               # is in flight wants a stack, not homework, and the next idle
               # `up` will do it.
               if caos_containers_running; then
-                echo "==> caos containers are still running — skipping the repack" >&2
+                echo "==> caos containers are still running — skipping exploding packs" >&2
                 return 0
               fi
               docker run --rm --entrypoint /bin/bash \
-                -v "$DEV_VOLUME:/dev-stack" \
-                caos-stack:latest -c '
-                  d=/dev-stack/git
-                  [ -d "$d" ] || exit 0
-                  echo "==> consolidating $d ($(ls "$d"/objects/pack/*.pack 2>/dev/null | wc -l) packs)" >&2
-                  git -C "$d" -c gc.auto=0 repack --geometric=2 -dq
-                ' \
-                || die "repacking the dev repo"
+                -v "$CAOS_DATA/stack:/host" -v "$DEV_VOLUME:/dev-stack" \
+                caos-stack:latest /host/tree/stack/explode-packs /host/git /dev-stack/git \
+                || die "exploding the server repos' packs"
             }
 
             # The registry and Redis are caches: git holds the image inputs and
@@ -1418,7 +1400,7 @@ sandbox = false''
               # new on every `up`). A dev-stack worker orphaned by a restart
               # kept running for three days on caosd-prod, and
               # `caos_containers_running` then made every later `up` skip the
-              # repack: the shared dev repo went from 1 pack to 8,583, every
+              # consolidation: the shared dev repo went from 1 pack to 8,583, every
               # object read got slower with each of them, and a suite that
               # takes 2.5 minutes took 68. Removing them is not new damage: the
               # server they were polling is gone, so no job they hold can
@@ -1430,9 +1412,9 @@ sandbox = false''
               fi
 
               # Docker creates a missing bind source as root. Create it as the
-              # invoking user before tree staging writes it.
+              # invoking user before tree staging writes it and explode_packs
+              # mounts it.
               mkdir -p "$CAOS_DATA/stack"
-              repack_dev_repo
 
               # THE TREE, copied rather than mounted: a bind's source is
               # resolved by the ENGINE, which on macOS is a VM that sees only
@@ -1447,6 +1429,8 @@ sandbox = false''
               chmod -R u+w "$CAOS_DATA/stack/tree.new"
               rm -rf "$CAOS_DATA/stack/tree"
               mv "$CAOS_DATA/stack/tree.new" "$CAOS_DATA/stack/tree"
+
+              explode_packs
 
               echo "==> starting the stack (redis, registry, server, runnerd)" >&2
               # Three aliases, one container: every name that resolved under

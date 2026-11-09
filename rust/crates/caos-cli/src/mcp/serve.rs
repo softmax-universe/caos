@@ -94,18 +94,58 @@ pub fn serve(config: Config) -> Result<(), String> {
                 continue;
             }
         }
-        let received = std::time::SystemTime::now();
-        let started = std::time::Instant::now();
-        let answer = match (&server, &step) {
-            (Ok(server), Ok(step)) => caos::mcp_post(
-                server,
-                step.as_deref(),
-                &secrets,
-                config.max_result_chars,
-                &line,
-            ),
-            (Err(error), _) | (_, Err(error)) => Err(error.clone()),
-        };
+        // EACH REQUEST IS ANSWERED ON A THREAD OF ITS OWN, so calls run side by
+        // side. A harness issues the calls of one assistant message together,
+        // and Claude Code starts each call's clock when it issues it: answered
+        // one at a time, the third call of a batch waited out the first two and
+        // routinely passed the 120 s after which the harness moves a call to the
+        // background. Everything past this loop already takes concurrent calls:
+        // the server answers each request on a thread, the `caos://` transport
+        // opens a stream per request on one shared connection, and the step
+        // declares and records each call with a compare-and-swap that retries.
+        // Responses go out in the order they finish; JSON-RPC matches them to
+        // requests by `id`, and `out`'s lock keeps each one whole.
+        let (server, step, secrets, out) = (
+            server.clone(),
+            step.clone(),
+            secrets.clone(),
+            Arc::clone(&out),
+        );
+        let max_result_chars = config.max_result_chars;
+        in_flight.retain(|call| !call.is_finished());
+        in_flight.push(std::thread::spawn(move || {
+            if let Some(response) = answer(&server, &step, &secrets, max_result_chars, &line) {
+                if let Err(error) = write_message(&out, &response) {
+                    eprintln!("caos mcp serve: {error}");
+                }
+            }
+        }));
+    }
+    // Stdin is closed, so nothing more will be asked; the calls already asked
+    // are still owed their answers.
+    for call in in_flight {
+        let _ = call.join();
+    }
+    Ok(())
+}
+
+/// One request's answer from the server, with its timing; `None` for a
+/// notification.
+fn answer(
+    server: &Result<String, String>,
+    step: &Result<Option<String>, String>,
+    secrets: &caos::Secrets,
+    max_result_chars: Option<usize>,
+    line: &str,
+) -> Option<Value> {
+    let received = std::time::SystemTime::now();
+    let started = std::time::Instant::now();
+    let answer = match (server, step) {
+        (Ok(server), Ok(step)) => {
+            caos::mcp_post(server, step.as_deref(), secrets, max_result_chars, line)
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error.clone()),
+    };
         let response = match answer {
             Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
                 Ok(message) => Some(with_local_facts(&line, message)),

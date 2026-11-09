@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import resource
 import signal
 import shlex
 import shutil
@@ -182,8 +183,16 @@ def main():
         server = None
         log = open(root / "server.log", "wb")
         odb = root / "server.git"
+        def default_stack():
+            # The usual 8 MiB, whatever this worker runs with: the server must
+            # raise it for its git itself (see the long-chain push below).
+            _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+            soft = 8 << 20
+            if hard != resource.RLIM_INFINITY:
+                soft = min(soft, hard)
+            resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
         def start():
-            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True, preexec_fn=default_stack)
             def ready():
                 if process.poll() is not None:
                     raise AssertionError((root / "server.log").read_text())
@@ -269,7 +278,10 @@ def main():
             run("git", "init", "-q", str(consumer))
             run("git", "-C", str(consumer), "fetch", "-q", base, second[0])
             assert run("git", "-C", str(consumer), "rev-parse", "FETCH_HEAD") == second[0]
-            assert list((odb / "objects/pack").glob("*.pack"))
+            # The store is loose objects only (design/loose-object-store.md): the
+            # import published its objects loose, and left no pack behind.
+            assert not list((odb / "objects/pack").glob("*.pack"))
+            assert (odb / "objects" / second[0][:2] / second[0][2:]).is_file()
             before = len(observations)
             commands = git_commands.read_text()
             assert call(payload(second[0])) == {"commit": second[0]}
@@ -364,6 +376,23 @@ def main():
             visible(pushed[0])
             assert run("git", "--git-dir", str(odb), "config", "receive.fsckObjects") == "true"
             run("git", "--git-dir", str(origin), "push", base, ":refs/caos/test/closure")
+            # A long new history. receive-pack checks it with `unpack-objects
+            # --strict`, which recurses once per commit: 30,000 overflow git's
+            # default 8 MiB stack (the server is started under that limit), so
+            # this push lands only because the server raises it for its git.
+            chain = root / "chain.git"
+            run("git", "init", "--bare", "-q", str(chain))
+            stream = "".join(
+                f"commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"
+                + (f"from :{i - 1}\n" if i > 1 else "") + "\n"
+                for i in range(1, 30_001))
+            run("git", "--git-dir", str(chain), "fast-import", "--quiet", input=stream.encode())
+            tip = run("git", "--git-dir", str(chain), "rev-parse", "refs/heads/main")
+            first_commit = run("git", "--git-dir", str(chain), "rev-list", "--max-parents=0", tip)
+            run("git", "--git-dir", str(chain), "push", "-q", base, tip + ":refs/caos/test/chain")
+            for oid in [tip, first_commit]:
+                object_request(oid)
+            run("git", "--git-dir", str(chain), "push", "-q", base, ":refs/caos/test/chain")
             # A pack's surplus, unreferenced commits must also have parents.
             malformed = child_bytes.replace(posted_parent[0].encode(), ("2" * 40).encode())
             malformed_oid = run("git", "--git-dir", str(origin), "hash-object", "-t", "commit", "-w", "--stdin", input=malformed)
@@ -702,17 +731,20 @@ def main():
                 for extra in [[], ["--expected=main"], ["--expected=absent", "--expected=absent"]]:
                     invalid = subprocess.run([cli, "push-git", destination, second[0], "cli", *extra], env=cli_env, capture_output=True)
                     assert invalid.returncode != 0
-            # Small uploads now stay packed too. The live reader must discover
-            # more packs than gix's default capacity of 32 without a restart.
+            # Every push lands as loose objects, published by the server's own
+            # pre-receive hook, so the store gains no packs however many pushes
+            # arrive, and the live reader sees each push at once.
             for index in range(40):
                 packed = advance()
                 run("git", "--git-dir", str(origin), "push", "-q", base,
                     packed[0] + f":refs/heads/pack-growth-{index}")
                 for oid in packed:
                     object_request(oid)
-            assert len(list((odb / "objects/pack").glob("*.pack"))) > 32
-            # Commit staging must also work once its live-store alternate
-            # contains more than 32 packs.
+            assert not list((odb / "objects/pack").glob("*.pack"))
+            # The hook lives with the server process, never in the repository,
+            # which other servers may share.
+            assert not (odb / "hooks/pre-receive").exists()
+            # Commit staging must also work after many pushes.
             staged_tip = advance(packed[0])
             for kind, oid in [("blob", staged_tip[2]), ("tree", staged_tip[1]), ("commit", staged_tip[0])]:
                 post_from_origin(kind, oid)

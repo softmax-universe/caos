@@ -1,0 +1,6 @@
+100644 296c003bd5e2584efabbe0d41b90274e8505301c 1	rust/crates/caos-cli/src/mcp/serve.rs
+100644 f288402116e47fb8e48bac42a22177e4119689b7 2	rust/crates/caos-cli/src/mcp/serve.rs
+100644 83bdc7c40f9604049fc91635cd1f930dbcb5b8a3 3	rust/crates/caos-cli/src/mcp/serve.rs
+
+Auto-merging rust/crates/caos-cli/src/mcp/serve.rs
+CONFLICT (content): Merge conflict in rust/crates/caos-cli/src/mcp/serve.rs

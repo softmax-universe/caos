@@ -494,7 +494,7 @@ mod timing_tests {
             {"type": "text", "text": "timing: server 1.0s (step 0.9s, decode 0.1s); step trace: t"},
         ]}});
         let received = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_992_805);
-        let timed = with_client_timing(line, answer, received, 1.25);
+        let timed = with_client_timing(line, answer, received, 1.24);
         let content = timed["result"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         assert_eq!(

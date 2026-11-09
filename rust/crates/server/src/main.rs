@@ -201,6 +201,10 @@ fn install_termination_handlers() {
 }
 
 fn main() {
+    // First, so every git this process ever runs inherits it.
+    if let Err(error) = set_stack_limit(GIT_STACK_BYTES) {
+        eprintln!("warning: cannot raise the stack limit for git: {error}");
+    }
     // Run as the repository's `pre-receive` hook (see `loose::publish_quarantine`).
     if loose::is_hook_invocation() {
         std::process::exit(loose::publish_quarantine());

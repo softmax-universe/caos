@@ -165,14 +165,49 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
             false,
         ));
     }
-    let answer = compute::eval_expression_endpoint(config, "run", &params, &secrets)
+    // `/eval/run` is `/start/run` and then waiting on the ticket; spelled out
+    // here because the TICKET is worth handing back: it keys the trace of the
+    // whole step run (declaring the call in the session, running the tool,
+    // recording its result), where the `trace:` line the step writes covers
+    // only the tool. The difference between the two is the overhead a slow
+    // call is otherwise silent about.
+    let started = std::time::Instant::now();
+    let ticket = compute::start_expression(config, "run", &params, &secrets)
         .map_err(|e| e.message().to_string())?;
+    let ticket = String::from_utf8_lossy(&ticket).trim().to_string();
+    let answer = compute::wait_ticket(config, &ticket).map_err(|e| e.message().to_string())?;
+    let stepped = started.elapsed().as_secs_f64();
     let answer = String::from_utf8_lossy(&answer);
     let (kind, hash) = answer
         .trim()
         .split_once(' ')
         .ok_or_else(|| format!("the step answered {:?}", answer.trim()))?;
-    decode_result(config, kind, hash, caller.max_result_chars)
+    let mut result = decode_result(config, kind, hash, caller.max_result_chars)?;
+    let total = started.elapsed().as_secs_f64();
+    let timing = server_timing(total, stepped, &ticket);
+    eprintln!("mcp {name}: {timing}");
+    append_text(&mut result, timing);
+    Ok(result)
+}
+
+/// The server's part of a call's timing line: how long the call took here, how
+/// much of that was the step (everything but decoding its answer), and the
+/// step's ticket, which `caos-std/read-trace` reads as the trace of the whole
+/// run.
+fn server_timing(total: f64, stepped: f64, ticket: &str) -> String {
+    format!(
+        "timing: server {total:.1}s (step {stepped:.1}s, decode {:.1}s); step trace: {ticket}",
+        (total - stepped).max(0.0)
+    )
+}
+
+/// Add `text` to a tool result as one more text block, after what the tool said.
+/// A block of its own rather than a suffix, so the tool's text stays exactly
+/// what the session recorded.
+fn append_text(result: &mut Value, text: String) {
+    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+        content.push(json!({ "type": "text", "text": text }));
+    }
 }
 
 /// The form a tools-only run of the step takes, as the `/eval/run` parameter

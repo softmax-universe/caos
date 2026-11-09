@@ -182,8 +182,16 @@ def main():
         server = None
         log = open(root / "server.log", "wb")
         odb = root / "server.git"
+        def default_stack():
+            # The usual 8 MiB, whatever this worker runs with: the server must
+            # raise it for its git itself (see the long-chain push below).
+            _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+            soft = 8 << 20
+            if hard != resource.RLIM_INFINITY:
+                soft = min(soft, hard)
+            resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
         def start():
-            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen([binary], env=dict(os.environ, PATH=str(git_bin) + os.pathsep + os.environ["PATH"], SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(odb), GIT_SSL_CAINFO=str(cert)), stdout=log, stderr=log, start_new_session=True, preexec_fn=default_stack)
             def ready():
                 if process.poll() is not None:
                     raise AssertionError((root / "server.log").read_text())

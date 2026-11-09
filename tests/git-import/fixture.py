@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import resource
 import signal
 import shlex
 import shutil

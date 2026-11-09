@@ -72,6 +72,7 @@ pub fn serve(config: Config) -> Result<(), String> {
     let out: Out = Arc::new(Mutex::new(std::io::stdout()));
     let secrets = caos::Secrets::current();
 
+    let mut in_flight: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line.map_err(|error| format!("reading request: {error}"))?;

@@ -3861,6 +3861,7 @@ dependencies = [
  "caos-world",
  "session-protocol",
  "ed25519-dalek",
+ "flate2",
  "git-locator",
  "gix",
  "minreq",

@@ -152,7 +152,7 @@ echo "== a prompt the server fails to record is refused, saying why ==" >&2
 # through and shows nobody), and Stop answers a systemMessage with the reason
 # and exits 0 (it used to be a bare "Stop hook error").
 broken_hook() {
-  "$CAOS_CLI" mcp hook --server="$CAOS_SERVER_URL" \
+  "$CAOS_CLI" --server="$CAOS_SERVER_URL" mcp hook \
     --llm-step:hash=0000000000000000000000000000000000000000
 }
 y="resume-y-$stamp"

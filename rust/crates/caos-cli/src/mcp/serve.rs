@@ -119,7 +119,10 @@ pub fn serve(config: Config) -> Result<(), String> {
         };
         if let Some(response) = response {
             let round_trip = started.elapsed().as_secs_f64();
-            write_message(&out, &with_client_timing(&line, response, received, round_trip))?;
+            write_message(
+                &out,
+                &with_client_timing(&line, response, received, round_trip),
+            )?;
         }
     }
     Ok(())

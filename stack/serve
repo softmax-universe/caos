@@ -228,6 +228,18 @@ for _ in $(seq 1 200); do
 done
 redis-cli -p "$CAOS_STACK_REDIS_PORT" ping >/dev/null 2>&1 \
   || fail "redis never came up"
+# PONG IS NOT READY. Redis answers PING while it is still loading its dataset
+# from disk, and refuses everything else with `LOADING`. A persistent cache of
+# gigabytes takes seconds to load, and the server, started next, fails every
+# request that touches the cache until then: on caosd-prod (2026-11-10), the
+# first probe after a restart got "cannot record ticket …: LOADING Redis is
+# loading the dataset in memory". So wait for `loading:0`, for as long as redis
+# is alive and still at it.
+redis_pid=${pids[-1]}
+while redis-cli -p "$CAOS_STACK_REDIS_PORT" info persistence 2>/dev/null | grep -q '^loading:1'; do
+  kill -0 "$redis_pid" 2>/dev/null || fail "redis exited while loading its dataset (see redis.log)"
+  sleep 0.05
+done
 else
   # Someone else's. Probed anyway, and by ADDRESS rather than by starting one:
   # a stack whose cache is unreachable still works (the server treats redis as

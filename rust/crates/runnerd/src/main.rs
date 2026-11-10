@@ -555,7 +555,12 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
         // (`--remote --url …`) shares a container namespace with the outer one,
         // and must not sweep its siblings' containers.
         .args(["--label", &format!("{OWNER_LABEL}={}", owner_id())])
-        .args(["--network", &config.network]);
+        .args(["--network", &config.network])
+        // The log reaches us through the attach stream (`output()` below), so
+        // the engine's own copy is a second one nobody reads: conmon wrote it to
+        // the store's disk at ~19 MB/s in a suite run, fsyncing as it went, on
+        // the volume whose fsync latency is what every container start waits on.
+        .args(["--log-driver", "none"]);
     // One inspect answers both grants, memoized together.
     let grants = image_grants(config, &job.image_ref);
     if let Some(sock) = &config.socket {

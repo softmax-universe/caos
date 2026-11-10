@@ -14,8 +14,8 @@
 //!   compute the member's workspace-dep closure, PRUNE the workspace to what
 //!   the member's build reads (root manifest + lockfile + every member
 //!   manifest + the closure's sources — all by CAS links), and map-then over
-//!   each check directly into a `job` (Cargo's primary-package artifacts are
-//!   not reusable by a dependent), and map-then over direct deps with itself
+//!   each check or clippy directly into a `job` (neither can reuse its
+//!   deps' separately built artifacts), and map-then over direct deps with itself
 //!   (`cmd=dep`) for commands that need build artifacts.
 //! * **job** — the compile, keyed on (pruned tree, children, name, cmd): the
 //!   narrow key that buys incrementality. Assembles the pruned workspace at
@@ -165,8 +165,8 @@ pub fn crate_mode(cmd: &str) -> Result<(), String> {
     let job = self_curry(&job_kvs)?;
 
     if member.deps.is_empty() || !needs_dependency_artifacts(cmd) {
-        // A check compiles its full dependency closure in this member's Cargo
-        // invocation. Cargo assigns a different unit hash when a package is
+        // A check or clippy compiles its full dependency closure in this
+        // member's Cargo invocation (see needs_dependency_artifacts). Cargo assigns a different unit hash when a package is
         // selected with `-p` than when the same package is a dependency, so a
         // separately checked dep cannot satisfy this job; waiting for it only
         // serializes a duplicate compile. Commands that consume rlibs still
@@ -191,10 +191,15 @@ pub fn crate_mode(cmd: &str) -> Result<(), String> {
     map_then("/cas/deps", Some(Arg::Hash(&map)), Some(Arg::Hash(&job)))
 }
 
-/// Cargo check's primary-package unit is not reusable as a dependency unit;
-/// commands that consume rlibs still benefit from the artifact DAG.
+/// Cargo check's primary-package unit is not reusable as a dependency unit,
+/// and clippy re-checks every workspace member it reaches, because
+/// `clippy-driver` (cargo's RUSTC_WORKSPACE_WRAPPER) is part of a member's
+/// fingerprint: a dep job's plain-rustc check and build leave it `Checking`
+/// anyway. Waiting for them put caos-iroh's dep job (68s) on unit-clippy's
+/// critical path for nothing. Commands that consume rlibs or rmetas as built
+/// (`build`, `test`, `doc`) still benefit from the artifact DAG.
 fn needs_dependency_artifacts(cmd: &str) -> bool {
-    cmd != "check"
+    cmd != "check" && cmd != "clippy"
 }
 
 /// Prune the workspace to what `member`'s build reads: root manifest +
@@ -769,7 +774,8 @@ mod tests {
     #[test]
     fn checks_compile_their_closure_in_the_member_job() {
         assert!(!needs_dependency_artifacts("check"));
-        for cmd in ["build", "test", "clippy", "doc", "dep"] {
+        assert!(!needs_dependency_artifacts("clippy"));
+        for cmd in ["build", "test", "doc", "dep"] {
             assert!(needs_dependency_artifacts(cmd), "{cmd}");
         }
     }

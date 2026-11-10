@@ -27,6 +27,11 @@ var (
 	server string
 	client = &http.Client{Timeout: 10 * time.Minute}
 	seq    int
+	// testSalt keys every tool call, so a salted suite really re-runs them. It
+	// used to be this process's pid, which is the same in every fresh
+	// container: every call was a cache hit from some earlier run, and the
+	// tools' cold path was never exercised by `--test-salt`.
+	testSalt string
 )
 
 func run(name string, args ...string) string {

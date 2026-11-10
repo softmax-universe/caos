@@ -71,7 +71,7 @@ func tool(name, root string, params ...string) (text string, failed bool) {
 	if root != "" {
 		form.Set("root:hash", root)
 	}
-	form.Set("salt", fmt.Sprintf("std-git-history-%d-%d", os.Getpid(), seq))
+	form.Set("salt", fmt.Sprintf("std-git-history-%s-%d", testSalt, seq))
 	for i := 0; i < len(params); i += 2 {
 		form.Set(params[i], params[i+1])
 	}

@@ -55,7 +55,10 @@ in
 {
   # The EC2 base (SSM, amazon-init off, the dhcpcd guard, secrets, Datadog)
   # is shared with the watchdog host; what remains here is the stack itself.
-  imports = [ ../base.nix ];
+  imports = [
+    ../base.nix
+    ../docker.nix
+  ];
 
   options.caos = {
     package = lib.mkOption {
@@ -174,34 +177,8 @@ in
       "docker.service"
       "amazon-ssm-agent.service"
     ] ++ lib.optional cfg.relay.enable "iroh-relay.service";
-    # Container-level metrics (restarts, OOM kills, per-container CPU/memory)
-    # for the runner pool. The agent reads the socket, so it joins the group.
-    services.datadog-agent.checks.docker = {
-      init_config = { };
-      instances = [ { url = "unix://var/run/docker.sock"; } ];
-    };
-    users.users.datadog.extraGroups = [ "docker" ];
 
-    virtualisation.docker = {
-      enable = true;
-      # The `docker` alias still resolves to 28.5.2, which nixpkgs marks
-      # unmaintained; an unpinned config refuses to evaluate at all.
-      package = pkgs.docker_29;
-      daemon.settings = {
-        data-root = "/data/docker";
-        # Docker's built-in pool is 172.17.0.0/12 in /16s, spanning
-        # 172.16-172.31 -- so its 16th network is 172.31.0.0/16, exactly the
-        # CIDR of every EC2 *default* VPC. caos's runner pool can allocate that
-        # many. Move the pool somewhere nothing routes, and exhaustion then
-        # fails a network create loudly instead of eating the VPC route.
-        default-address-pools = [
-          {
-            base = "10.200.0.0/14";
-            size = 24;
-          }
-        ];
-      };
-    };
+    virtualisation.docker.daemon.settings.data-root = "/data/docker";
 
     fileSystems."/data" = {
       device = cfg.dataDevice;
@@ -237,7 +214,14 @@ in
     # You arrive over SSM as ssm-user; let it drive the stack too.
     users.users.ssm-user.extraGroups = [ "docker" "caos" ];
 
-    networking.firewall.allowedUDPPorts = [ cfg.irohPort ];
+    # The client endpoint, then the three runner endpoints (stack/serve,
+    # CAOS_STACK_RUNNER_TICKETS) that prod/runner hosts dial.
+    networking.firewall.allowedUDPPorts = [
+      cfg.irohPort
+      11205
+      11206
+      11207
+    ];
     networking.firewall.allowedTCPPorts = lib.optional cfg.relay.enable cfg.relay.port;
 
     # The relay, as a UNIT rather than a shell command, because `nix run` dies
@@ -303,6 +287,10 @@ in
         CAOS_DATA = dataDir;
         CAOS_IROH_ADVERTISE = "${cfg.advertiseAddress}:${toString cfg.irohPort}";
         CAOS_IROH_RELAY = cfg.relay.url;
+        # Serve runners on other machines too (prod/runner). Their tickets are
+        # `caosd runner-ticket <server|registry|redis>`, copied by hand into
+        # Secrets Manager once (prod/README.md).
+        CAOS_RUNNER_TICKETS = "yes";
       };
       serviceConfig = {
         # `notify`, so a start still waits for the stack to be ready (as the

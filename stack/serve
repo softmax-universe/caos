@@ -105,6 +105,17 @@
 #                             with the published port. A client that cannot use
 #                             any of these falls back to the relay and works,
 #                             slowly — one round trip to the relay per request.
+#   CAOS_STACK_RUNNER_TICKETS "yes" to also answer RUNNERS on other machines
+#                             (prod/runner): three more endpoints, one per
+#                             service a remote runner and its workers use, each
+#                             with its own key and ticket under
+#                             $CAOS_STACK_STATE/iroh-runner/<service>:
+#                               server    UDP 11205 -> the server (:80)
+#                               registry  UDP 11206 -> the registry (:5000)
+#                               redis     UDP 11207 -> redis
+#                             Advertised at CAOS_STACK_IROH_ADVERTISE's hosts on
+#                             these ports. Needs CAOS_STACK_IROH=yes (the relay)
+#                             and the registry and redis in this group.
 #
 # Passed through to runnerd untouched, because they are the caller's business:
 # DOCKER_HOST (which engine), CAOS_DOCKER_NETWORK (which netns workers join),
@@ -384,6 +395,47 @@ if [ "${CAOS_STACK_IROH:-no}" = yes ]; then
     --to "127.0.0.1:80" \
     --relay "$CAOS_IROH_RELAY" \
     "${iroh_advertise[@]}"
+fi
+
+# --- runner tickets: the same stack, for runners on other machines -----------
+# A remote runner needs three things from here, not one: the server, the
+# registry its daemon pulls from (and its workers push to), and the redis its
+# workers cache in. A dumbpipe ticket reaches exactly one port, so each gets an
+# endpoint of its own, and the runner pins a local port to each
+# (`iroh-vhost pin`). Their KEYS are separate from the client ticket's on
+# purpose: these tickets reach the registry and an unauthenticated redis, so
+# they go only to runner hosts, and rotating them (delete the dir, restart)
+# leaves every client's `caos://` remote working.
+#
+# Separate from CAOS_STACK_IROH's block so the client endpoint's behaviour is
+# unchanged; it requires that block for the relay check and the advertise list.
+if [ "${CAOS_STACK_RUNNER_TICKETS:-no}" = yes ]; then
+  if [ "${CAOS_STACK_IROH:-no}" != yes ]; then
+    fail "CAOS_STACK_RUNNER_TICKETS=yes needs CAOS_STACK_IROH=yes: the runner endpoints use its relay"
+  fi
+  if [ "$CAOS_STACK_REGISTRY" != yes ] || [ "$CAOS_STACK_REDIS" != yes ]; then
+    fail "CAOS_STACK_RUNNER_TICKETS=yes needs this group's own registry and redis to hand out"
+  fi
+  start_runner_endpoint() { # <service> <udp port> <to>
+    local service=$1 port=$2 to=$3 addr
+    local state="$CAOS_STACK_STATE/iroh-runner/$service"
+    mkdir -p "$state"
+    # The client listener's hosts, on this listener's port: same machine, same
+    # published-port arrangement, so the same names reach it.
+    local advertise=()
+    for addr in ${CAOS_STACK_IROH_ADVERTISE:-}; do
+      advertise+=(--advertise "${addr%:*}:$port")
+    done
+    start "caos-iroh-runner-$service" "$CAOS_STACK_BIN/caos-iroh" serve \
+      --state "$state" \
+      --port "$port" \
+      --to "$to" \
+      --relay "$CAOS_IROH_RELAY" \
+      "${advertise[@]}"
+  }
+  start_runner_endpoint server 11205 127.0.0.1:80
+  start_runner_endpoint registry 11206 127.0.0.1:5000
+  start_runner_endpoint redis 11207 "127.0.0.1:$CAOS_STACK_REDIS_PORT"
 fi
 
 # --- core-seeder-runner: the bootstrap answerer, when this placement wants it -

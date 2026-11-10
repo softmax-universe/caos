@@ -203,8 +203,18 @@ export -f fail
 #
 # The test's exit code fails this worker, and dev/run-test's `--catch` turns
 # that into this test's FAIL — so a failure never touches another test's result.
+#
+# Each line is stamped with this worker's elapsed seconds, so a slow test's
+# record says which stage took the time; the first stamp is the staging above.
+stamp() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%4ds %s\n' "$SECONDS" "$line"
+  done
+}
+{ bash /cas/args/worker1 2>&1 || echo "$?" > /tmp/rc; } | stamp > /tmp/narration
 rc=0
-bash /cas/args/worker1 > /tmp/narration 2>&1 || rc=$?
+if [ -e /tmp/rc ]; then rc=$(cat /tmp/rc); fi
 cat /tmp/narration >&2
 if [ "$rc" != 0 ]; then exit "$rc"; fi
 caos put /tmp/narration /cas/out

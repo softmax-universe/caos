@@ -184,10 +184,12 @@ def main():
         log = open(root / "server.log", "wb")
         odb = root / "server.git"
         def default_stack():
-            # The usual 8 MiB, whatever this worker runs with: the server must
-            # raise it for its git itself (see the long-chain push below).
+            # 1 MiB, whatever this worker runs with: the server must raise it
+            # for its git itself (see the long-chain push below). Below git's
+            # usual 8 MiB so the chain that overflows it can be short: at 8 MiB
+            # it took 30,000 commits, and pushing them was half this test.
             _, hard = resource.getrlimit(resource.RLIMIT_STACK)
-            soft = 8 << 20
+            soft = 1 << 20
             if hard != resource.RLIM_INFINITY:
                 soft = min(soft, hard)
             resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
@@ -377,15 +379,15 @@ def main():
             assert run("git", "--git-dir", str(odb), "config", "receive.fsckObjects") == "true"
             run("git", "--git-dir", str(origin), "push", base, ":refs/caos/test/closure")
             # A long new history. receive-pack checks it with `unpack-objects
-            # --strict`, which recurses once per commit: 30,000 overflow git's
-            # default 8 MiB stack (the server is started under that limit), so
-            # this push lands only because the server raises it for its git.
+            # --strict`, which recurses once per commit: 4,000 overflow a 1 MiB
+            # stack (the server is started under that limit), so this push of
+            # twice that lands only because the server raises it for its git.
             chain = root / "chain.git"
             run("git", "init", "--bare", "-q", str(chain))
             stream = "".join(
                 f"commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"
                 + (f"from :{i - 1}\n" if i > 1 else "") + "\n"
-                for i in range(1, 30_001))
+                for i in range(1, 8_001))
             run("git", "--git-dir", str(chain), "fast-import", "--quiet", input=stream.encode())
             tip = run("git", "--git-dir", str(chain), "rev-parse", "refs/heads/main")
             first_commit = run("git", "--git-dir", str(chain), "rev-list", "--max-parents=0", tip)

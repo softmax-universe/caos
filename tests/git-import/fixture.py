@@ -752,26 +752,24 @@ def main():
             stop(server); server = None
             server = start()
             visible(posted_child[0])
-            # Trusting existing OIDs requires auditing old stores at startup,
-            # including orphan trees whose ordinary children are missing.
+            # `server doctor` audits a store by hand (`caosd doctor`), including
+            # orphan trees whose ordinary children are missing. Each damage
+            # scenario plants its damage in a fresh copy of the store.
             stop(server); server = None
-            # The audit only runs with CAOS_STORE_CHECK=yes, and then it repacks
-            # first, so a loose object planted in the store is packed before the
-            # audit and can no longer be unlinked. Each refusal scenario plants
-            # its damage in a fresh copy of the store instead.
             def damaged_store(name):
                 store = root / name
                 shutil.copytree(odb, store)
                 return store
-            def start_refused(store):
-                return subprocess.run([binary], env=dict(os.environ,
-                    SERVER_ADDR=f"127.0.0.1:{port}", CAOS_GIT_DIR=str(store),
-                    CAOS_STORE_CHECK="yes"), capture_output=True, timeout=30)
+            def doctor(store):
+                return subprocess.run([binary, "doctor"], env=dict(os.environ,
+                    CAOS_GIT_DIR=str(store)), capture_output=True, timeout=30)
+            healthy = doctor(odb)
+            assert healthy.returncode == 0, healthy.stderr
             tree_store = damaged_store("server-broken-tree.git")
             broken_tree = b"100644 missing\0" + bytes.fromhex("3" * 40)
             broken_tree_oid = run("git", "--git-dir", str(tree_store), "hash-object", "-t", "tree", "-w", "--stdin", input=broken_tree)
-            refused = start_refused(tree_store)
-            assert refused.returncode != 0, "server trusted legacy incomplete tree"
+            refused = doctor(tree_store)
+            assert refused.returncode != 0, "doctor passed an incomplete tree"
             assert b"restore the missing objects" in refused.stderr, refused.stderr
             assert run("git", "--git-dir", str(tree_store), "cat-file", "-t", broken_tree_oid) == "tree"
             # Upgrades cannot silently trust orphan commits either.
@@ -783,11 +781,11 @@ def main():
             # A cached commit graph must not conceal a missing commit object.
             run("git", "--git-dir", str(commit_store), "commit-graph", "write", "--stdin-commits", input=(broken + "\n").encode())
             (commit_store / "objects" / legacy_parent[:2] / legacy_parent[2:]).unlink()
-            refused = start_refused(commit_store)
-            assert refused.returncode != 0, "server accepted legacy incomplete history"
+            refused = doctor(commit_store)
+            assert refused.returncode != 0, "doctor passed incomplete history"
             assert b"restore the missing objects" in refused.stderr, refused.stderr
             assert run("git", "--git-dir", str(commit_store), "cat-file", "-t", broken) == "commit"
-            print("git-import: complete history, upload ordering, quarantined imports/pushes, commit rejection, bounded validation, startup integrity, HTTPS credentials, reuse, concurrency and retry PASS")
+            print("git-import: complete history, upload ordering, quarantined imports/pushes, commit rejection, bounded validation, doctor integrity, HTTPS credentials, reuse, concurrency and retry PASS")
         finally:
             stop(server)
             remote.shutdown(); remote.server_close(); thread.join()

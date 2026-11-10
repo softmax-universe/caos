@@ -209,6 +209,21 @@ fn main() {
     if loose::is_hook_invocation() {
         std::process::exit(loose::publish_quarantine());
     }
+    // `server doctor`: check, by hand, that every stored object's history is
+    // stored (`caosd doctor`). Read-only, so it is safe beside a live server.
+    if std::env::args().nth(1).as_deref() == Some("doctor") {
+        let git_dir = env_or("CAOS_GIT_DIR", DEFAULT_GIT_DIR);
+        match verify_object_closure(&git_dir) {
+            Ok(()) => {
+                eprintln!("doctor: {git_dir}: every stored object's history is stored");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("doctor: {git_dir}: object store has incomplete history; restore the missing objects: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     install_termination_handlers();
 
     let addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
@@ -289,22 +304,6 @@ fn main() {
             "repair: {git_dir} had crash damage — dropped {swept} empty object(s) \
              and {dropped} broken ref(s)"
         );
-    }
-
-    // The check below reads every object in the store, which on a long-lived
-    // repo takes minutes: far too long to pay on every start, and a test stack
-    // has nothing to check. `caosd` opts in (CAOS_STACK_STORE_CHECK); no other
-    // placement does. There is no repack here any more: the store is never
-    // packed (design/loose-object-store.md).
-    if env_or("CAOS_STORE_CHECK", "no") == "yes" {
-        // Older servers accepted individual commits without their
-        // dependencies. Check all objects, including unreferenced ones, before
-        // trusting existence as proof of closure. Never delete history to make
-        // an upgrade pass.
-        verify_object_closure(&git_dir).unwrap_or_else(|error| {
-            eprintln!("fatal: object store has incomplete history; restore the missing objects before restarting: {error}");
-            std::process::exit(1);
-        });
     }
 
     let secrets_git = env_or("CAOS_SECRETS_GIT_DIR", &secret_store::default_dir(&git_dir));
@@ -436,6 +435,12 @@ fn run_required_git(args: &[&str]) -> Result<(), String> {
     ))
 }
 
+/// Whether every stored object's history is stored: each object, referenced or
+/// not, walked as a root. Older servers accepted individual commits without
+/// their dependencies; the store's publication order keeps closure since
+/// (design/loose-object-store.md). It reads every object, minutes on a
+/// long-lived store, so it runs only on request (`server doctor`), never at
+/// start.
 fn verify_object_closure(git_dir: &str) -> Result<(), String> {
     match std::fs::read(std::path::Path::new(git_dir).join("shallow")) {
         Ok(bytes) if !bytes.is_empty() => {

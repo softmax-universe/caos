@@ -348,34 +348,65 @@ fn create_fork(session: &str, request: &Request, from: &Oid) -> Result<Option<St
         session_protocol::v3::refs::archived_membership_ref(&request.actor, session)?;
     // Negotiated: the content commit's history is on the server under no
     // advertised ref, and only negotiation keeps it out of the pack.
-    let pushed = state.store().push_negotiating(&[
-        RefUpdate {
-            refname: refname.clone(),
-            expected: None,
-            new: Some(claimed.clone()),
-        },
-        RefUpdate {
-            refname: active,
-            expected: None,
-            new: Some(forked),
-        },
-        RefUpdate {
-            refname: archived,
-            expected: None,
-            new: None,
-        },
-    ]);
-    match pushed {
-        Ok(()) => State::from_store(state.into_store(), refname, claimed).map(Some),
-        Err(error) => {
-            // Lost the race to create it, or the push failed outright.
-            if state.store().fetch_ref(&refname)?.is_some() {
-                Ok(None)
-            } else {
-                Err(format!("forking into {refname}: {error}"))
+    let created = create_or_join(state.store(), &refname, || {
+        state.store().push_negotiating(&[
+            RefUpdate {
+                refname: refname.clone(),
+                expected: None,
+                new: Some(claimed.clone()),
+            },
+            RefUpdate {
+                refname: active.clone(),
+                expected: None,
+                new: Some(forked.clone()),
+            },
+            RefUpdate {
+                refname: archived.clone(),
+                expected: None,
+                new: None,
+            },
+        ])
+    })
+    .map_err(|error| format!("forking into {refname}: {error}"))?;
+    if created {
+        State::from_store(state.into_store(), refname, claimed).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Create `refname` with `push`: `true` when this push created it, `false` when
+/// another push did, an error when neither happened.
+///
+/// A failed create is not yet a lost race. While another push holds the ref's
+/// lock (`cannot lock ref …: File exists`) it has reserved the ref but not
+/// renamed its lock into place, so a read straight after finds nothing; and
+/// holding the lock is not creating the ref, since the holder can still fail
+/// and let it go. So after a failure, look for the ref with a doubling pause
+/// (~3s, as long as a loaded suite was seen to hold one): found, another push
+/// created it. Still absent, nobody did, and this push tries again. Looking
+/// only once failed mcp-serve's two calls in one session as an error.
+fn create_or_join(
+    store: &GitStore,
+    refname: &str,
+    push: impl Fn() -> Result<(), String>,
+) -> Result<bool, String> {
+    let mut last = String::new();
+    for _ in 0..4 {
+        match push() {
+            Ok(()) => return Ok(true),
+            Err(error) => last = error,
+        }
+        for wait in 0..6 {
+            if store.fetch_ref(refname)?.is_some() {
+                return Ok(false);
+            }
+            if wait < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(100 << wait));
             }
         }
     }
+    Err(last)
 }
 
 /// Make the session, with its first prompt: root and message, pushed
@@ -415,21 +446,18 @@ fn create(session: &str, request: &Request) -> Result<Option<State>, String> {
     let mut state = State::from_store(store, refname.clone(), root.clone())?;
     let claimed = mint_prompt(state.store_mut(), &root, session, request, &signature)?;
     // the server under no advertised ref.
-    let pushed = state.store().push_negotiating(&[RefUpdate {
-        refname: refname.clone(),
-        expected: None,
-        new: Some(claimed.clone()),
-    }]);
-    match pushed {
-        Ok(()) => State::from_store(state.into_store(), refname, claimed).map(Some),
-        Err(error) => {
-            // Lost the race to create it, or the push failed outright.
-            if state.store().fetch_ref(&refname)?.is_some() {
-                Ok(None)
-            } else {
-                Err(format!("creating {refname}: {error}"))
-            }
-        }
+    let created = create_or_join(state.store(), &refname, || {
+        state.store().push_negotiating(&[RefUpdate {
+            refname: refname.clone(),
+            expected: None,
+            new: Some(claimed.clone()),
+        }])
+    })
+    .map_err(|error| format!("creating {refname}: {error}"))?;
+    if created {
+        State::from_store(state.into_store(), refname, claimed).map(Some)
+    } else {
+        Ok(None)
     }
 }
 

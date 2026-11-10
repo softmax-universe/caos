@@ -3634,11 +3634,7 @@ mod expression_tests {
         assert_eq!(pending_owner("pending 0a1b"), Some("0a1b"));
         assert_eq!(pending_owner("ok tree abc"), None);
         assert_eq!(pending_owner("failed 500 pending"), None);
-        // A bare `pending` has nobody to vouch for it, and this process's own
-        // tickets are never judged by the lease.
-        let config_free = |owner: &str| !owner.is_empty() && owner != server_instance();
-        assert!(!config_free(""));
-        assert!(!config_free(server_instance()));
+        // One name for the life of the process, 128 random bits in hex.
         assert_eq!(server_instance().len(), 32);
         assert_eq!(server_instance(), server_instance());
     }

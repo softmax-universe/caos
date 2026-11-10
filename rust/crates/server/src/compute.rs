@@ -3361,7 +3361,10 @@ fn pending_owner(state: &str) -> Option<&str> {
 fn peer_alive(config: &Config, owner: &str) -> bool {
     !owner.is_empty()
         && owner != server_instance()
-        && matches!(cache_get(&config.redis_addr, &lease_key(owner)), Ok(Some(_)))
+        && matches!(
+            cache_get(&config.redis_addr, &lease_key(owner)),
+            Ok(Some(_))
+        )
 }
 
 fn ticket_key(config: &Config, ticket: &str) -> String {

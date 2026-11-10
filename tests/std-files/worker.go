@@ -72,7 +72,7 @@ func call(tool, root string, params ...string) result {
 	if root != "" {
 		form.Set("root:hash", root)
 	}
-	form.Set("salt", fmt.Sprintf("std-files-%s-%d", testSalt, seq))
+	form.Set("salt", fmt.Sprintf("std-files-%s-%d", runSalt, seq))
 	w.True(len(params)%2 == 0, "params are name, value pairs")
 	for i := 0; i < len(params); i += 2 {
 		form.Set(params[i], params[i+1])

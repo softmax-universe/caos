@@ -369,13 +369,31 @@ fn create_fork(session: &str, request: &Request, from: &Oid) -> Result<Option<St
         Ok(()) => State::from_store(state.into_store(), refname, claimed).map(Some),
         Err(error) => {
             // Lost the race to create it, or the push failed outright.
-            if state.store().fetch_ref(&refname)?.is_some() {
+            if lost_create_race(state.store(), &refname)? {
                 Ok(None)
             } else {
                 Err(format!("forking into {refname}: {error}"))
             }
         }
     }
+}
+
+/// Whether `refname` exists after a push creating it failed, which makes the
+/// failure a lost race. LOOKED FOR MORE THAN ONCE: the loser's push fails while
+/// the winner still holds the ref's lock (`cannot lock ref …: File exists`), so
+/// the winner's update can land after a first read has found nothing — which
+/// failed mcp-serve's two calls in one session as an error. A doubling pause,
+/// ~3s in all: under a suite's load a push can hold the lock that long.
+fn lost_create_race(store: &GitStore, refname: &str) -> Result<bool, String> {
+    for attempt in 0..6 {
+        if store.fetch_ref(refname)?.is_some() {
+            return Ok(true);
+        }
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+        }
+    }
+    Ok(false)
 }
 
 /// Make the session, with its first prompt: root and message, pushed
@@ -424,7 +442,7 @@ fn create(session: &str, request: &Request) -> Result<Option<State>, String> {
         Ok(()) => State::from_store(state.into_store(), refname, claimed).map(Some),
         Err(error) => {
             // Lost the race to create it, or the push failed outright.
-            if state.store().fetch_ref(&refname)?.is_some() {
+            if lost_create_race(state.store(), &refname)? {
                 Ok(None)
             } else {
                 Err(format!("creating {refname}: {error}"))

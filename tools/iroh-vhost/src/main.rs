@@ -5,6 +5,12 @@
 //! characters; this program reads it back out of the `Host` header, dials that
 //! endpoint over iroh, and splices the TCP connection to a dumbpipe stream. The
 //! path is never touched, because it is not where the ticket lives.
+//!
+//! `pin` is the same dial without the HTTP: each listener is bound to one
+//! ticket, named once at startup, and every connection to it is spliced to that
+//! endpoint byte for byte. It is for clients that cannot put a ticket anywhere —
+//! a docker daemon pulling `localhost:5000/...`, a redis client — and is how a
+//! remote caos runner reaches its server's services (prod/runner).
 
 use std::collections::HashMap;
 use std::io;
@@ -38,6 +44,7 @@ const HEAD_MAX: usize = 64 * 1024;
 const USAGE: &str = "\
 usage: iroh-vhost [--port N | --listen ADDR] [--suffix DOMAIN] [--host HOST[:PORT]]
        iroh-vhost url [--port N] [--suffix DOMAIN] TICKET
+       iroh-vhost pin ADDR=TICKET-FILE...
 
 Serve on loopback, IPv4 and IPv6 (--port N, default 8080; --listen ADDR
 pins one exact address instead). DOMAIN defaults to localhost. Browse to the URL that
@@ -51,15 +58,19 @@ more than one is refused:
   header    Iroh-Ticket: TICKET                     (removed before forwarding)
 
 --host sends the backend HOST[:PORT] as the Host header of every request (and
-as the Origin of one that names the ticket's host), for backends that check it.";
+as the Origin of one that names the ticket's host), for backends that check it.
+
+pin listens on each ADDR and splices every connection, unread, to the endpoint
+of the ticket in TICKET-FILE. Any TCP protocol works, HTTP or not. The files are
+read once, at startup.";
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = if args.first().map(String::as_str) == Some("url") {
-        url_command(&args[1..])
-    } else {
-        serve_command(&args).await
+    let result = match args.first().map(String::as_str) {
+        Some("url") => url_command(&args[1..]),
+        Some("pin") => pin_command(&args[1..]).await,
+        _ => serve_command(&args).await,
     };
     if let Err(error) = result {
         eprintln!("iroh-vhost: {error}");
@@ -187,6 +198,86 @@ async fn serve_command(args: &[String]) -> Result<(), String> {
     for task in loops {
         task.await.map_err(|e| format!("accept loop: {e}"))??;
     }
+    Ok(())
+}
+
+/// Bind every `ADDR=TICKET-FILE` before serving any, so a bad one fails the
+/// start instead of leaving the others up and that service quietly absent.
+async fn pin_command(args: &[String]) -> Result<(), String> {
+    if args.is_empty() || args.iter().any(|a| a.starts_with('-')) {
+        return Err(USAGE.to_string());
+    }
+    let mut pins = Vec::new();
+    for arg in args {
+        let (addr, file) = arg
+            .split_once('=')
+            .ok_or_else(|| format!("{arg:?} is not ADDR=TICKET-FILE\n{USAGE}"))?;
+        let text = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
+        let text = text.trim().to_string();
+        let ticket: EndpointTicket = text.parse().map_err(|e| format!("{file} does not hold a ticket: {e}"))?;
+        let listener = TcpListener::bind(addr).await.map_err(|e| format!("binding {addr}: {e}"))?;
+        eprintln!("iroh-vhost: {addr} -> {}", ticket.endpoint_addr().id.fmt_short());
+        pins.push((listener, text, ticket));
+    }
+    let dialer = Arc::new(Dialer::default());
+    let loops: Vec<_> = pins
+        .into_iter()
+        .map(|(listener, text, ticket)| tokio::spawn(pin_loop(listener, dialer.clone(), text, ticket)))
+        .collect();
+    for task in loops {
+        task.await.map_err(|e| format!("accept loop: {e}"))??;
+    }
+    Ok(())
+}
+
+async fn pin_loop(
+    listener: TcpListener,
+    dialer: Arc<Dialer>,
+    text: String,
+    ticket: EndpointTicket,
+) -> Result<(), String> {
+    let (text, ticket) = (Arc::new(text), Arc::new(ticket));
+    loop {
+        let (tcp, _) = listener.accept().await.map_err(|e| format!("accept: {e}"))?;
+        let (dialer, text, ticket) = (dialer.clone(), text.clone(), ticket.clone());
+        tokio::spawn(async move {
+            if let Err(error) = splice_pinned(tcp, &dialer, &text, &ticket).await {
+                eprintln!("iroh-vhost: {error}");
+            }
+        });
+    }
+}
+
+/// One TCP connection, one stream, no parsing. There is no HTTP to answer a
+/// failed dial with, so the client sees a hangup and the reason goes to stderr.
+async fn splice_pinned(
+    tcp: TcpStream,
+    dialer: &Dialer,
+    text: &str,
+    ticket: &EndpointTicket,
+) -> Result<(), String> {
+    let connection = dialer.connection(text, ticket).await?;
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| format!("opening a stream: {e}"))?;
+    send.write_all(HANDSHAKE).await.map_err(|e| format!("handshake: {e}"))?;
+    let (mut local_read, mut local_write) = tcp.into_split();
+    let id = ticket.endpoint_addr().id.fmt_short();
+    // Each direction ends on its own, as in `handle`.
+    let up = async {
+        if let Err(error) = tokio::io::copy(&mut local_read, &mut send).await {
+            eprintln!("iroh-vhost: {id}: sending: {error}");
+        }
+        let _ = send.finish();
+    };
+    let down = async {
+        if let Err(error) = tokio::io::copy(&mut recv, &mut local_write).await {
+            eprintln!("iroh-vhost: {id}: receiving: {error} ({error:?})");
+        }
+        let _ = local_write.shutdown().await;
+    };
+    tokio::join!(up, down);
     Ok(())
 }
 

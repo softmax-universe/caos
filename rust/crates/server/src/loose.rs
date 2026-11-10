@@ -126,7 +126,7 @@ fn write_temp(dir: &Path, bytes: &[u8], sync: bool) -> io::Result<PathBuf> {
 }
 
 /// Whether `path` holds a stored object. A zero-length file is a crash's
-/// leftover, not an object (see [`crate::repair`]): it is replaced.
+/// leftover from a writer that did not fsync, not an object: it is replaced.
 fn is_stored(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
 }

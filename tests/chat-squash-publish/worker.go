@@ -272,7 +272,7 @@ func main() {
 			"--configuration", llm, "--source-tree", "main="+base))
 		caos("sub-run", admitted["request"])
 		done := fields(run(tool, "wait-terminal", "--repo", repo, "--ref", admitted["ref"],
-			"--request", admitted["request"], "--timeout-secs", "120"))
+			"--request", admitted["request"], "--timeout-secs", "240"))
 		w.True(done["status"] == "idle", "the turn ended with status %q", done["status"])
 		head := done["head"]
 

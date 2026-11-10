@@ -3259,8 +3259,27 @@ pub(crate) fn eval_expression_endpoint(
 /// dispatched: it reads what `GET /result/<ticket>` reads until that stops
 /// saying `pending`.
 pub(crate) fn wait_ticket(config: &Config, ticket: &str) -> Result<Vec<u8>, HttpError> {
+    // A READ THAT FAILS IS RETRIED, for a while: the work goes on without this
+    // waiter, and redis stalls under load (a fork for BGSAVE, a slow AOF fsync)
+    // past REDIS_TIMEOUT. Giving up at the first one ended a ten-minute suite
+    // run whose job was still going.
+    let mut failing_since: Option<std::time::Instant> = None;
     loop {
-        let state = expression_result(config, ticket)?;
+        let state = match expression_result(config, ticket) {
+            Ok(state) => {
+                failing_since = None;
+                state
+            }
+            Err(e) if e.status() == 500 => {
+                let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > std::time::Duration::from_secs(60) {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let state = String::from_utf8_lossy(&state).trim().to_string();
         if let Some(answer) = state.strip_prefix("ok ") {
             return Ok(format!("{answer}\n").into_bytes());

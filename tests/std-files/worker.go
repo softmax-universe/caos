@@ -27,11 +27,12 @@ var (
 	server string
 	client = &http.Client{Timeout: 10 * time.Minute}
 	seq    int
-	// testSalt keys every tool call, so a salted suite really re-runs them. It
-	// used to be this process's pid, which is the same in every fresh
-	// container: every call was a cache hit from some earlier run, and the
-	// tools' cold path was never exercised by `--test-salt`.
-	testSalt string
+	// runSalt keys every tool call to THIS invocation (tests/README.md). It
+	// used to be the pid alone, which is the same in every fresh container, so
+	// every run on every stack made the same requests: `--test-salt` never
+	// re-ran the tools, and suites of one build on a host (which share a
+	// redis) raced each other for the same tickets at the same moment.
+	runSalt string
 )
 
 func run(name string, args ...string) string {

@@ -2914,6 +2914,16 @@ fn cache_set(addr: &str, key: &str, value: &str) -> Result<(), String> {
     read_status_reply(&mut BufReader::new(stream))
 }
 
+/// `SET key value EX secs` in Redis: a value that expires unless set again.
+fn cache_set_ex(addr: &str, key: &str, value: &str, secs: u64) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    let secs = secs.to_string();
+    stream
+        .write_all(&resp_command(&["SET", key, value, "EX", &secs]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_status_reply(&mut BufReader::new(stream))
+}
+
 /// `RPUSH key value` — append one element to a Redis list.
 ///
 /// The trace record ([`crate::status`]) is a list rather than a rewritten blob

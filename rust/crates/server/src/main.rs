@@ -437,7 +437,12 @@ fn doctor_git(git_dir: &str) -> std::process::Command {
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_GRAFT_FILE", "/dev/null")
-        .args(["-c", "core.commitGraph=false", "-c", "advice.graftFileDeprecated=false"])
+        .args([
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
+        ])
         .args(["-C", git_dir]);
     command
 }
@@ -485,7 +490,10 @@ fn verify_refs(git_dir: &str) -> Result<(), String> {
         return Err(String::from_utf8_lossy(&answered.stderr).into_owned());
     }
     // One answer per id, in order: the id when stored, `<id> missing` when not.
-    for ((id, name), answer) in refs.iter().zip(String::from_utf8_lossy(&answered.stdout).lines()) {
+    for ((id, name), answer) in refs
+        .iter()
+        .zip(String::from_utf8_lossy(&answered.stdout).lines())
+    {
         if answer.ends_with(" missing") {
             problems.push_str(&format!("\n{name} names {id}, which is not stored"));
         }

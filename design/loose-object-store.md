@@ -214,8 +214,8 @@ the host once every server sharing it runs this build.
 ### 5.1 Ordered publication
 
 The invariant (SPEC): an object is stored only after everything it references
-is stored. `POST /object` enforces it per object (`require_object`), and the
-startup closure check refuses a store that breaks it. Packs kept it for free:
+is stored. `POST /object` enforces it per object (`require_object`), and
+`caosd doctor` (`server doctor`) finds a store that breaks it. Packs kept it for free:
 a pack becomes visible when its index is published, after the pack is synced.
 
 Loose publication breaks it in two ways if done naively:
@@ -240,8 +240,11 @@ path:
 4. `syncfs` once more, then return.
 
 A reader can then never see a parent without its children, and on ext4 a
-crash leaves a closure-complete subset (section 3). The startup closure check
-stays as the audit.
+crash leaves a closure-complete subset (section 3). The closure check stays as
+the audit, run by hand (`caosd doctor`) rather than at every start: on
+caosd-prod's store of 1.38M loose objects it took about 14 minutes of
+downtime per start (2026-11-10), and the power-cut tests found nothing for it
+to catch.
 
 The ingress paths:
 
@@ -284,7 +287,7 @@ not memory. A unit test checks both sides on 30,000 commits, and
 ### 5.4 What goes away
 
 - The `repack --geometric=2 -d` in the `CAOS_STORE_CHECK` block of `main.rs`
-  and its comments; the closure check stays.
+  and its comments. The closure check stays, as `caosd doctor`, not at start.
 - The pack-count fatal and warning at startup become a warning if
   `objects/pack` holds anything at all, since nothing should write a pack any
   more.

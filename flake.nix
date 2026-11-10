@@ -1282,7 +1282,7 @@ sandbox = false''
 
             usage() {
               echo "caosd ($CAOS_REV)"
-              echo "usage: caosd [up [--iroh=false]|down|reset|logs|ticket|image-cleanup|version]"
+              echo "usage: caosd [up [--iroh=false]|down|reset|logs|ticket|doctor|image-cleanup|version]"
             }
 
             case "''${1:-up}" in
@@ -1472,7 +1472,6 @@ sandbox = false''
                 -e CAOS_REGISTRY_HTTP=localhost:5000 \
                 -e CAOS_STACK_REDIS_PORT=6379 \
                 -e CAOS_STACK_REDIS_PERSIST=yes \
-                -e CAOS_STACK_STORE_CHECK=yes \
                 -e CAOS_STACK_REDIS_MAXMEM="''${CAOS_STACK_REDIS_MAXMEM:-}" \
                 -e CAOS_STACK_REGISTRY=yes \
                 -e CAOS_STACK_REDIS=yes \
@@ -1611,6 +1610,25 @@ sandbox = false''
                 die "no ticket here. Bring the stack up with 'caosd up --iroh' (or CAOS_IROH=yes)"
               fi
               cat "$ticket"
+              ;;
+            doctor)
+              # Is every stored object's history stored? The server's own check
+              # (`server doctor`), run by hand: it reads every object, minutes
+              # on a long-lived store, which is why no start pays for it.
+              # Read-only and safe beside the live server: objects are never
+              # deleted, and each is stored only after everything it references.
+              #
+              # In the running stack, with the binary that is serving: bootstrap
+              # builds the stack inputs inside the container and execs serve
+              # (PID 1) with CAOS_STACK_BIN, so that is where to find it.
+              if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)" != true ]; then
+                die "the stack is not running; 'caosd up' first"
+              fi
+              # shellcheck disable=SC2016
+              docker exec "$NAME" bash -c '
+                bin=$(tr "\0" "\n" < /proc/1/environ | sed -n "s/^CAOS_STACK_BIN=//p")
+                CAOS_GIT_DIR="$CAOS_STACK_STATE/git" exec "$bin/server" doctor
+              '
               ;;
             image-cleanup)
               shift

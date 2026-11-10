@@ -76,7 +76,11 @@ later. `journalctl -u caosd` shows "the caos-stack container exited".
 systemctl status caosd          # the stack
 journalctl -u caosd             # why it did not start
 sudo cat /data/caos/stack/iroh/ticket
+sudo -u caos caosd doctor       # is every stored object's history stored?
 ```
+
+`caosd doctor` reads every object in the store: about 14 minutes on 1.38M
+loose objects (2026-11-10). It is read-only and runs beside the live stack.
 
 The ticket is the one string a client needs, and it survives restarts:
 

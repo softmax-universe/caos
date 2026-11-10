@@ -3520,9 +3520,22 @@ fn start_work(
             if state.starts_with("ok ") {
                 return Ok(());
             }
+            // Running on a peer that shares this redis: join it, as a second
+            // start joins one running here. Overwriting its `pending` with ours
+            // is check-then-act across processes: if the peer finishes in
+            // between, its answer is replaced by a pending one its own waiters
+            // cannot account for.
+            if pending_owner(&state).is_some_and(|owner| peer_alive(config, owner)) {
+                return Ok(());
+            }
         }
-        cache_set(&config.redis_addr, &key, "pending")
-            .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
+        hold_lease(config);
+        cache_set(
+            &config.redis_addr,
+            &key,
+            &format!("pending {}", server_instance()),
+        )
+        .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
         live.insert(ticket.to_string());
     }
     let guard = TicketGuard {

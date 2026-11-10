@@ -3,6 +3,10 @@
 Caos is a Content-Addressable Operating System. It's functional programming with git as the values and docker as the
 functions, cached by redis
 
+> Why don't caos tools ever argue about what happened?
+> Because every result is content-addressed: if you disagree, you're
+> literally talking about a different hash.
+
 # How to use
 
 - In the instructions below, `$FOO` can be used literally if you have set an env var. `<FOO>` needs to be expanded by you when entering the text

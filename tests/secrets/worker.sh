@@ -230,7 +230,9 @@ admitted=$("$CAOS_CLI" run --base:hash="$launcher") || fail "sub-run launcher fa
   || fail "sub-run launcher admitted the wrong request: $admitted"
 
 complete=0
-for _ in $(seq 1 150); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues"): the sub-run is a
+# cold job that waits for a runner slot on a busy host.
+for _ in $(seq 1 1200); do
   status=$(object_status "$expected_oid") || fail "server unreachable while waiting for sub-run"
   case "$status" in
     200) complete=1; break ;;

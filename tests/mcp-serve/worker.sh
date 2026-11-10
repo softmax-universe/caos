@@ -301,7 +301,8 @@ send "$(jq -nc --arg session "$held" --arg path "${prefix}slow" --arg request_id
 # request reaches it, so it is not in this checkout's copy of the ref: fetch it.
 sync_held() { git fetch -q caos "+$held_ref:$held_ref"; }
 started_call=""
-for _ in $(seq 60); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues").
+for _ in $(seq 300); do
   if sync_held 2>/dev/null; then
     case "$(git log -4 --format=%s "$held_ref")" in
       *tool.start*) started_call=yes; break ;;

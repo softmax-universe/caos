@@ -2914,6 +2914,16 @@ fn cache_set(addr: &str, key: &str, value: &str) -> Result<(), String> {
     read_status_reply(&mut BufReader::new(stream))
 }
 
+/// `SET key value EX secs` in Redis: a value that expires unless set again.
+fn cache_set_ex(addr: &str, key: &str, value: &str, secs: u64) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    let secs = secs.to_string();
+    stream
+        .write_all(&resp_command(&["SET", key, value, "EX", &secs]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_status_reply(&mut BufReader::new(stream))
+}
+
 /// `RPUSH key value` — append one element to a Redis list.
 ///
 /// The trace record ([`crate::status`]) is a list rather than a rewritten blob
@@ -3263,11 +3273,98 @@ pub(crate) fn wait_ticket(config: &Config, ticket: &str) -> Result<Vec<u8>, Http
     }
 }
 
-/// Evaluations running in THIS process. A ticket recorded `pending` that is not
-/// in here belonged to a server that has since died.
+/// Evaluations running in THIS process.
+///
+/// NOT THE WHOLE ANSWER TO "IS IT RUNNING?". A ticket's state is in redis, and
+/// redis is shared by every server of one cache namespace: every dev stack of
+/// one build on a host is one (dev/stack-up), which is what a busy host running
+/// several sessions' suites of the same commit has. A ticket recorded `pending`
+/// that is not in here may be running on one of THOSE. Reading that as "the
+/// server restarted" failed calls that were fine (tests/expression-http,
+/// tests/std-files, and tests/tracing's retry), and only where more than one
+/// stack shared the redis, so never on a laptop. So `pending` names the server
+/// that owns it ([`server_instance`]), and every server that owns tickets holds
+/// a lease in redis ([`hold_lease`]): a pending ticket is dead only when its
+/// owner is neither this process nor a server whose lease is current.
 fn live_tickets() -> &'static Mutex<HashSet<String>> {
     static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// This server process's name as a ticket owner: random, so a restarted server
+/// is a different owner from the one that died.
+fn server_instance() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        let random = std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes));
+        if random.is_err() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            bytes = (nanos ^ ((std::process::id() as u128) << 64)).to_le_bytes();
+        }
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// How long an owner's lease lasts, and how often it is renewed. A server that
+/// dies is noticed within `TICKET_LEASE_SECS`; one that lives renews well
+/// inside it, so a slow redis round trip cannot expire it.
+const TICKET_LEASE_SECS: u64 = 30;
+const TICKET_LEASE_RENEW: Duration = Duration::from_secs(10);
+
+fn lease_key(instance: &str) -> String {
+    format!("caos:ticket-owner:{instance}")
+}
+
+/// Take this server's lease, and keep it for the life of the process. Taken
+/// once, synchronously, before the first ticket is recorded as ours, so a peer
+/// never sees one of our tickets without our lease.
+fn hold_lease(config: &Config) {
+    static HELD: OnceLock<()> = OnceLock::new();
+    HELD.get_or_init(|| {
+        let addr = config.redis_addr.clone();
+        let renew = |addr: &str| {
+            let key = lease_key(server_instance());
+            if let Err(e) = cache_set_ex(addr, &key, "1", TICKET_LEASE_SECS) {
+                eprintln!("ticket lease {key}: {e}");
+            }
+        };
+        renew(&addr);
+        let spawned = std::thread::Builder::new()
+            .name("ticket-lease".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(TICKET_LEASE_RENEW);
+                renew(&addr);
+            });
+        if let Err(e) = spawned {
+            eprintln!("ticket lease: cannot start its renewer: {e}");
+        }
+    });
+}
+
+/// The owner a ticket state names if it is pending: `pending <instance>`, or
+/// the empty owner for a bare `pending` (written by a server from before
+/// owners, so nobody can vouch for it).
+fn pending_owner(state: &str) -> Option<&str> {
+    if state == "pending" {
+        return Some("");
+    }
+    state.strip_prefix("pending ")
+}
+
+/// Whether `owner` is ANOTHER server that is alive now. This process's own
+/// tickets are [`live_tickets`]'s business, not the lease's.
+fn peer_alive(config: &Config, owner: &str) -> bool {
+    !owner.is_empty()
+        && owner != server_instance()
+        && matches!(
+            cache_get(&config.redis_addr, &lease_key(owner)),
+            Ok(Some(_))
+        )
 }
 
 fn ticket_key(config: &Config, ticket: &str) -> String {
@@ -3436,9 +3533,22 @@ fn start_work(
             if state.starts_with("ok ") {
                 return Ok(());
             }
+            // Running on a peer that shares this redis: join it, as a second
+            // start joins one running here. Overwriting its `pending` with ours
+            // is check-then-act across processes: if the peer finishes in
+            // between, its answer is replaced by a pending one its own waiters
+            // cannot account for.
+            if pending_owner(&state).is_some_and(|owner| peer_alive(config, owner)) {
+                return Ok(());
+            }
         }
-        cache_set(&config.redis_addr, &key, "pending")
-            .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
+        hold_lease(config);
+        cache_set(
+            &config.redis_addr,
+            &key,
+            &format!("pending {}", server_instance()),
+        )
+        .map_err(|e| HttpError::new(500, format!("cannot record ticket {ticket}: {e}")))?;
         live.insert(ticket.to_string());
     }
     let guard = TicketGuard {
@@ -3480,10 +3590,18 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
     let state = cache_get(&config.redis_addr, &ticket_key(config, ticket))
         .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
         .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))?;
-    let state = if state == "pending" && !live_tickets().lock().unwrap().contains(ticket) {
-        "failed 500 the server restarted before this finished; start it again".to_string()
-    } else {
-        state
+    // What callers read is a bare `pending`: the owner is the servers' business.
+    let state = match pending_owner(&state) {
+        None => state,
+        Some(owner) => {
+            // Its own statement, so the lock is not held across the lease read.
+            let here = live_tickets().lock().unwrap().contains(ticket);
+            if here || peer_alive(config, owner) {
+                "pending".to_string()
+            } else {
+                "failed 500 the server restarted before this finished; start it again".to_string()
+            }
+        }
     };
     Ok(format!("{state}\n").into_bytes())
 }
@@ -3511,6 +3629,17 @@ mod expression_tests {
             "base%3A%40%40=github%3Ao%2Fr%3Frev%3Dabc&msg=a%20b%3Dc",
         );
         assert_eq!(e.args, vec!["--base:@@=github:o/r?rev=abc", "--msg=a b=c"]);
+    }
+
+    #[test]
+    fn a_pending_ticket_names_its_owner() {
+        assert_eq!(pending_owner("pending"), Some(""));
+        assert_eq!(pending_owner("pending 0a1b"), Some("0a1b"));
+        assert_eq!(pending_owner("ok tree abc"), None);
+        assert_eq!(pending_owner("failed 500 pending"), None);
+        // One name for the life of the process, 128 random bits in hex.
+        assert_eq!(server_instance().len(), 32);
+        assert_eq!(server_instance(), server_instance());
     }
 
     #[test]

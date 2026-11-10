@@ -25,6 +25,9 @@ var (
 	server string
 	client = &http.Client{Timeout: 10 * time.Minute}
 	seq    int
+	// runSalt keys every tool call to THIS invocation (tests/std-files says
+	// why it is not the pid).
+	runSalt string
 )
 
 func run(name string, args ...string) string {
@@ -71,7 +74,7 @@ func tool(name, root string, params ...string) (text string, failed bool) {
 	if root != "" {
 		form.Set("root:hash", root)
 	}
-	form.Set("salt", fmt.Sprintf("std-git-history-%d-%d", os.Getpid(), seq))
+	form.Set("salt", fmt.Sprintf("std-git-history-%s-%d", runSalt, seq))
 	for i := 0; i < len(params); i += 2 {
 		form.Set(params[i], params[i+1])
 	}
@@ -101,6 +104,11 @@ func main() {
 	w.Main(func() {
 		server = strings.TrimRight(os.Getenv("CAOS_SERVER_URL"), "/")
 		w.True(server != "", "this test needs CAOS_SERVER_URL from the runner")
+		testSalt := ""
+		if w.Exists("/cas/args/test-salt") {
+			testSalt = strings.TrimSpace(w.Read("/cas/args/test-salt"))
+		}
+		runSalt = fmt.Sprintf("%s-%d-%d", testSalt, time.Now().UnixNano(), os.Getpid())
 
 		w.Step("a source tree with two commits, and an unrelated one")
 		first := commit("one", "", "first", map[string]string{"a.txt": "one\n"})

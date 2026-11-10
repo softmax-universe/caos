@@ -147,6 +147,9 @@ func main() {
 	w.Main(func() {
 		server = strings.TrimRight(os.Getenv("CAOS_SERVER_URL"), "/")
 		w.True(server != "", "this test needs CAOS_SERVER_URL from the runner")
+		if w.Exists("/cas/args/test-salt") {
+			testSalt = strings.TrimSpace(w.Read("/cas/args/test-salt"))
+		}
 
 		w.Step("a tree with a source tree in it")
 		write("/tmp/code/README.md", "one\ntwo\nthree\n")

@@ -84,9 +84,11 @@ func main() {
 	w.Main(func() {
 		server = strings.TrimRight(os.Getenv("CAOS_SERVER_URL"), "/")
 		w.True(server != "", "this test needs CAOS_SERVER_URL from the runner")
+		testSalt := ""
 		if w.Exists("/cas/args/test-salt") {
 			testSalt = strings.TrimSpace(w.Read("/cas/args/test-salt"))
 		}
+		runSalt = fmt.Sprintf("%s-%d-%d", testSalt, time.Now().UnixNano(), os.Getpid())
 
 		w.Step("a tree with a source tree in it")
 		write("/tmp/code/README.md", "one\ntwo\nthree\n")

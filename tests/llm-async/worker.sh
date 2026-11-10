@@ -66,7 +66,10 @@ stage "completion changes only the async record"
 printf '%s\n' '{"content":[],"stop_reason":"end_turn"}' > /tmp/async-gate/response-1.json
 completion_head=""
 seen=$head1
-for _ in $(seq 1 300); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues"): the completion is
+# a cold job that waits for a runner slot on a busy host. The loop leaves on
+# success, so the bound costs nothing on a healthy run.
+for _ in $(seq 1 1500); do
   candidate=$(remote_tip "$session_ref")
   if [ "$candidate" != "$seen" ]; then
     seen=$candidate

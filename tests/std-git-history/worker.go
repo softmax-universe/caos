@@ -25,9 +25,9 @@ var (
 	server string
 	client = &http.Client{Timeout: 10 * time.Minute}
 	seq    int
-	// testSalt keys every tool call, so a salted suite really re-runs them
-	// (tests/std-files says why it is not the pid).
-	testSalt string
+	// runSalt keys every tool call to THIS invocation (tests/std-files says
+	// why it is not the pid).
+	runSalt string
 )
 
 func run(name string, args ...string) string {

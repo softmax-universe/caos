@@ -3577,10 +3577,18 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
     let state = cache_get(&config.redis_addr, &ticket_key(config, ticket))
         .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
         .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))?;
-    let state = if state == "pending" && !live_tickets().lock().unwrap().contains(ticket) {
-        "failed 500 the server restarted before this finished; start it again".to_string()
-    } else {
-        state
+    // What callers read is a bare `pending`: the owner is the servers' business.
+    let state = match pending_owner(&state) {
+        None => state,
+        Some(owner) => {
+            // Its own statement, so the lock is not held across the lease read.
+            let here = live_tickets().lock().unwrap().contains(ticket);
+            if here || peer_alive(config, owner) {
+                "pending".to_string()
+            } else {
+                "failed 500 the server restarted before this finished; start it again".to_string()
+            }
+        }
     };
     Ok(format!("{state}\n").into_bytes())
 }

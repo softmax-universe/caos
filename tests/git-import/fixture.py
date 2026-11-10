@@ -785,6 +785,13 @@ def main():
             assert refused.returncode != 0, "doctor passed incomplete history"
             assert b"restore the missing objects" in refused.stderr, refused.stderr
             assert run("git", "--git-dir", str(commit_store), "cat-file", "-t", broken) == "commit"
+            # A ref git cannot read makes receive-pack refuse every push.
+            ref_store = damaged_store("server-broken-ref.git")
+            (ref_store / "refs" / "caos").mkdir(parents=True, exist_ok=True)
+            (ref_store / "refs" / "caos" / "doctor-broken").write_text("4" * 40 + "\n")
+            refused = doctor(ref_store)
+            assert refused.returncode != 0, "doctor passed a ref to a missing object"
+            assert b"refs/caos/doctor-broken" in refused.stderr, refused.stderr
             print("git-import: complete history, upload ordering, quarantined imports/pushes, commit rejection, bounded validation, doctor integrity, HTTPS credentials, reuse, concurrency and retry PASS")
         finally:
             stop(server)

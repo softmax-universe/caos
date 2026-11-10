@@ -68,7 +68,6 @@ mod mcp;
 mod push;
 mod refs;
 mod remote_git;
-mod repair;
 mod runner;
 mod secret_store;
 mod secrets;
@@ -209,20 +208,25 @@ fn main() {
     if loose::is_hook_invocation() {
         std::process::exit(loose::publish_quarantine());
     }
-    // `server doctor`: check, by hand, that every stored object's history is
-    // stored (`caosd doctor`). Read-only, so it is safe beside a live server.
+    // `server doctor`: check the store by hand (`caosd doctor`). Nothing that
+    // reads the whole store runs at start: every writer here is durable, so
+    // what these find is not crash damage to repair on every boot. Read-only,
+    // so it is safe beside a live server.
     if std::env::args().nth(1).as_deref() == Some("doctor") {
         let git_dir = env_or("CAOS_GIT_DIR", DEFAULT_GIT_DIR);
-        match verify_object_closure(&git_dir) {
-            Ok(()) => {
-                eprintln!("doctor: {git_dir}: every stored object's history is stored");
-                std::process::exit(0);
-            }
-            Err(error) => {
-                eprintln!("doctor: {git_dir}: object store has incomplete history; restore the missing objects: {error}");
-                std::process::exit(1);
-            }
+        let mut healthy = true;
+        if let Err(error) = verify_refs(&git_dir) {
+            eprintln!("doctor: {git_dir}: broken refs; restore each from its reflog (logs/) or delete it: {error}");
+            healthy = false;
         }
+        if let Err(error) = verify_object_closure(&git_dir) {
+            eprintln!("doctor: {git_dir}: object store has incomplete history; restore the missing objects: {error}");
+            healthy = false;
+        }
+        if healthy {
+            eprintln!("doctor: {git_dir}: every ref and every stored object's history is stored");
+        }
+        std::process::exit(if healthy { 0 } else { 1 });
     }
     install_termination_handlers();
 
@@ -254,7 +258,6 @@ fn main() {
     // Clear what a previous crash left behind BEFORE opening the repo: gix
     // answers "is this object stored?" for a loose object with a path-exists
     // check, so an empty file has to be gone from disk before anything asks.
-    let swept = repair::sweep_empty_loose_objects(&git_dir);
     let temporaries = loose::sweep_temporaries(&std::path::Path::new(&git_dir).join("objects"));
     if temporaries > 0 {
         eprintln!(
@@ -296,15 +299,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-
-    // Then the refs the sweep just orphaned, plus any that were already dangling.
-    let dropped = repair::drop_broken_refs(&repo.to_thread_local(), &git_dir);
-    if swept + dropped > 0 {
-        eprintln!(
-            "repair: {git_dir} had crash damage — dropped {swept} empty object(s) \
-             and {dropped} broken ref(s)"
-        );
-    }
 
     let secrets_git = env_or("CAOS_SECRETS_GIT_DIR", &secret_store::default_dir(&git_dir));
     secret_store::init(&secrets_git).unwrap_or_else(|error| {
@@ -435,6 +429,75 @@ fn run_required_git(args: &[&str]) -> Result<(), String> {
     ))
 }
 
+/// git against the store exactly as stored: no replacements, grafts, lazy
+/// fetches or commit graph standing in for an object that is not there.
+fn doctor_git(git_dir: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
+        .args(["-c", "core.commitGraph=false", "-c", "advice.graftFileDeprecated=false"])
+        .args(["-C", git_dir]);
+    command
+}
+
+/// Whether every ref names a stored object. One that does not (an empty ref
+/// file, or a name whose object is gone) makes `receive-pack` refuse every
+/// push. `for-each-ref` reports an unreadable ref file on stderr and skips it;
+/// a readable one naming a missing object it lists like any other, so each
+/// listed object is looked up.
+fn verify_refs(git_dir: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let listed = doctor_git(git_dir)
+        .args(["for-each-ref", "--format=%(objectname) %(refname)"])
+        .output()
+        .map_err(|error| format!("listing refs: {error}"))?;
+    let mut problems = String::from_utf8_lossy(&listed.stderr).trim().to_string();
+    if !listed.status.success() {
+        return Err(problems);
+    }
+    let refs: Vec<(String, String)> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect();
+    let mut check = doctor_git(git_dir)
+        .args(["cat-file", "--batch-check=%(objectname)"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("looking up ref targets: {error}"))?;
+    // Fed from a thread: the answers fill stdout while the ids are still going in.
+    let mut stdin = check.stdin.take().expect("piped stdin");
+    let ids: String = refs.iter().map(|(id, _)| format!("{id}\n")).collect();
+    let feeder = std::thread::spawn(move || stdin.write_all(ids.as_bytes()));
+    let answered = check
+        .wait_with_output()
+        .map_err(|error| format!("looking up ref targets: {error}"))?;
+    feeder
+        .join()
+        .expect("ref feeder")
+        .map_err(|error| format!("looking up ref targets: {error}"))?;
+    if !answered.status.success() {
+        return Err(String::from_utf8_lossy(&answered.stderr).into_owned());
+    }
+    // One answer per id, in order: the id when stored, `<id> missing` when not.
+    for ((id, name), answer) in refs.iter().zip(String::from_utf8_lossy(&answered.stdout).lines()) {
+        if answer.ends_with(" missing") {
+            problems.push_str(&format!("\n{name} names {id}, which is not stored"));
+        }
+    }
+    let problems = problems.trim();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.to_string())
+    }
+}
+
 /// Whether every stored object's history is stored: each object, referenced or
 /// not, walked as a root. Older servers accepted individual commits without
 /// their dependencies; the store's publication order keeps closure since
@@ -450,16 +513,8 @@ fn verify_object_closure(git_dir: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    use std::process::{Command, Stdio};
-    let git = || {
-        let mut command = Command::new("git");
-        command
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_GRAFT_FILE", "/dev/null")
-            .args(["-c", "core.commitGraph=false", "-C", git_dir]);
-        command
-    };
+    use std::process::Stdio;
+    let git = || doctor_git(git_dir);
     // fsck --connectivity-only starts from refs and misses orphan commits.
     // Make every stored object a root, without reading every blob's payload.
     let mut objects = git()
@@ -569,12 +624,13 @@ fn git_settings(hooks: Option<&std::path::Path>) -> Vec<(&'static str, String)> 
         // Survive an unclean shutdown. git's default publishes a loose object
         // or a ref by renaming a temp file into place without fsyncing, so a
         // crash can leave the right name holding zero bytes, a POISONED object
-        // (see [`mod repair`]). `batch` flushes once per batch of writes.
+        // or ref that `receive-pack` then refuses every push over. `batch`
+        // flushes once per batch of writes.
         ("core.fsync", "objects,reference"),
         ("core.fsyncMethod", "batch"),
-        // Keep previous ref values as the recovery path `repair` restores
-        // damaged refs from. Nothing expires them yet: until a retention
-        // policy exists, keep the history rather than invent a window.
+        // Keep previous ref values, the way to restore a damaged ref by hand
+        // (`caosd doctor` names any). Nothing expires them yet: until a
+        // retention policy exists, keep the history rather than invent a window.
         ("core.logAllRefUpdates", "always"),
     ]
     .into_iter()

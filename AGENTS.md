@@ -247,7 +247,16 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   ~200 MB tree to a temp dir, tarring it, hashing it and pushing it — 24 seconds
   in which the suite started no containers. Single-flight anything expensive
   behind a per-key lock and RE-READ the cache after acquiring it. There is one
-  server process per stack, so an in-process lock is the whole requirement.
+  server process per stack, so an in-process lock is enough to stop duplicate
+  WORK. It is not enough for anything that judges state another process may
+  have written: every dev stack of one build on a host shares the host redis
+  under one `CAOS_CACHE_NAMESPACE`, so a key one server reads may have been
+  written by a peer's. Tickets were read that way — `pending` and not in this
+  process meant "the server restarted" — and failed healthy calls whenever two
+  suites of one commit shared a host (never on a laptop). A ticket's `pending`
+  now names its owner, and owners hold a lease in redis.
+  (`crates/server/src/compute.rs`, `live_tickets`).
+
 - **A default is dead if every caller passes the variable.** `devbox/worker`
   read `CAOS_TEST_STACK_IDLE_SECS` with a 900s default, and the `docker run`
   three hundred lines away that starts that role always passed the variable,

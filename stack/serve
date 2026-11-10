@@ -23,8 +23,8 @@
 #   CAOS_STACK_LOGS    dir for <member>.log (required)
 #   CAOS_STACK_READY   file to touch once every member is serving (optional)
 #   CAOS_STACK_BIN     dir holding `server` and `runnerd` (required)
-#   CAOS_STACK_STORE_CHECK    "yes" to repack and verify the server's object
-#                             store before it serves (default no). Minutes on
+#   CAOS_STACK_STORE_CHECK    "yes" to verify the server's object store
+#                             before it serves (default no). Minutes on
 #                             a long-lived repo, so only `caosd` asks; a test
 #                             stack's store is new and is not checked.
 #   CAOS_STACK_REDIS_PORT     redis port (required)

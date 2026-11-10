@@ -169,7 +169,8 @@ membership=$(git ls-remote --refs caos \
 stage "relay terminal checkpoint"
 terminal_record=""
 seen=""
-for _ in $(seq 1 300); do
+# A queue, not a latency (AGENTS.md, "A salted suite queues").
+for _ in $(seq 1 1500); do
   if remote=$(remote_tip "$session_ref") && [ "$remote" != "$seen" ]; then
     seen=$remote
     candidate=$remote

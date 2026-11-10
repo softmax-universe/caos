@@ -148,7 +148,10 @@ func main() {
 		w.True(strings.HasPrefix(body, "tree "), "curry should yield a tree, got %q", body)
 
 		w.Step("there is no local tree to name with :@=")
-		code, body = call("POST", "/eval/run?"+query("base:@", "DEEP-DEPS/hello"), "")
+		// Salted like every call that reaches a ticket: an unsalted one is the
+		// same ticket in every run on every stack sharing the redis, so it
+		// races another run's start of it.
+		code, body = call("POST", "/eval/run?"+query("base:@", "DEEP-DEPS/hello", "salt", salt), "")
 		w.True(code >= 400, "a :@= base was accepted: HTTP %d: %s", code, body)
 		w.True(strings.Contains(body, "local tree"), "the refusal should say why, got %q", body)
 

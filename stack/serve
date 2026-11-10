@@ -23,10 +23,6 @@
 #   CAOS_STACK_LOGS    dir for <member>.log (required)
 #   CAOS_STACK_READY   file to touch once every member is serving (optional)
 #   CAOS_STACK_BIN     dir holding `server` and `runnerd` (required)
-#   CAOS_STACK_STORE_CHECK    "yes" to verify the server's object store
-#                             before it serves (default no). Minutes on
-#                             a long-lived repo, so only `caosd` asks; a test
-#                             stack's store is new and is not checked.
 #   CAOS_STACK_REDIS_PORT     redis port (required)
 #   CAOS_STACK_REDIS_PERSIST  "yes" for an appendonly cache, "no" to keep it
 #                             in memory and lose it with the process
@@ -270,15 +266,11 @@ start server env \
   CAOS_REDIS_ADDR="$REDIS_ADDR" \
   CAOS_CACHE_NAMESPACE="${CAOS_CACHE_NAMESPACE:-}" \
   CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
-  CAOS_STORE_CHECK="${CAOS_STACK_STORE_CHECK:-no}" \
   "$CAOS_STACK_BIN/server"
 ok=""
-# The server does not listen until its store check is done, so a checking stack
-# waits up to an hour (0.1s steps) instead of 30s: at 30s the first start after
-# the repo grew past it died with "server never came up" and systemd retried
-# the same walk forever.
+# 30s in 0.1s steps. The server reads nothing in proportion to its store before
+# it listens (`server doctor` does that, by hand), so this covers any repo.
 server_wait_steps=300
-if [ "${CAOS_STACK_STORE_CHECK:-no}" = yes ]; then server_wait_steps=36000; fi
 # `git ls-remote`, NOT curl: this script also runs in the seed placement,
 # whose image is the BUILDER, and that flake has no curl — a curl probe here is
 # exit 127 on every attempt, so the loop runs out and every seed stack dies with

@@ -249,6 +249,15 @@ mod tests {
     }
 
     #[test]
+    fn a_tree_line_survives_a_push() {
+        let spec = parse_spec("f", &format!("tree={SHA}\n")).unwrap();
+        assert_eq!(spec.trees, vec![SHA.to_string()]);
+        let pushed = parse_spec("f", &spec.render_pushed()).unwrap();
+        assert_eq!(pushed.trees, spec.trees);
+        assert!(parse_spec("f", "tree=main\n").is_err());
+    }
+
+    #[test]
     fn refuses_what_it_cannot_honor() {
         assert!(parse_spec("f", "reader:@=a/b\n").is_err());
         assert!(parse_spec("f", "reader:@@=git+https://x/y since=main\n").is_err());

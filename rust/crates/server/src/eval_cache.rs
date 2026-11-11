@@ -138,7 +138,8 @@ mod tests {
 
     #[test]
     fn a_value_survives_its_encoding() {
-        let value = ("tree".to_string(), "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
+        let oid = "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string();
+        let value = ("tree".to_string(), oid);
         assert_eq!(decode(&encode(&value)), Some(value));
         assert_eq!(decode("malformed"), None);
     }

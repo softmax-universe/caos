@@ -1,0 +1,1 @@
+curry --base:@=DEEP-DEPS/go --worker1:@=worker.go --connector:@=DEEP-DEPS/connector

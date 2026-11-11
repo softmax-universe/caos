@@ -31,3 +31,6 @@ here.
 - [`claude-code/`](claude-code/) — Anthropic's Claude Code, both as an MCP client
   over caos (`cli/`, and the `shared/` config) and as cloud sessions caos
   provisions and drives from a single `--base` URL (`cloud/`).
+- [`delta/`](delta/) — a standalone Delta protocol connector on caos. Authentication
+  and registration work; agent-turn execution and workspace synchronization are
+  still being implemented. It does not host the Delta application.

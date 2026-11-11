@@ -1,2 +1,2 @@
 ../../std/go go
-../../integrations/delta/connector connector
+../../integrations/delta connector

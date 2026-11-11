@@ -10,7 +10,7 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          connector = import ./package.nix {
+          connector = import ./connector/package.nix {
             inherit pkgs;
             prelude = ./DEEP-DEPS/prelude;
           };

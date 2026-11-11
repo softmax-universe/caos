@@ -1357,6 +1357,13 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         ))
     }
     fn origins_of(&self, oid: &str) -> Vec<caos_eval::Origin> {
+        // Origins are read in one place, `evaluated`, and it returns at once
+        // for a run with no secrets. Loading them for such a run was most of
+        // its evaluation time: a shared tree has hundreds of thousands, and
+        // each is cloned and hashed at every node (design/secrets.md).
+        if self.secrets.is_empty() {
+            return Vec::new();
+        }
         crate::secrets::origins_of(self.config, oid)
     }
     fn evaluated(

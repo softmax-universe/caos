@@ -7,13 +7,13 @@ LLM_TEST_T0=$(date +%s%3N)
 LLM_TEST_PIDS=()
 
 stage() {
-  echo "== $* == [+$(( $(date +%s%3N) - LLM_TEST_T0 ))ms]" >&2
+  echo "== $* == [+$(( $(date +%s%3N) - LLM_TEST_T0 ))ms]" | tee -a /tmp/stages >&2
 }
 
 pass() {
   local name=$1
   stage "done"
-  printf '%s: ALL PASS\n' "$name" > /tmp/report
+  { cat /tmp/stages; printf '%s: ALL PASS\n' "$name"; } > /tmp/report
   cat /tmp/report >&2
   caos put /tmp/report /cas/out
 }
@@ -196,6 +196,7 @@ admit_turn() {
 }
 
 start_turn() {
+  stage "turn request $request"
   caos sub-run "$request" >/dev/null || fail "dispatching the turn"
 }
 
@@ -246,6 +247,7 @@ wait_turn() {
   fi
   [ "$status" = idle ] || fail "the turn ended with status ${status:-unknown}"
   assert_oid "$terminal" "the terminal session head"
+  stage "turn ended"
   head=$terminal
   printf '%s\n' "$terminal"
 }

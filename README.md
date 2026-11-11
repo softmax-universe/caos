@@ -270,11 +270,12 @@ Worker-running knobs (network, docker binary, slots) live on `caos-runnerd`.
 
 A plain `caos-runnerd` (no `CAOS_RUNNER_REQUIRE`) is the general pool and
 mounts none of its host's persistent volumes into any worker, so it can run on
-any machine that reaches the server. Jobs that need the host's nix store (and
-the other volumes an image declares in `CAOS_GRANT_VOLUMES`) carry
-`--required-caosd=true`; only a runnerd started with
+any machine that reaches the server. Jobs that must run on the central host
+carry `--required-caosd=true`: dev/test-stack (the host's volumes, redis and
+registry) and every flake-builder build (the registry, by name;
+std/flake-builder curries the arg onto its image). Only a runnerd started with
 `CAOS_RUNNER_REQUIRE=required-caosd=true` takes them, and it is the only one
-that grants volumes. `stack/serve` runs both on the main server
+that grants volumes. `stack/serve` runs both on the central host
 (`CAOS_STACK_CAOSD_SLOTS` sizes the second).
 
 ### Compute

@@ -149,7 +149,7 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 		}
 		w.Get(result)
 		if !w.Exists(result + "/session") {
-			return "", false, errors.New("CAOS context operation did not return a session")
+			return "", false, agentResultFailure(result)
 		}
 		head := w.Hash(result + "/session")
 		if !isObjectHash(head) {

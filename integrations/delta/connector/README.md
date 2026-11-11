@@ -274,6 +274,36 @@ a capability sandbox: the ordinary driver remains tool-capable, and the final
 tree comparison does not detect reverted edits or external effects. Use only the
 approved, trusted fixture prompt. No ongoing dispatch/lease guarantee is implied.
 
+#### Live attempt: blocked by the approved inference credential
+
+On 2026-11-11, source revision
+`c494bfa495c0bcd06e476814603ef04295805c10` submitted and read back a genuine
+native prompt in the existing approved disposable thread. It asked the agent
+to read the attached workspace's `SPEC.md` with file tools and explain ArgTree
+cache identity, resident-worker request IDs, and per-job nonce/salt.
+`claude-opus-4-8` was explicitly selected only for that fixture.
+
+The real CAOS driver imported all three native messages and attempted its
+normal `POST https://api.anthropic.com/v1/messages`. The approved credential
+was injected successfully, but Anthropic returned HTTP 400
+`invalid_request_error`: “Your credit balance is too low to access the Anthropic
+API. Please go to Plans & Billing to upgrade or purchase credits.”
+
+- Live task, ticket, native prompt identities, and the retained publication plan
+  remain only in the private operator record. Lookup handles are not public
+  audit data: they can expose retained context or diagnostics.
+- Native prompt publication succeeded; the thread now has 26 history batches.
+- **No model response, tool execution, or new assistant reply was generated.**
+  The previous fixture messages remain unchanged. No existing Delta agent ran
+  the prompt, and no canned reply was substituted.
+
+The inference account's credit is an external blocker. The connector cannot
+repair billing or silently obtain a different credential. After that credential
+can infer, reuse the retained prompt plan (do not append another prompt) and
+start a new execution request ID so the failed task's immutable result is not
+reused. The reply-publication path has offline/native-codec tests and independent
+review, but still needs that successful live model/tool/readback demonstration.
+
 **Unfixed protocol-support gaps:** structured native tool/thinking history,
 attachments, inherited parent context, and multiple or incrementally edited
 workspaces still fail explicitly. They are not flattened or silently omitted.
@@ -288,10 +318,10 @@ The connection reader now preserves notifications in order while correlating
 concurrent RPCs. A canceled or disconnected request is treated as an uncertain
 server outcome, not proof that its effects were canceled.
 
-The connector still needs a long-lived worker runtime, reconnect/lease handling,
-turn admission and ownership checks, history/workspace synchronization, and the
-connection from its prepared execution backend to admitted turns and Delta
-reply/file updates. A completed implementation must
+Beyond the isolated one-shot, the connector still needs a long-lived worker
+runtime, reconnect/lease handling, dispatch admission and ownership checks,
+continuous history/workspace synchronization, native tool segments, and file
+updates. A completed persistent implementation must
 demonstrate a real phone-initiated turn, including its reply and workspace
 changes, with the laptop disconnected. The current probe does not establish
 any of those outcomes.

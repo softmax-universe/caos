@@ -54,7 +54,7 @@ func readPrivateJSON(path string, value any) error {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|auth-model-check|probe|fetch-history|replay-history [options]")
+		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|auth-model-check|probe|fetch-history|replay-history|submit-prompt [options]")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	cloudURL := flags.String("cloud-url", defaultCloudURL, "Delta account service origin")

@@ -10,6 +10,11 @@ and publishes its completed reply to an isolated, allowlisted thread. It is not
 Personal Runner dispatch or a persistent, laptop-independent service; ongoing
 thread/workspace synchronization is still being implemented.
 
+The first live one-shot attempt reached the existing CAOS driver's Anthropic
+request, but the approved inference credential was rejected for insufficient
+credit. **No generated reply has been demonstrated in Delta yet.** See the
+connector's live-attempt record below; this is not an end-to-end success claim.
+
 - [Connector implementation and operator instructions](connector/README.md)
 - [Recovered protocol formats and offline reference checks](protocol/README.md)
 

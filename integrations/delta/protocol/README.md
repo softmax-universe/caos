@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**10,395 checks pass**, covering:
+**10,403 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -45,6 +45,9 @@ implement the recovered messages itself, without shipping or loading Delta Web.
   visible-anchor resolvers across the generated histories.
 - No-op and causal `UpdateHistory` envelopes, outgoing batches, timeline updates,
   and decoding the acceptance response observed in the separate live write check.
+- Native user/AssistantTurn metadata, tagged UUID actors, exact message anchors,
+  completion markers, and actual provider/model metadata. The Go writer's golden
+  tests use the same independently native-decoded and re-encoded fixtures.
 
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a

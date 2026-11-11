@@ -11,15 +11,16 @@
 //
 // Every fixture message carries --test-salt, so a salted run is a cache miss.
 //
-// Staged: no run can be waited on, so each case is checked in the `then` of
-// its own run, which then starts the next case.
+// IN PARALLEL: the cases are independent, so the first stage prepares every
+// case's request and maps over them (each child runs its request and forwards
+// the result), and one last stage checks them all. One after another, each
+// case was two sequential jobs and the cases were most of this test's time.
 package main
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"caos/w"
@@ -172,28 +173,33 @@ func build() {
 	}
 }
 
-// next is this test curried for stage s, the `then` of a case's run.
-func next(s int) string {
+// stage is this test curried for stage s.
+func stage(s string) string {
 	return w.Caos("curry", "--base:@=/cas/args/base", "--worker1:@=/cas/args/worker1",
-		"--stage="+strconv.Itoa(s), "--test-salt:@=/cas/args/test-salt", "--tool:@=/cas/args/tool")
+		"--stage="+s, "--test-salt:@=/cas/args/test-salt", "--tool:@=/cas/args/tool")
 }
 
-// launch runs case i.
-func launch(i int) {
-	c := cases[i]
-	w.Step(fmt.Sprintf("case %d: %s", i, c.name))
-	args := []string{"prepare-request", "--base:hash=" + w.Hash("/cas/args/tool")}
-	if c.dir != "-" {
-		args = append(args, "--root:@="+object("/cas/conv", c.dir))
+// caseName is case i's entry in the map: ordered, and unique.
+func caseName(i int) string { return fmt.Sprintf("%02d-%s", i, cases[i].name) }
+
+// launch prepares every case's request and maps over them.
+func launch() {
+	w.Step("every case, in parallel")
+	w.Must(os.MkdirAll("/tmp/requests", 0o755))
+	for i, c := range cases {
+		args := []string{"prepare-request", "--base:hash=" + w.Hash("/cas/args/tool")}
+		if c.dir != "-" {
+			args = append(args, "--root:@="+object("/cas/conv", c.dir))
+		}
+		args = append(args, c.args...)
+		w.Must(os.WriteFile("/tmp/requests/"+caseName(i), []byte(w.Caos(args...)), 0o644))
 	}
-	args = append(args, c.args...)
-	request := w.Caos(args...)
-	w.Caos("run-request-then", request, "--then:hash="+next(i))
+	w.Put("/tmp/requests", "/cas/requests")
+	w.Caos("map-then", "/cas/requests", "--map:hash="+stage("run"), "--then:hash="+stage("check"))
 }
 
-func check(i int) {
+func check(i int, r string) {
 	c := cases[i]
-	const r = "/cas/args/result"
 	w.Get(r)
 	w.True(w.Exists(filepath.Join(r, "stdout")), "case %s: the result has no stdout", c.name)
 	out := w.Read(filepath.Join(r, "stdout"))
@@ -204,8 +210,8 @@ func check(i int) {
 	switch {
 	case c.renames != nil:
 		w.True(!failed, "case %s was refused: %s", c.name, out)
-		session("/tmp/expect", c.dir, c.renames)
-		expect := w.Hash(object("/cas/expect", c.dir))
+		session("/tmp/expect-"+c.name, c.dir, c.renames)
+		expect := w.Hash(object("/cas/expect-"+c.name, c.dir))
 		got := w.Hash(filepath.Join(r, "root"))
 		w.True(got == expect, "case %s: the answer is not %q with %v renamed; out: %s", c.name, c.dir, c.renames, out)
 		for from, to := range c.renames {
@@ -229,16 +235,26 @@ func check(i int) {
 func main() {
 	w.Main(func() {
 		salt = strings.TrimSpace(w.Read("/cas/args/test-salt"))
-		build()
-		if !w.Exists("/cas/args/stage") {
-			launch(0)
+		st := ""
+		if w.Exists("/cas/args/stage") {
+			st = strings.TrimSpace(w.Read("/cas/args/stage"))
+		}
+		switch st {
+		case "run": // one map child: run the case's request, forward its result
+			w.Caos("run-request-then", strings.TrimSpace(w.Read("/cas/args/in")), "--then:hash="+stage("forward"))
+			return
+		case "forward":
+			w.Caos("forward", "/cas/args/result", "/cas/out")
 			return
 		}
-		i := w.Check(strconv.Atoi(strings.TrimSpace(w.Read("/cas/args/stage"))))
-		check(i)
-		if i+1 < len(cases) {
-			launch(i + 1)
+		build()
+		if st == "" {
+			launch()
 			return
+		}
+		w.Get("/cas/args/children")
+		for i := range cases {
+			check(i, "/cas/args/children/"+caseName(i))
 		}
 		w.Report("move-sed: ALL PASS\n")
 	})

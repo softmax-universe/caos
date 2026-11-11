@@ -150,7 +150,7 @@ per-connection cost; everything else is fetched by bare hash.
 | ref | writer | role |
 | --- | --- | --- |
 | `refs/caos/req/<hash>` | client `ensure_pushed` (`push <hash>:refs/caos/req/<hash>`) | negotiation base for that client's next push; hidden from upload-pack; the server's only deletion: swept every 120 s, kept 600 s by loose-ref mtime; "they anchor nothing" |
-| `refs/caos/res/<argTree>` | server `pin_result`, top-level external runs only | durability pin "so a client can fetch it by ref and it survives gc"; hidden from advertisement; never read back as a cache; accumulates forever. Sub-runs, map children and cache hits pin nothing |
+| `refs/caos/res/<argTree>` | server `pin_result`, top-level external runs only | visible to receive-pack, so a client's next push can build on a result it never fetched; hidden from upload-pack; never read back as a cache; swept with the `req` refs, kept 600 s. Sub-runs, map children and cache hits pin nothing |
 | `refs/caos/locator-trees/<rev>` | locator | rev-to-tree memo and retention root for a tree closure; hidden |
 | `refs/caos/v4/sessions/<id>/head` (and `refs/caos/v3/conversations/<id>/head` for sessions from before the rename) | llm-step, run-and-update-ref, MCP hook, TUI | session tip; never rewound by repair |
 | `refs/caos/v4/users/<key>/sessions/{active,archived}/<key>` (and `refs/caos/v3/users/<key>/conversations/...`) | clients | membership |

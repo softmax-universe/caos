@@ -317,10 +317,12 @@ fn settle(state: &mut State, source: &dyn Source, place: &Place) -> Vec<String> 
     unfinished
 }
 
-/// Follow every parked place again, at most once per [`REFRESH`].
-fn refresh(state: &mut State, config: &Config) {
+/// Follow every parked place again, at most once per [`REFRESH`]. Returns the
+/// directories to evaluate, as [`settle`] does.
+fn refresh(state: &mut State, config: &Config) -> Vec<String> {
+    let mut unfinished = Vec::new();
     if state.refreshed.is_some_and(|at| at.elapsed() < REFRESH) {
-        return;
+        return unfinished;
     }
     state.refreshed = Some(Instant::now());
     let mut places: HashSet<Place> = HashSet::new();
@@ -328,13 +330,14 @@ fn refresh(state: &mut State, config: &Config) {
         places.extend(waiting.iter().cloned());
     }
     if places.is_empty() {
-        return;
+        return unfinished;
     }
     let roots: Vec<String> = places.iter().map(|place| place.0.clone()).collect();
     let source = Store::ahead(config, &roots);
     for place in &places {
-        settle(state, &source, place);
+        unfinished.extend(settle(state, &source, place));
     }
+    unfinished
 }
 
 /// The approved set of a `reader:@@=`: `dir` under each of `roots`.

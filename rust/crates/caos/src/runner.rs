@@ -516,12 +516,15 @@ impl Runner {
             return Err("a resident job's args name no base or affinity".to_string());
         };
         let ttl_ms = self.cfg.poll_ms;
+        let mut required = self.pool.clone();
+        required.insert("base".to_string(), image.clone());
+        required.insert("affinity".to_string(), affinity.clone());
         let body = serde_json::json!({
-            "required": { "base": image, "affinity": affinity },
+            "required": required,
             "tenure": tenure,
-            // Our parent is a generic runner (runnerd) — it polls with no required
+            // Our parent is a runnerd of our pool — it polls with just the pool's
             // args once we die, so a job we can't serve can evict us toward it.
-            "lineage": [ {} ],
+            "lineage": [ &self.pool ],
             "ttl_ms": ttl_ms,
         });
         let url = runner_url(&self.t, "poll")?;

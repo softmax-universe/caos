@@ -486,9 +486,11 @@ concurrency.
   log before suspecting the daemon.
 - **`drive`'s token is granted only to a tree `caosd up` has published.** The
   store's reader for it is `git+caos://local?ref=refs/caos/dev&dir=integrations/claude-code/drive`,
-  and a reader approves only the tool as a commit on that ref evaluates it, once
-  the server has evaluated that commit (design/secrets.md). An edited tree is a
-  different root, and nothing evaluates the published one on its behalf. So `caos-stack --cloud-env` and `dev/remove-dev-envs` work straight after
+  and what a reader approves is fixed when the store is pushed: `drive` as each
+  commit then on that ref evaluates it (design/secrets.md). A later `caosd up`
+  publishes a commit the store has not seen, so run `caos-cli secrets-push`
+  again after it; and an edit to `drive`, or to anything it depends on, makes a
+  tree no published commit has. So `caos-stack --cloud-env` and `dev/remove-dev-envs` work straight after
   `nix build && caosd up`, and fail with "drive: no token at
   /secret/claude-oauth-token" once the tree has been edited since — with the same
   message as a missing secret, and nothing in the server log (no grant is recorded,

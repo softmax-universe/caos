@@ -3,10 +3,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const {recoverSchemas} = require('./schema_reference.cjs');
 
 const directory = process.argv[2];
-if (!directory || process.argv.length !== 3) {
-  console.error('usage: node verify_reference.cjs <prepared-reference-directory>');
+const schemaOutput = process.argv[3] === '--schema-output' ? process.argv[4] : null;
+if (!directory || !(process.argv.length === 3 || (process.argv.length === 5 && schemaOutput))) {
+  console.error('usage: node verify_reference.cjs <prepared-reference-directory> [--schema-output <file>]');
   process.exit(2);
 }
 
@@ -32,7 +34,7 @@ async function main() {
     WebAssembly.Module.exports(module).map(x => x.name).sort(),
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
-      'server_decode'].sort(),
+      'server_decode', 'schema_thread', 'schema_batch'].sort(),
   );
   const imports = {};
   const hostCalls = [];
@@ -178,8 +180,16 @@ async function main() {
     const result = decode('server_decode', hex, 512);
     check('incomplete LocalMachineTurn rejected', bytes()[result.output], 255);
   }
+  const schemas = recoverSchemas(e);
+  assert.deepEqual(recoverSchemas(e), schemas, 'schema descriptors must not contain uninitialized memory');
   assert.deepEqual(hostCalls, []);
   console.log(`PASS: ${checks} codec checks; 0 browser/network/storage calls`);
+  console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);
+  if (schemaOutput) {
+    fs.writeFileSync(schemaOutput, JSON.stringify({
+      version: metadata.version, build: metadata.build, ...schemas,
+    }) + '\n', {flag: 'wx'});
+  }
   console.log(`Reference: Delta ${metadata.version}, build ${metadata.build}`);
   console.log('Not tested: account authentication, live registration, history sync, or turns');
 }

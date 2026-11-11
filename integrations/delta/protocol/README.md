@@ -33,6 +33,9 @@ implement the recovered messages itself, without shipping or loading Delta Web.
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a
 turn, or accept history updates from a replacement implementation.
+The separate [standalone connector](../connector/README.md) has since passed
+live authentication, heartbeat, and registration checks from CAOS; history
+synchronization and agent-turn execution remain unfinished.
 
 ## Recovered wire facts
 
@@ -86,10 +89,34 @@ method returns false; its connection is routed through a same-origin
 `/api/connect` URL rather than proving that the upstream service is anonymous.
 
 The sign-in implementation redirects the browser to `/api/auth/sign_in`.
-These are static observations, not an authenticated exchange. The browser's
-same-origin session and the credentials needed by a standalone connector are
-still to be worked through. None of these endpoints was called with an account
-session during this investigation.
+These are static observations, not a captured browser session. The standalone
+connector instead uses the normal device-approval flow and obtains its own
+credential. It does not extract or reuse browser cookies or native-app tokens.
+
+## Thread and history descriptors
+
+The reference probe also invokes the compiled schema collectors for
+`ThreadDataStub` and `HistoryDeltaBatch`. It recovers **553 schema descriptors**,
+including message variants, generation state, register/map operations, text
+edits, and worktree deltas. All named references resolve within the recovered
+definitions, and repeated extraction must produce identical results.
+
+This uses only public compiled metadata. It does not read a live database,
+initialize the application, or enable browser/network/storage imports.
+The Rust memory layouts are pinned to the checked build hash; they are not
+interfaces that the production connector should depend on.
+
+To export the descriptors, explicitly choose a new output file:
+
+```sh
+node integrations/delta/protocol/verify_reference.cjs "$cache/isolated" \
+  --schema-output "$cache/thread-history-schema.json"
+```
+
+Default verification remains read-only, and export refuses to overwrite an
+existing file. Numeric schema kinds and field flags are preserved rather than
+assigned unverified meanings. The descriptors are evidence for implementing
+state synchronization, not an implementation or proof of correct replay.
 
 ## Reproduce without signing in
 
@@ -123,15 +150,15 @@ No downloaded application code or large generated artifacts belong in Git.
 
 ## Next compatibility gates
 
-1. Recover connection setup, ordinary sign-in, machine identity/presence,
-   registration response, and dispatch acknowledgment semantics. Use a dedicated
-   test identity/thread for live tests; do not extract native-app credentials.
-2. Register a separately implemented machine runner and demonstrate a dispatched
-   request being received and acknowledged without the Delta application.
-3. Recover the history synchronization and turn-ownership rules, including epoch
+Authentication, connection setup, and diagnostic machine registration now pass
+in the standalone connector. The remaining acceptance gates are:
+
+1. Demonstrate a dispatched turn being received and admitted by the connector,
+   using a dedicated test thread rather than an active conversation.
+2. Implement the history synchronization and turn-ownership rules, including epoch
    checks, cancellation, retry, and reconnect. A Git snapshot alone is not
    Delta's replicated thread/workspace state.
-4. Connect that protocol participant to CAOS execution, then demonstrate a
+3. Connect that protocol participant to CAOS execution, then demonstrate a
    complete phone-initiated turn with the laptop disconnected.
 
 CAOS already supplies scheduling, content-addressed inputs/results, and resident

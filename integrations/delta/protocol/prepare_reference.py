@@ -32,6 +32,13 @@ FUNCTIONS = {
     "ack_local_encode": codec("AcknowledgeLocalMachineTurn", ENCODE),
     "client_encode": codec("ClientMessage", ENCODE),
     "server_decode": codec("ServerMessage", DECODE),
+    "schema_thread": "<thread::ThreadDataStub as versioned::Versioned>::versioned_schema",
+    "schema_batch": (
+        "<versioned::schema::SchemaCollector>::register::<"
+        "deltadb::history::HistoryDeltaBatch, "
+        "<deltadb::history::HistoryDeltaBatch as versioned::Versioned>"
+        "::versioned_schema::{closure#0}>"
+    ),
 }
 
 

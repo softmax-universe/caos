@@ -57,7 +57,8 @@ pub(crate) fn variant(salt: &str, walk_key: Option<&str>) -> String {
 }
 
 fn digest(text: &str) -> String {
-    gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, text.as_bytes())
+    let bytes = text.as_bytes();
+    gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, bytes)
         .expect("hashing bytes")
         .to_string()
 }

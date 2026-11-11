@@ -1227,8 +1227,8 @@ fn broadcast(waiters: Vec<mpsc::Sender<Outcome>>, outcome: &Outcome) {
 /// — which blocks THIS request thread (never a worker slot), exactly as
 /// [`resolve_promise`]'s own `run` step does. This is what lets a worker request
 /// evaluation server-side, via an `eval` continuation, and get the byte-identical
-/// object a client `eval-path` would build, marked where a node's origin
-/// matches a grant ([`crate::secrets::evaluated`]).
+/// object a client `eval-path` would build, marked where a directory is one a
+/// secrets reader approves ([`crate::secrets::evaluated`]).
 struct ServerEvalHost<'a> {
     config: &'a Config,
     salt: &'a str,

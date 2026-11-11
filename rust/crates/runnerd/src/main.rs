@@ -34,7 +34,7 @@
 //! `CAOS_RUNNER_SOCKET` (an engine socket, granted only to images that declare
 //! `CAOS_GRANT_ENGINE_SOCKET=1` in their own config env; `CAOS_GRANT_VOLUMES`
 //! is declared the same way and backs the listed mountpoints with persistent
-//! named volumes — but ONLY on the caosd pool, see below), and
+//! named volumes — but ONLY by the caosd runner, see below), and
 //! `CAOS_WORKER_REDIS_ADDR` (a redis a worker may use for its own caching,
 //! injected into the containers; unset means none is offered).
 //!
@@ -141,7 +141,7 @@ struct Config {
     /// which is the point.
     required: std::collections::BTreeMap<String, String>,
     /// Whether this runnerd honors `CAOS_GRANT_VOLUMES` at all: true exactly
-    /// when it is the caosd pool (`grants_volumes`). Derived from
+    /// when it is the caosd runner (`grants_volumes`). Derived from
     /// `required` rather than configured beside it, so the two cannot disagree
     /// — a runner that grants volumes is one the server only ever hands jobs
     /// that asked for them.
@@ -347,7 +347,7 @@ fn main() {
         config.network,
         config.required,
         if config.volumes {
-            "granting persistent volumes (the caosd pool)"
+            "granting persistent volumes (the caosd runner)"
         } else {
             "granting no persistent volumes"
         }
@@ -438,7 +438,7 @@ fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
     }
     if !grants.volumes.is_empty() {
         eprintln!(
-            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}={} (granted on the caosd pool only)",
+            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}={} (granted by the caosd runner only)",
             grants.volumes.join(" ")
         );
     }
@@ -509,13 +509,13 @@ fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
     out
 }
 
-/// Is a runnerd with this required set the caosd pool — the one runner that
+/// Is a runnerd with this required set the caosd runner — the one runner that
 /// grants persistent volumes? Exactly when it requires
 /// `required-caosd=true`: the server then hands it ONLY jobs carrying that
 /// arg, and no other runner gets those jobs, so "this runner grants volumes"
 /// and "this job asked for them" are the same statement.
 fn grants_volumes(required: &std::collections::BTreeMap<String, String>) -> bool {
-    required.get(caos_world::REQUIRED_CAOSD_ARG) == Some(&blob_oid(caos_world::CAOSD_POOL))
+    required.get(caos_world::REQUIRED_CAOSD_ARG) == Some(&blob_oid(caos_world::REQUIRED_CAOSD_VALUE))
 }
 
 /// One long-poll. `Some(job)` to run; `None` on idle/evicted.
@@ -648,7 +648,7 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
     for dev in &grants.devices {
         command.args(["--device", dev]);
     }
-    // Only on the caosd pool (`grants_volumes`). Anywhere else an image's
+    // Only by the caosd runner (`grants_volumes`). Anywhere else an image's
     // request is refused rather than half-honored: these volumes are THIS
     // host's storage, and a job that needs them has to say so with
     // `--required-caosd=true` so it is routed to the host that has them.
@@ -660,11 +660,11 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
     } else if !grants.volumes.is_empty() {
         eprintln!(
             "runnerd slot {slot}: {} declares {VOLUME_GRANT_ENV}={}, but this runner is not \
-             the caosd pool; granting none (the job must carry --{}={})",
+             the caosd runner; granting none (the job must carry --{}={})",
             job.image_ref,
             grants.volumes.join(" "),
             caos_world::REQUIRED_CAOSD_ARG,
-            caos_world::CAOSD_POOL,
+            caos_world::REQUIRED_CAOSD_VALUE,
         );
     }
     // A worker's own scratch cache, when this deployment offers one. Passed
@@ -812,14 +812,14 @@ mod tests {
     use super::{grants_volumes, required_args};
 
     #[test]
-    fn only_the_caosd_pool_grants_volumes() {
-        // The generic pool, here or on any other machine.
+    fn only_the_caosd_runner_grants_volumes() {
+        // A plain runnerd, here or on any other machine.
         assert!(!grants_volumes(&required_args("")));
-        // Another pool entirely.
+        // A runner that requires something else entirely.
         assert!(!grants_volumes(&required_args("required-pool=seeded")));
-        // The right name with the wrong value is a pool nobody's jobs name.
+        // The right name with the wrong value names a runner no job asks for.
         assert!(!grants_volumes(&required_args("required-caosd=yes")));
-        // The caosd pool, alone or alongside another requirement.
+        // The caosd runner, alone or alongside another requirement.
         assert!(grants_volumes(&required_args("required-caosd=true")));
         assert!(grants_volumes(&required_args(
             "required-pool=x,required-caosd=true"

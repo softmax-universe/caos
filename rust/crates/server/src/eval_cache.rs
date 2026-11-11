@@ -113,6 +113,38 @@ pub(crate) fn put(config: &Config, tree: &str, variant: &str, value: &Value) {
         eprintln!("eval cache: recording {tree}: {e}");
     }
     remember(id, value.clone());
+    // After the write: a reader's approved set waiting on this tree follows
+    // its path again, and reads the value back from redis.
+    crate::approved::noted(config, tree);
+}
+
+/// Every value this server has recorded for `tree`, whatever the variant.
+pub(crate) fn values(config: &Config, tree: &str) -> Vec<Value> {
+    let mut read = values_of(config, &[tree.to_string()]);
+    read.remove(tree).unwrap_or_default()
+}
+
+/// [`values`] for many trees in one round trip. Every tree asked for is in
+/// the answer, with no values when it has none or redis could not be read:
+/// the caller follows thousands of roots, and must not fall back to asking
+/// for each.
+pub(crate) fn values_of(config: &Config, trees: &[String]) -> HashMap<String, Vec<Value>> {
+    if trees.is_empty() {
+        return HashMap::new();
+    }
+    let keys: Vec<String> = trees.iter().map(|tree| key(config, tree)).collect();
+    let read = crate::compute::hash_values_many(&config.redis_addr, &keys);
+    let mut read = read.unwrap_or_else(|e| {
+        eprintln!("eval cache: reading {} tree(s): {e}", trees.len());
+        Vec::new()
+    });
+    read.resize(trees.len(), Vec::new());
+    let mut values = HashMap::new();
+    for (tree, texts) in trees.iter().zip(read) {
+        let decoded: Vec<Value> = texts.iter().filter_map(|text| decode(text)).collect();
+        values.insert(tree.clone(), decoded);
+    }
+    values
 }
 
 #[cfg(test)]

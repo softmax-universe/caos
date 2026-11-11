@@ -58,6 +58,7 @@
 //! [`mod git`]; this file is the entry point, the shared [`Config`]/[`HttpError`],
 //! and the request router.
 
+mod approved;
 mod compute;
 mod eval_cache;
 mod git;

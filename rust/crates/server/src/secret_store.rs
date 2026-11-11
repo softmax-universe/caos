@@ -24,6 +24,9 @@ pub(crate) struct Stored {
     pub(crate) entropy: String,
     pub(crate) value: String,
     pub(crate) readers: Vec<Reader>,
+    /// The trees the push approved: each tool a `reader:@@=` names, as the
+    /// server evaluated it when `secrets-push` asked, and any written by hand.
+    pub(crate) trees: Vec<String>,
 }
 
 /// `secrets.git` beside the main repository.

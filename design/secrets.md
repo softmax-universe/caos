@@ -1,7 +1,8 @@
 # Secrets: deciding which tool is granted
 
-**Status:** design, 2026-W46. Replaces the origin index in
-`rust/crates/server/src/secrets.rs`. SPEC.md, "Secrets", is the contract
+**Status:** built, 2026-W46, in `rust/crates/server/src/eval_cache.rs`,
+`approved.rs` and `secrets.rs`; not yet measured on a deployed server. It
+replaced the origin index. SPEC.md, "Secrets", is the contract
 (stores, readers, `secret-hash`, isolation); this file is how the server
 decides that a tool is one a reader approved, and why it is done this way.
 

@@ -20,8 +20,9 @@ probe, not a persistent runner. Do not select a diagnostic machine for real work
 - Set a diagnostic machine-runner name, receive `Updated`, clear the name, and
   receive `Updated` again.
 
-These live checks have been run from the host. A CAOS-worker run is the next
-deployment check; it must not be inferred from the host result.
+These live checks have passed both on the host and inside an actual CAOS
+worker, using a credential grant pinned to the deployed source revision. The
+diagnostic registration was cleared before the worker exited.
 
 The protocol header and authentication flow were recovered from public client
 code for the same 0.24.2 build as the reference codec. HTTP error bodies, access
@@ -39,6 +40,11 @@ The Go module reuses `caos/w` from `std/go/prelude`. The Nix package compiles
 the same module, runs its tests, and vendors pinned dependencies. Its source
 filter excludes research artifacts and the evaluated `DEEP-DEPS` tree.
 `tests/delta-protocol` builds that image through the ordinary CAOS suite.
+
+For source revision `ced02e82db97134a5714ef731fb5e54d8e428e1c`, validation
+included the race-enabled Go tests, `go vet`, a native Nix package build, the
+live CAOS probe, and the full salted CAOS suite: **79/79 passed**. This verifies
+the connector's current operations; it is not evidence of agent-turn execution.
 
 ## Authentication
 

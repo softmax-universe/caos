@@ -238,7 +238,8 @@ fn child_tree(object: &[u8], name: &str) -> Result<Option<String>, String> {
     let start = start.ok_or("the server sent a malformed object")?;
     let tree = gix::objs::TreeRef::from_bytes(&object[start + 1..], gix::hash::Kind::Sha1)
         .map_err(|e| format!("the server sent a malformed tree: {e}"))?;
-    let entry = tree.entries.iter().find(|entry| entry.filename == name.as_bytes());
+    let mut entries = tree.entries.iter();
+    let entry = entries.find(|entry| entry.filename == name.as_bytes());
     let Some(entry) = entry else {
         return Ok(None);
     };

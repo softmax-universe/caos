@@ -282,7 +282,6 @@ fn eval_path_uncached(
         if node_kind == "commit" && i < comps.len() {
             node_oid = commit_tree(host, &node_oid)?;
             node_kind = "tree".into();
-            origins = with_known(host, origins, &node_oid);
         }
         // A `.caos-expr` at the root of this tree node transforms the node — from
         // the node's contents WITHOUT the directive (see `strip_caos_expr`).

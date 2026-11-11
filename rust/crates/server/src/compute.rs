@@ -2996,33 +2996,22 @@ pub(crate) fn list_append_many(addr: &str, pairs: &[(String, String)]) -> Result
     Ok(())
 }
 
-/// `SADD key member` for every pair, over one connection. A set, not a list,
-/// where a repeat must be free: the secrets origin index re-records the same
-/// fact on every re-index, and as list lines they grew to 25M entries per key.
-pub(crate) fn set_add_many(addr: &str, pairs: &[(String, String)]) -> Result<(), String> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
+/// `HVALS key` for every key, over one connection: one write, then every
+/// reply, in the order asked. A secrets approved set asks about every commit
+/// of a branch at once, and a connection each would cost more than the answer.
+pub(crate) fn hash_values_many(addr: &str, keys: &[String]) -> Result<Vec<Vec<String>>, String> {
     let mut stream = redis_connect(addr)?;
     let mut buf = Vec::new();
-    for (key, member) in pairs {
-        buf.extend_from_slice(&resp_command(&["SADD", key, member]));
+    for key in keys {
+        buf.extend_from_slice(&resp_command(&["HVALS", key]));
     }
     stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
     let mut reader = BufReader::new(stream);
-    for _ in pairs {
-        read_integer_reply(&mut reader)?;
+    let mut values = Vec::with_capacity(keys.len());
+    for _ in keys {
+        values.push(read_array_reply(&mut reader)?);
     }
-    Ok(())
-}
-
-/// `SMEMBERS key` — every member of the set, in no particular order.
-pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["SMEMBERS", key]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_array_reply(&mut BufReader::new(stream))
+    Ok(values)
 }
 
 /// `HGET key field` — one field of a hash, or None when the key or the field

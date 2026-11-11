@@ -135,7 +135,9 @@ func runWorker(ctx context.Context) (report string, deferred bool, err error) {
 
 func workerMain() {
 	w.Step("Delta connector operation")
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// A cold context import includes native history reads and CAOS request
+	// preparation. Bound the complete phase, not a warmed-up RPC's latency.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	report, deferred, err := runWorker(ctx)
 	if err == nil && deferred {

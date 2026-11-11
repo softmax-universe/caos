@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -35,6 +36,9 @@ func runCaosCommand(ctx context.Context, args ...string) (string, int, error) {
 	output, err := exec.CommandContext(ctx, "caos", args...).Output()
 	if err == nil {
 		return strings.TrimSpace(string(output)), 0, nil
+	}
+	if ctx.Err() != nil {
+		return "", -1, ctx.Err()
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
@@ -70,12 +74,18 @@ func (agent *caosAgent) prepare(ctx context.Context, args ...string) (agentTask,
 	}
 	argv := append([]string{"prepare-request", "--base:hash=" + agent.image}, args...)
 	request, code, err := agent.command(ctx, argv...)
-	if err != nil || code != 0 || !isObjectHash(request) {
+	if err != nil {
+		return task, fmt.Errorf("could not prepare the CAOS agent request: %w", err)
+	}
+	if code != 0 || !isObjectHash(request) {
 		return task, errors.New("could not prepare the CAOS agent request")
 	}
 	publisher, code, err := agent.command(ctx, "prepare-request",
 		"--base:hash="+agent.publisher, "--subreq="+request, "--result-ref="+agentResultPrefix+request)
-	if err != nil || code != 0 || !isObjectHash(publisher) {
+	if err != nil {
+		return task, fmt.Errorf("could not prepare the CAOS result publisher: %w", err)
+	}
+	if code != 0 || !isObjectHash(publisher) {
 		return task, errors.New("could not prepare the CAOS result publisher")
 	}
 	return agentTask{Request: request, Task: publisher}, nil

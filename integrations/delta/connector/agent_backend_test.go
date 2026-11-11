@@ -164,3 +164,14 @@ func TestCaosAgentRetainsUncertainAdmissionIdentity(t *testing.T) {
 		t.Fatal("pre-canceled dispatch started work")
 	}
 }
+
+func TestCaosAgentPreparationPreservesDeadlineErrors(t *testing.T) {
+	agent, _ := newCaosAgent(strings.Repeat("a", 40), strings.Repeat("b", 40))
+	agent.command = func(context.Context, ...string) (string, int, error) {
+		return "", -1, context.DeadlineExceeded
+	}
+	message := agentMessage{ID: strings.Repeat("1", 32), Role: "user", Complete: true}
+	if _, err := agent.prepareRecord(context.Background(), "s", "a", message, "", "attempt"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("request preparation hid its actual timeout")
+	}
+}

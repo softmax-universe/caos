@@ -129,14 +129,17 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 	if progress.Next < len(messages) {
 		locator := ""
 		if progress.Next == 0 {
+			w.Step("verify native workspace content in CAOS")
 			locator, err = bridgeWorkspaceContent(ctx, token, actor, state)
 			if err != nil {
 				return "", false, err
 			}
 		}
+		w.Step("prepare native message in the CAOS session")
 		task, err = agent.prepareRecord(ctx, session, actor.String(), messages[progress.Next], locator, w.Read("/cas/args/request-id"))
 		progress.Next++
 	} else {
+		w.Step("export the pinned CAOS model context")
 		task, err = agent.prepareContext(ctx, session, progress.Head, w.Read("/cas/args/request-id"))
 		progress.Exporting = true
 	}

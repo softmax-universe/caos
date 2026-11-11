@@ -175,3 +175,20 @@ func TestCaosAgentPreparationPreservesDeadlineErrors(t *testing.T) {
 		t.Fatal("request preparation hid its actual timeout")
 	}
 }
+
+func TestCaosFailureClassificationDoesNotExposePrivateStderr(t *testing.T) {
+	for _, test := range []struct{ stderr, category string }{
+		{"caos: usage: private-prompt", "does not support"},
+		{"private-prompt already bound", "already bound"},
+		{"private-prompt not found", "object was not found"},
+		{"private-prompt: No such file or directory", "path is missing"},
+		{"private-prompt: Permission denied", "denied access"},
+		{"private-prompt private-locator private-token", "command failed"},
+	} {
+		err := classifyCaosFailure(test.stderr, 1)
+		if strings.Contains(err.Error(), "private-") || !strings.Contains(err.Error(), test.category) ||
+			!strings.Contains(err.Error(), "exit 1") {
+			t.Fatalf("unsafe or uninformative CLI error: %v", err)
+		}
+	}
+}

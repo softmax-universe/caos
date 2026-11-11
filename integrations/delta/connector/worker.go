@@ -37,7 +37,7 @@ func runWorker(ctx context.Context) (report string, deferred bool, err error) {
 	if w.Exists("/cas/args/op") {
 		op = w.Read("/cas/args/op")
 	}
-	if op != "probe" && op != "inspect-history" && op != "replay-history" && op != "inspect-workspaces" && op != "bridge-context" {
+	if op != "probe" && op != "inspect-history" && op != "replay-history" && op != "inspect-workspaces" && op != "bridge-context" && op != "check-model" {
 		return "", false, errors.New("unsupported Delta worker operation")
 	}
 	var name *string
@@ -76,6 +76,12 @@ func runWorker(ctx context.Context) (report string, deferred bool, err error) {
 		return "", false, err
 	}
 	client := w.Check(newAuthClient(defaultCloudURL))
+	if op == "check-model" {
+		if _, err := client.modelToken(ctx, identity.Account); err != nil {
+			return "", false, err
+		}
+		return "Connector model-token authorization accepted from CAOS. No inference was requested and no Delta history was changed.\n", false, nil
+	}
 	token, err := client.deltaToken(ctx, identity.Account)
 	if err != nil {
 		return "", false, err

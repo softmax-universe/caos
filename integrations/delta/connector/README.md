@@ -212,6 +212,37 @@ model/tool loop. `std/run-and-update-ref` can publish immutable task-result refs
 for a caller without a CAOS session record; duplicate callbacks reconcile the
 same result by identity without force-writing a ref.
 
+### Model authorization preflight and current external blocker
+
+Delta connection credentials are not themselves model credentials. The native
+operator can check the connector's own model authorization without inference:
+
+```sh
+connector auth-model-check --credential-file=/private/path/credentials.json
+```
+
+`op=check-model` performs the same check in CAOS, after requiring the sealed
+thread allowlist match. It reads `/client/users/me`, selects only the returned
+default organization (which must also appear in the returned membership list),
+and posts that organization to `/client/llm_tokens`. It never reads application
+settings, obtains another provider key, sends a completion, or changes Delta
+history. Tokens and account metadata are never printed or returned.
+
+On 2026-11-11 the approved connector's account lookup returned HTTP 200, but its
+default organization's model-token request returned HTTP 402:
+“Organization does not have an active subscription.” The approved fixture's
+one existing user message contains no nonempty delegated inference voucher.
+Consequently, no real model response or visible CAOS-generated Delta reply has
+been demonstrated. Fixing the external account entitlement or supplying an
+explicitly authorized alternative inference credential is necessary before
+that path can run; this work does neither.
+
+This is not a claim that enabling billing completes the integration. **Unfixed
+bugs:** the live context bridge still fails during CAOS request preparation,
+and the existing driver only implements Anthropic transport, not Delta's model
+API. Turn admission and visible reply writes are also not connected yet. The
+preflight reports only model-token authorization, not end-to-end readiness.
+
 **Unfixed protocol-support gaps:** structured native tool/thinking history,
 attachments, inherited parent context, and multiple or incrementally edited
 workspaces still fail explicitly. They are not flattened or silently omitted.

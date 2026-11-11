@@ -54,7 +54,7 @@ func readPrivateJSON(path string, value any) error {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|probe|fetch-history|replay-history [options]")
+		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|auth-model-check|probe|fetch-history|replay-history [options]")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	cloudURL := flags.String("cloud-url", defaultCloudURL, "Delta account service origin")
@@ -154,6 +154,15 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Println("Account credentials accepted; Delta service token issued.")
+	case "auth-model-check":
+		var account credentials
+		if err := readPrivateJSON(*credentialFile, &account); err != nil {
+			return err
+		}
+		if _, err := client.modelToken(ctx, account); err != nil {
+			return err
+		}
+		fmt.Println("Connector model-token authorization accepted. No inference was requested and no Delta history was changed.")
 	case "probe", "fetch-history":
 		var target threadID
 		if args[0] == "fetch-history" {
@@ -206,7 +215,7 @@ func run(ctx context.Context, args []string) error {
 			}
 			fmt.Printf("Fetched %d inline history batches and %d replication-pack references; snapshot saved privately.\n",
 				len(snapshot.Download.Batches), len(snapshot.Download.ReplicationPacks))
-			fmt.Println("History replay and agent-turn execution are not implemented.")
+			fmt.Println("No inference was requested and no Delta turn was accepted or executed.")
 			return nil
 		}
 		var name *string

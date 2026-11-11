@@ -129,7 +129,7 @@ fn first_parent_commits(dir: &str, rev: &str, since: Option<&str>) -> Result<Vec
         }
         None => format!("--max-count={DEFAULT_COMMITS}"),
     };
-    let args = ["log", "--first-parent", "--format=%H", &range, rev];
+    let args = ["log", "--first-parent", "--format=%H", range.as_str(), rev];
     let mut commits: Vec<String> = git(dir, &args)?.lines().map(str::to_string).collect();
     if let Some(since) = since {
         commits.push(since.to_string());

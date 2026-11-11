@@ -1148,13 +1148,13 @@ fn next_job(
 
 /// The job's runner-selection args — every top-level entry of `args` named with
 /// `caos_world::REQUIRED_ARG_PREFIX` — as name → oid, read off the placeholders
-/// the way `base` is. These are the pool the job was routed to
+/// the way `base` is. These name the runner the job was sent to
 /// (`required-caosd`, `required-pool`); an entry whose hash cannot be read is
 /// left out, which only costs the follow-up poll its specificity.
 fn required_entries(args: &std::path::Path) -> std::collections::BTreeMap<String, String> {
-    let mut pool = std::collections::BTreeMap::new();
+    let mut out = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(args) else {
-        return pool;
+        return out;
     };
     for entry in entries.flatten() {
         let Ok(name) = entry.file_name().into_string() else {

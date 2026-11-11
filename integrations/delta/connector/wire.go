@@ -184,8 +184,8 @@ func decodeResponse(message wireVariant) (uint32, wireVariant, error) {
 
 func decodeUUID(data []byte) (uuid, error) {
 	var id uuid
-	var raw []byte
-	if err := msgpack.Unmarshal(data, &raw); err != nil || len(raw) != len(id) {
+	raw, err := decodeBinary(data, len(id))
+	if err != nil {
 		return id, errors.New("invalid protocol UUID")
 	}
 	copy(id[:], raw)
@@ -196,7 +196,7 @@ type dispatchedTurn struct {
 	Machine uuid
 	Request uuid
 	History uuid
-	Start   msgpack.RawMessage
+	Start   startTurn
 }
 
 func decodeTurn(message wireVariant) (dispatchedTurn, error) {
@@ -215,9 +215,9 @@ func decodeTurn(message wireVariant) (dispatchedTurn, error) {
 			return turn, fmt.Errorf("invalid turn identity field %d", i)
 		}
 	}
-	if _, err := decodeFields(fields[3], 7, 7); err != nil {
+	turn.Start, err = decodeStartTurn(fields[3])
+	if err != nil {
 		return turn, errors.New("invalid turn-start fields")
 	}
-	turn.Start = fields[3]
 	return turn, nil
 }

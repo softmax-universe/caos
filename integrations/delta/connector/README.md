@@ -46,6 +46,13 @@ included the race-enabled Go tests, `go vet`, a native Nix package build, the
 live CAOS probe, and the full salted CAOS suite: **79/79 passed**. This verifies
 the connector's current operations; it is not evidence of agent-turn execution.
 
+The canonical root entry at revision `7624c1d767cae4866080226c08a01731c6cee0a0`
+also passed the live CAOS probe and the full salted suite (**79/79**), as well as
+`nix build --no-link .#delta-runner`. The offline reference now checks 336 wire
+cases. The dispatch decoder reads typed epochs and timeline identities, accepts
+the reference's defaults for omitted newer fields, and rejects malformed types.
+Parsing a dispatch does not admit the turn or acknowledge execution.
+
 ## Authentication
 
 An operator runs `auth-start`, opens the displayed official Delta verification

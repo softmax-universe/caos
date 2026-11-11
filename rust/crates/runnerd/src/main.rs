@@ -140,6 +140,12 @@ struct Config {
     /// anything: a runner requiring it simply never matches ordinary work,
     /// which is the point.
     required: std::collections::BTreeMap<String, String>,
+    /// Whether this runnerd honors `CAOS_GRANT_VOLUMES` at all: true exactly
+    /// when it is the nix-store pool (`grants_volumes`). Derived from
+    /// `required` rather than configured beside it, so the two cannot disagree
+    /// — a runner that grants volumes is one the server only ever hands jobs
+    /// that asked for them.
+    volumes: bool,
     slots: u32,
     network: String,
     docker_bin: String,

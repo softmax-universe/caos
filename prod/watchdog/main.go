@@ -23,7 +23,7 @@
 //	                                What the Claude session uses for every
 //	                                read and every fix; it refuses the
 //	                                commands the runbook reserves for a human.
-//	caos-watchdog notify <text>     post to the #proj-caos Slack webhook.
+//	caos-watchdog notify <text>     post to the #alerts-caos Slack webhook.
 //	caos-watchdog ticket [--refresh] the prod iroh ticket, cached from the host.
 //
 // Configuration is environment, set by the systemd unit (prod/watchdog/

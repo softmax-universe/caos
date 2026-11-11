@@ -137,7 +137,7 @@ all of it are code in metta, `devops/tf/datadog-monitors/caos_monitors.tf`,
 tagged `service:caos`.
 
 Response is `caos-watchdog respond`, a daemon that polls those monitors.
-When any alert, it posts to Slack #proj-caos at once (no model in that path),
+When any alert, it posts to Slack #alerts-caos at once (no model in that path),
 waits 90 s for the rest of the storm, then runs ONE Claude Code session over
 the whole set with `watchdog/runbook/CLAUDE.md` as its instructions. The
 session reaches the host only through `caos-watchdog ssh`, which refuses

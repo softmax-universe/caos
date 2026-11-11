@@ -546,7 +546,9 @@ by `secret-hash`.
 
 The server never evaluates a commit to learn what a reader approves. It
 follows the path through evaluations it has already cached, so a commit
-contributes once something has evaluated it here, which mounting it does. The
+contributes once something has evaluated it here, which mounting it does.
+(Once a commit's root has been evaluated, the server does evaluate the
+directories of a reader's path below it that the use skipped.) The
 consequence: **name a tool where it is defined.** A reader on caos's
 `std/github` covers every mount and copy of it. A reader that names an alias,
 a path in another repository that happens to mount the same tool, approves

@@ -433,20 +433,24 @@ pub(crate) fn session_approves(config: &Config, head: &str, path: &str, node: &s
 
 /// The eval cache recorded a value for `tree`: follow again every place that
 /// was parked on it. Called for every evaluated expression, so the common
-/// case, nothing parked there, is one lookup.
-pub(crate) fn noted(config: &Config, tree: &str) {
+/// case, nothing parked there, is one lookup. Returns the directories to
+/// evaluate next, as [`settle`] does; the walk that recorded the value
+/// evaluates them.
+pub(crate) fn noted(config: &Config, tree: &str) -> Vec<String> {
+    let mut unfinished = Vec::new();
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(state) = guard.as_mut() else {
-        return;
+        return unfinished;
     };
     let Some(waiting) = state.parked.get(tree) else {
-        return;
+        return unfinished;
     };
     let places: Vec<Place> = waiting.iter().cloned().collect();
     let source = Store::ahead(config, &[]);
     for place in &places {
-        settle(state, &source, place);
+        unfinished.extend(settle(state, &source, place));
     }
+    unfinished
 }
 
 #[cfg(test)]

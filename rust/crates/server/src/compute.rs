@@ -1248,6 +1248,49 @@ struct ServerEvalHost<'a> {
     dispatches: std::sync::atomic::AtomicUsize,
 }
 
+/// Evaluate the expression at the root of each of `trees`, for the eval cache
+/// alone: the directories a secrets reader's path stops at under a root that
+/// is already in use ([`crate::approved`]). With no secrets and no salt, at
+/// the top of a stack: this is admission, before any run exists. A failure is
+/// reported and otherwise ignored; the reader then approves nothing there.
+pub(crate) fn finish_paths(config: &Config, trees: &[String]) {
+    if trees.is_empty() {
+        return;
+    }
+    let secrets = crate::secrets::Context::default();
+    let evaluate = || {
+        for tree in trees {
+            let host = ServerEvalHost {
+                config,
+                salt: "",
+                stack: &[],
+                secrets: &secrets,
+                parent: tree,
+                eval_path: "",
+                dispatches: std::sync::atomic::AtomicUsize::new(0),
+            };
+            if let Err(e) = caos_eval::eval_path(&host, tree, "") {
+                eprintln!("secrets: evaluating {tree} for a reader's path: {e}");
+            }
+        }
+    };
+    // On a thread with the evaluator's stack: admission runs on whatever
+    // thread took the request.
+    std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .stack_size(EVAL_STACK_BYTES)
+            .spawn_scoped(scope, evaluate);
+        match spawned {
+            Ok(handle) => {
+                if handle.join().is_err() {
+                    eprintln!("secrets: evaluating a reader's path panicked");
+                }
+            }
+            Err(e) => eprintln!("secrets: no thread to evaluate a reader's path on: {e}"),
+        }
+    });
+}
+
 impl ServerEvalHost<'_> {
     /// Which of a tree's cached values this walk reads and writes: everything
     /// an expression's value depends on that its tree does not hold.

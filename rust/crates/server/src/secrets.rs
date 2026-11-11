@@ -87,10 +87,12 @@ impl Context {
     /// Whether `secret` is granted to the directory `node`, which evaluated to
     /// `value` (both tree oids).
     ///
-    /// A pushed tree may name either. `secrets-push` sends the directory: it
-    /// depends on the commit alone, where the image a tool builds also depends
-    /// on the build of caos that built it and on what its own dependencies
-    /// were granted. An image written by hand is honored all the same.
+    /// A pushed tree may name either. `secrets-push` sends the directory. The
+    /// image a tool builds always depends on the build of caos that built it,
+    /// and on what its own dependencies were granted; the directory depends on
+    /// the build only where a parent expression builds something into it,
+    /// which caos's do not (design/secrets.md has the comparison). An image
+    /// written by hand is honored all the same.
     fn grants(&self, config: &Config, secret: &Stored, node: &str, value: &str) -> bool {
         let mut trees = secret.trees.iter();
         if trees.any(|tree| tree == node || tree == value) {

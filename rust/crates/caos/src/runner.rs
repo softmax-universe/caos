@@ -1116,9 +1116,9 @@ fn next_job(
     required.insert("base".to_string(), image_oid.to_string());
     let body = serde_json::json!({
         "required": required,
-        // Our parent is a runnerd of our pool (`Runner::pool`; the generic one
-        // when that is empty) — it polls with just the pool's args once we die,
-        // so a job we can't serve can evict us toward it.
+        // Our parent is the runnerd that started us (`Runner::requires`; a
+        // plain runnerd when that is empty) — it polls with just those args
+        // once we die, so a job we can't serve can evict us toward it.
         "lineage": [ requires ],
         "ttl_ms": ttl_ms,
     });

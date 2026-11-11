@@ -1280,8 +1280,8 @@ mod origin_tests {
     }
 
     #[test]
-    fn a_node_carries_its_path_and_every_origin_it_was_mounted_with() {
-        let mut host = Memory::default();
+    fn evaluated_is_given_the_directory_the_expression_was_applied_at() {
+        let host = Memory::default();
         let expr = host.put(
             gix::objs::Kind::Blob,
             b"curry --base:docker=img@sha256:00 --x=1\n".to_vec(),
@@ -1289,25 +1289,12 @@ mod origin_tests {
         let tool = host.tree(vec![(".caos-expr", false, expr)]);
         let mounted = host.tree(vec![("tool", true, tool)]);
         let root = host.tree(vec![("sub", true, mounted)]);
-        let upstream = Origin {
-            root: "upstream".into(),
-            path: "std".into(),
-        };
-        host.known.insert(mounted.to_string(), vec![upstream]);
 
+        // The same directory reached two ways is one question to the host:
+        // by path from a root, and as a walk's own start.
         eval_path(&host, &root.to_string(), "sub/tool").unwrap();
-        assert_eq!(
-            host.seen.borrow().as_slice(),
-            &[vec![
-                Origin {
-                    root: root.to_string(),
-                    path: "sub/tool".into()
-                },
-                Origin {
-                    root: "upstream".into(),
-                    path: "std/tool".into()
-                },
-            ]]
-        );
+        eval_path(&host, &tool.to_string(), "").unwrap();
+        let seen = host.seen.borrow();
+        assert_eq!(seen.as_slice(), &[tool.to_string(), tool.to_string()]);
     }
 }

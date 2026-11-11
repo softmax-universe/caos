@@ -377,14 +377,15 @@ pub(crate) fn locator_set(
     }
     let source = Store::ahead(config, &unknown);
     let set = Arc::new(Set::new(roots.clone(), dir));
+    let mut unfinished = Vec::new();
     for place in &places {
         if !state.reached.contains_key(place) {
-            settle(state, &source, place);
+            unfinished.extend(settle(state, &source, place));
         }
         set.add(&state.reached[place].nodes);
     }
     state.sets.insert(id, set.clone());
-    set
+    (set, unfinished)
 }
 
 /// Whether a `reader:@=` naming `path` in the session whose head tree is

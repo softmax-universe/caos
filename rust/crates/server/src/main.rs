@@ -1019,29 +1019,40 @@ const REQ_REF_KEEP: std::time::Duration = std::time::Duration::from_secs(600);
 /// push from the same client, seconds later, so that an edited tree ships only
 /// its delta. Deleting a fresh one would make that client re-send a closure it
 /// already sent, which is the cost this is trying to avoid.
+///
+/// `refs/caos/res/<argTree>` TOO, on the same two grounds and with the same
+/// job. A result pin is never read back (design/caos-store-and-gc.md: a result
+/// is fetched by hash, and sessions never query these), it keeps nothing alive
+/// with GC off, and what it does do -- stay advertised to receive-pack, so a
+/// client can push a request built on a result it never fetched -- is the
+/// next push's business, seconds later. Left alone they were the largest set
+/// of refs: one per top-level run, forever, and a dev stack's suite runs
+/// slowed as they piled up (954s of test time at 2,215 refs, 713s at 432).
 fn spawn_request_ref_pruner(git_dir: String) {
     std::thread::spawn(move || loop {
         std::thread::sleep(REQ_REF_SWEEP);
-        let dir = std::path::Path::new(&git_dir).join("refs/caos/req");
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            // No directory yet (nothing pushed) is the ordinary case, not news.
-            Err(_) => continue,
-        };
         let mut stale = String::new();
         let mut count = 0usize;
-        for entry in entries.flatten() {
-            let old = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t.elapsed().map(|age| age > REQ_REF_KEEP).unwrap_or(false))
-                .unwrap_or(false);
-            if !old {
-                continue;
-            }
-            if let Some(name) = entry.file_name().to_str() {
-                stale.push_str(&format!("delete refs/caos/req/{name}\n"));
-                count += 1;
+        for prefix in ["refs/caos/req", "refs/caos/res"] {
+            let dir = std::path::Path::new(&git_dir).join(prefix);
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // No directory yet (nothing pushed) is the ordinary case, not news.
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().map(|age| age > REQ_REF_KEEP).unwrap_or(false))
+                    .unwrap_or(false);
+                if !old {
+                    continue;
+                }
+                if let Some(name) = entry.file_name().to_str() {
+                    stale.push_str(&format!("delete {prefix}/{name}\n"));
+                    count += 1;
+                }
             }
         }
         if count == 0 {
@@ -1066,7 +1077,7 @@ fn spawn_request_ref_pruner(git_dir: String) {
             let _ = stdin.write_all(stale.as_bytes());
         }
         match child.wait() {
-            Ok(_) => eprintln!("caos-server: pruned {count} stale request ref(s)"),
+            Ok(_) => eprintln!("caos-server: pruned {count} stale request/result ref(s)"),
             Err(e) => eprintln!("caos-server: pruning request refs: {e}"),
         }
     });

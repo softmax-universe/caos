@@ -211,6 +211,12 @@ produced `eval(T, parent)`:
 Either way the cache entry is written before the tool's directory can be
 tested, so the approved set already holds it.
 
+A `DEEP-DEPS` copy is a third way, and this argument does not cover it. The
+root expression alone builds the copy, so it exists before any directory
+below the root has been evaluated. Finishing the path, above, is what closes
+that: the root's value is recorded before anything inside it can be walked,
+and the server evaluates the rest of the reader's path at that moment.
+
 This argument holds when the reader names the place the tool's content
 **came from**. It fails when the reader names an alias. Suppose the grant is
 on `my-repo`, `dir=custom-tree/caos-std/github`, where `custom-tree` mounts

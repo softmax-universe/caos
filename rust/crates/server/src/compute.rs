@@ -1344,8 +1344,19 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         }
     }
     fn memo_put(&self, kind: caos_eval::MemoKind, key: &str, value: &(String, String)) {
-        if kind == caos_eval::MemoKind::Node {
-            crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
+        if kind != caos_eval::MemoKind::Node {
+            return;
+        }
+        crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
+        // After the write, so the value is there to read: a secrets reader's
+        // path that was waiting on this tree is followed again. Where it now
+        // stops at a directory this walk may never enter (`std`, for a tool
+        // run from a `DEEP-DEPS` copy), that directory is evaluated here, on
+        // this walk's stack so a cycle is still caught (design/secrets.md).
+        for tree in crate::approved::noted(self.config, key) {
+            if let Err(e) = caos_eval::eval_path(self, &tree, "") {
+                eprintln!("secrets: evaluating {tree} for a reader's path: {e}");
+            }
         }
     }
     fn evaluated(&self, node: &str, value: (String, String)) -> Result<(String, String), String> {

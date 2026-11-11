@@ -326,11 +326,6 @@ fn eval_path_uncached(
         let (mode, oid) = (entry.mode, entry.oid);
         node_kind = kind_of_mode(mode).to_string();
         node_oid = oid.to_string();
-        origins = origins
-            .iter()
-            .map(|origin| origin.child(comps[i]))
-            .collect();
-        origins = with_known(host, origins, &node_oid);
         i += 1;
     }
     Ok((node_kind, node_oid))

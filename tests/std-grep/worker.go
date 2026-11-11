@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"caos/w"
@@ -22,7 +24,7 @@ import (
 var (
 	server string
 	client = &http.Client{Timeout: 10 * time.Minute}
-	seq    int
+	seq    int64
 	// runSalt keys every tool call to THIS invocation (tests/std-files says
 	// why it is not the pid).
 	runSalt string
@@ -41,8 +43,7 @@ func write(path, text string) {
 
 // at is the object at a path inside a tree (through a source tree's code).
 func at(tree, path string) string {
-	seq++
-	dest := fmt.Sprintf("/cas/at-%d", seq)
+	dest := fmt.Sprintf("/cas/at-%d", atomic.AddInt64(&seq, 1))
 	run("caos", "resolve", tree, path, dest)
 	return run("caos", "hash", dest)
 }
@@ -50,13 +51,13 @@ func at(tree, path string) string {
 // grep runs the tool with `root` bound to an object (none for "") and returns
 // its stdout and whether it failed.
 func grep(root string, params ...string) (text string, failed bool) {
-	seq++
+	n := atomic.AddInt64(&seq, 1)
 	form := url.Values{}
 	form.Set("base:hash", run("caos", "hash", "/cas/args/grep"))
 	if root != "" {
 		form.Set("root:hash", root)
 	}
-	form.Set("salt", fmt.Sprintf("std-grep-%s-%d", runSalt, seq))
+	form.Set("salt", fmt.Sprintf("std-grep-%s-%d", runSalt, n))
 	for i := 0; i < len(params); i += 2 {
 		form.Set(params[i], params[i+1])
 	}
@@ -67,13 +68,38 @@ func grep(root string, params ...string) (text string, failed bool) {
 	w.True(resp.StatusCode == 200, "grep: HTTP %d: %s", resp.StatusCode, body)
 	kind, hash, found := strings.Cut(body, " ")
 	w.True(found && kind == "tree", "grep answered %q, not a result tree", body)
-	dir := fmt.Sprintf("/cas/r-%d", seq)
+	dir := fmt.Sprintf("/cas/r-%d", n)
 	run("caos", "get-hash", hash, dir)
 	run("caos", "get", dir)
 	run("caos", "get", dir+"/stdout")
 	_, err = os.Lstat(dir + "/failed")
 	return string(w.Check(os.ReadFile(dir + "/stdout"))), err == nil
 }
+
+// query is one grep call and, once run, its answer.
+type query struct {
+	root   string
+	params []string
+	text   string
+	failed bool
+}
+
+// runAll runs every query at once. They are independent, and each is a few
+// jobs deep (std/grep asks rgrep), so run one after another they were most of
+// this test's time.
+func runAll(qs ...*query) {
+	var wg sync.WaitGroup
+	for _, q := range qs {
+		wg.Add(1)
+		go func(q *query) {
+			defer wg.Done()
+			q.text, q.failed = grep(q.root, q.params...)
+		}(q)
+	}
+	wg.Wait()
+}
+
+func q(root string, params ...string) *query { return &query{root: root, params: params} }
 
 func ok(text string, failed bool) string {
 	w.True(!failed, "grep failed: %s", text)
@@ -104,33 +130,44 @@ func main() {
 		run("caos", "put", "/tmp/ws", "/cas/ws")
 		ws := run("caos", "hash", "/cas/ws")
 
+		matches := q(ws, "pattern", "two")
+		inCommit := q(commit, "pattern", "two")
+		inDir := q(at(ws, "feature/dirty/src"), "pattern", "two")
+		inFile := q(at(ws, "notes.txt"), "pattern", "world")
+		regex := q(commit, "pattern", "^(one|three)$")
+		none := q(ws, "pattern", "zzz-not-there")
+		badPattern := q(ws, "pattern", "(")
+		noRoot := q("", "pattern", "x")
+		noPattern := q(ws)
+		runAll(matches, inCommit, inDir, inFile, regex, none, badPattern, noRoot, noPattern)
+
 		w.Step("matches come back as path:line:text, through the source tree")
-		text := ok(grep(ws, "pattern", "two"))
+		text := ok(matches.text, matches.failed)
 		want := "feature/dirty/README.md:2:two\nfeature/dirty/src/lib.txt:2:two libs\nnotes.txt:3:two more"
 		w.True(text == want, "grep two:\n%s\nwant:\n%s", text, want)
 
 		w.Step("the root narrows the search: a source tree, a directory, a file")
-		text = ok(grep(commit, "pattern", "two"))
+		text = ok(inCommit.text, inCommit.failed)
 		w.True(text == "README.md:2:two\nsrc/lib.txt:2:two libs", "a source tree root: %q", text)
-		text = ok(grep(at(ws, "feature/dirty/src"), "pattern", "two"))
+		text = ok(inDir.text, inDir.failed)
 		w.True(text == "lib.txt:2:two libs", "a directory root: %q", text)
-		text = ok(grep(at(ws, "notes.txt"), "pattern", "world"))
+		text = ok(inFile.text, inFile.failed)
 		w.True(text == "2:world", "a file root: %q", text)
 
 		w.Step("a pattern is a regular expression")
-		text = ok(grep(commit, "pattern", "^(one|three)$"))
+		text = ok(regex.text, regex.failed)
 		w.True(text == "README.md:1:one\nREADME.md:3:three", "alternation: %q", text)
 
 		w.Step("no matches is an answer, not an error")
-		text = ok(grep(ws, "pattern", "zzz-not-there"))
+		text = ok(none.text, none.failed)
 		w.True(text == "no matches", "no matches: %q", text)
 
 		w.Step("mistakes are values the model can act on")
-		text, failed := grep(ws, "pattern", "(")
-		w.True(failed && strings.Contains(text, "invalid pattern"), "a bad pattern: %v %q", failed, text)
-		text, failed = grep("", "pattern", "x")
-		w.True(failed && strings.Contains(text, "nothing is at the root path"), "no root: %v %q", failed, text)
-		text, failed = grep(ws)
-		w.True(failed && strings.Contains(text, "needs a string `pattern`"), "no pattern: %v %q", failed, text)
+		w.True(badPattern.failed && strings.Contains(badPattern.text, "invalid pattern"),
+			"a bad pattern: %v %q", badPattern.failed, badPattern.text)
+		w.True(noRoot.failed && strings.Contains(noRoot.text, "nothing is at the root path"),
+			"no root: %v %q", noRoot.failed, noRoot.text)
+		w.True(noPattern.failed && strings.Contains(noPattern.text, "needs a string `pattern`"),
+			"no pattern: %v %q", noPattern.failed, noPattern.text)
 	})
 }

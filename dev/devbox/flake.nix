@@ -34,9 +34,9 @@
   #                             is which and what each one broke before it moved.
   #
   #                             DECLARING IS NOT ENOUGH. Volumes are the host's
-  #                             storage, so runnerd grants them only on the
-  #                             caosd pool, and a job reaches that pool only
-  #                             by carrying `--required-caosd=true`
+  #                             storage, so only the caosd runner grants
+  #                             them, and a job is run there only when it
+  #                             carries `--required-caosd=true`
   #                             (dev/test-stack does). Anywhere else this image
   #                             runs with none of the three, which ./worker
   #                             tolerates for /mounted-nix and dev/stack-up

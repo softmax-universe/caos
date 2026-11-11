@@ -1107,14 +1107,18 @@ fn remove_secrets() {
 fn next_job(
     t: &HttpTransport,
     image_oid: &str,
+    pool: &std::collections::BTreeMap<String, String>,
     token: &Option<String>,
 ) -> Result<Option<RunnerJob>, String> {
     let ttl_ms = crate::env_u32(RUNNER_TTL_ENV).unwrap_or(DEFAULT_RUNNER_TTL_MS);
+    let mut required = pool.clone();
+    required.insert("base".to_string(), image_oid.to_string());
     let body = serde_json::json!({
-        "required": { "base": image_oid },
-        // Our parent is a generic runner (runnerd) — it polls with no required
-        // args once we die, so a job we can't serve can evict us toward it.
-        "lineage": [ {} ],
+        "required": required,
+        // Our parent is a runnerd of our pool (`Runner::pool`; the generic one
+        // when that is empty) — it polls with just the pool's args once we die,
+        // so a job we can't serve can evict us toward it.
+        "lineage": [ pool ],
         "ttl_ms": ttl_ms,
     });
     let url = runner_url(t, "poll")?;

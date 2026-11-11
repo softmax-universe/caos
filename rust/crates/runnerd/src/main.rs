@@ -341,8 +341,16 @@ fn main() {
     // jobs this process can ever see, and `stack/serve` greps this line to know
     // runnerd is up.
     eprintln!(
-        "caos-runnerd: {} slots, server {}, network {}, requiring {:?}",
-        config.slots, config.server_url, config.network, config.required
+        "caos-runnerd: {} slots, server {}, network {}, requiring {:?}, {}",
+        config.slots,
+        config.server_url,
+        config.network,
+        config.required,
+        if config.volumes {
+            "granting persistent volumes (the nix-store pool)"
+        } else {
+            "granting no persistent volumes"
+        }
     );
     reap_leftovers(&config);
     let mut threads = Vec::new();

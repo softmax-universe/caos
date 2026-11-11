@@ -325,7 +325,13 @@ be deleted from a deployed redis at any time after the change is live.
 - Report parked readers to the user (`secrets-push` reply or a status call).
 - Evaluate a reader's branch head on first use, so alias readers work.
 - Entries written by another server process sharing the redis wake nothing
-  here; parked roots are re-read at most once a minute.
+  here, and neither does a root's tree arriving by fetch when the root has
+  no expression of its own. Parked roots are followed again at most once a
+  minute, when a request with secrets is admitted.
+- An eval-cache entry gains a field for every (salt, walk key) a tree is
+  evaluated under, and a walk key changes with each push, branch move and
+  growth of an approved set. Nothing trims them short of a new namespace,
+  which every deploy brings.
 - A tool directory whose parent is itself a granted image is not followed:
   the approved set descends through unmarked values only.
 - Re-key walks on the fingerprint alone (see above).

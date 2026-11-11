@@ -184,12 +184,12 @@ def main():
         log = open(root / "server.log", "wb")
         odb = root / "server.git"
         def default_stack():
-            # 1 MiB, whatever this worker runs with: the server must raise it
-            # for its git itself (see the long-chain push below). Below git's
-            # usual 8 MiB so the chain that overflows it can be short: at 8 MiB
-            # it took 30,000 commits, and pushing them was half this test.
+            # 256 KiB, whatever this worker runs with: the server must raise it
+            # for its git itself (see the long-chain push below). Far below
+            # git's usual 8 MiB so the chain that overflows it can be short: at
+            # 8 MiB it took 30,000 commits, and pushing them was half this test.
             _, hard = resource.getrlimit(resource.RLIMIT_STACK)
-            soft = 1 << 20
+            soft = 256 << 10
             if hard != resource.RLIM_INFINITY:
                 soft = min(soft, hard)
             resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
@@ -379,7 +379,7 @@ def main():
             assert run("git", "--git-dir", str(odb), "config", "receive.fsckObjects") == "true"
             run("git", "--git-dir", str(origin), "push", base, ":refs/caos/test/closure")
             # A long new history. receive-pack checks it with `unpack-objects
-            # --strict`, which recurses once per commit: 4,000 overflow a 1 MiB
+            # --strict`, which recurses once per commit: 1,000 overflow a 256 KiB
             # stack (the server is started under that limit), so this push of
             # twice that lands only because the server raises it for its git.
             chain = root / "chain.git"
@@ -387,7 +387,7 @@ def main():
             stream = "".join(
                 f"commit refs/heads/main\nmark :{i}\ncommitter a <a> {i} +0000\ndata 0\n"
                 + (f"from :{i - 1}\n" if i > 1 else "") + "\n"
-                for i in range(1, 8_001))
+                for i in range(1, 2_001))
             run("git", "--git-dir", str(chain), "fast-import", "--quiet", input=stream.encode())
             tip = run("git", "--git-dir", str(chain), "rev-parse", "refs/heads/main")
             first_commit = run("git", "--git-dir", str(chain), "rev-list", "--max-parents=0", tip)
@@ -759,8 +759,12 @@ def main():
             # scenario plants its damage in a fresh copy of the store.
             stop(server); server = None
             def damaged_store(name):
+                # HARD LINKS, not copies: the damage below only adds files,
+                # deletes one, and writes refs, so no file of the original is
+                # ever changed through a link, and a copy of every object in
+                # the store was most of this stage.
                 store = root / name
-                shutil.copytree(odb, store)
+                shutil.copytree(odb, store, copy_function=os.link)
                 return store
             def doctor(store):
                 return subprocess.run([binary, "doctor"], env=dict(os.environ,

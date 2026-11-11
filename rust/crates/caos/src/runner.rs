@@ -575,6 +575,9 @@ impl Runner {
         if self.affinity_oid.is_none() {
             self.affinity_oid = crate::read_hash(&cas.join("args").join("affinity")).ok();
         }
+        if fresh {
+            self.pool = pool_entries(&cas.join("args"));
+        }
         // Drop the granted secrets at `/secret/<name>` just before the worker
         // runs (design/secrets.md). `write_secrets` wipes any prior job's
         // `/secret` first, so a warm runner never leaks a secret into a later job

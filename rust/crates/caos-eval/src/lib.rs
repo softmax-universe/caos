@@ -209,7 +209,17 @@ pub trait EvalHost {
     ) -> Result<(String, String), String> {
         Ok(value)
     }
+    /// This host, if it may be used from several threads at once: then a
+    /// command's `:@=` args are evaluated concurrently.
+    /// `None` keeps them in order, on this thread.
+    fn concurrent(&self) -> Option<&(dyn EvalHost + Sync)> {
+        None
+    }
 }
+
+/// Stack for a thread that evaluates an arg: evaluation recurses by the depth of
+/// the tree it walks (the server gives its own evaluating threads the same).
+const ARG_EVAL_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Where a node sits: a root tree and its path there (SPEC, "Secrets").
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -802,8 +812,48 @@ fn eval_expr_args(
     env: &HashMap<String, (String, String)>,
     vars: bool,
 ) -> Result<Vec<Entry>, String> {
+    // THE `:@=` ARGS AT ONCE, when the host allows it. Each names a tree that
+    // may be an expression, and evaluating one can mean building a tool: a test
+    // naming llm-step, a stub and a test tool waited for three ~20s builds one
+    // after another. They are independent, so on a concurrent host they are
+    // evaluated together first, and the loop below takes their answers in order.
+    let mut paths: HashMap<usize, Result<(EntryMode, gix::ObjectId), String>> = HashMap::new();
+    if let Some(shared) = host.concurrent() {
+        let pending: Vec<(usize, &str)> = toks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tok)| match parse_arg(tok) {
+                Ok((_, ArgType::Path, value)) if !(vars && value.starts_with('$')) => {
+                    Some((i, value))
+                }
+                _ => None,
+            })
+            .collect();
+        if pending.len() > 1 {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = pending
+                    .iter()
+                    .map(|&(i, value)| {
+                        let handle = std::thread::Builder::new()
+                            .stack_size(ARG_EVAL_STACK_BYTES)
+                            .spawn_scoped(scope, move || eval_expr_path(shared, input_tree, value))
+                            .map_err(|e| format!("eval-path: spawning an arg's evaluation: {e}"));
+                        (i, handle)
+                    })
+                    .collect();
+                for (i, handle) in handles {
+                    let outcome = handle.and_then(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            Err("eval-path: an arg's evaluation panicked".to_string())
+                        })
+                    });
+                    paths.insert(i, outcome);
+                }
+            });
+        }
+    }
     let mut entries = Vec::new();
-    for &tok in toks {
+    for (i, &tok) in toks.iter().enumerate() {
         let (name, ty, value) = parse_arg(tok)?;
         let (mode, oid) = if let Some(var) = value.strip_prefix('$').filter(|_| vars) {
             // `$VAR` names an object a prior assignment produced (or a
@@ -818,7 +868,10 @@ fn eval_expr_args(
                     EntryKind::Blob.into(),
                     host.post_object("blob", value.as_bytes())?,
                 ),
-                ArgType::Path => eval_expr_path(host, input_tree, value)?,
+                ArgType::Path => match paths.remove(&i) {
+                    Some(evaluated) => evaluated?,
+                    None => eval_expr_path(host, input_tree, value)?,
+                },
                 // `:@@=<ref>` — a tree from ANOTHER repo. The client's resolver
                 // descends `dir=` through evaluation, so this is already the
                 // same rule `:@=` applies (an expression is evaluated, data is

@@ -34,7 +34,8 @@ async function main() {
     WebAssembly.Module.exports(module).map(x => x.name).sort(),
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
-      'server_decode', 'schema_thread', 'schema_batch'].sort(),
+      'server_decode', 'thread_encode', 'thread_decode', 'field_push',
+      'schema_thread', 'schema_batch'].sort(),
   );
   const imports = {};
   const hostCalls = [];
@@ -82,13 +83,20 @@ async function main() {
     assert.ok(length <= view().getUint32(vector, true));
     return Buffer.from(bytes().slice(data, data + length)).toString('hex');
   };
-  const decode = (name, hex, size) => {
+  const decode = (name, hex, size, fieldPath = null) => {
     const data = Buffer.from(hex, 'hex');
     const input = alloc(data.length);
     bytes().set(data, input);
     const slice = alloc(8), output = alloc(size), fieldId = alloc(24);
     u32(slice, input);
     u32(slice + 4, data.length);
+    if (fieldPath !== null) {
+      assert.ok(fieldPath.length <= 15);
+      // Pinned Option<FieldId>: Some flag, then a 16-byte inline FieldId.
+      bytes()[fieldId] = 1;
+      bytes()[fieldId + 1] = fieldPath.length;
+      bytes().set(fieldPath, fieldId + 2);
+    }
     e[name](output, slice, fieldId);
     return {output, remaining: view().getUint32(slice + 4, true)};
   };
@@ -238,6 +246,52 @@ async function main() {
   }
   const schemas = recoverSchemas(e);
   assert.deepEqual(recoverSchemas(e), schemas, 'schema descriptors must not contain uninitialized memory');
+
+  // Independently compose the default root from the declared field paths.
+  // A stub contains object references, not register values or map contents.
+  const array = values => (values.length < 16
+    ? (0x90 + values.length).toString(16)
+    : `dc${values.length.toString(16).padStart(4, '0')}`) + values.join('');
+  const fieldReference = fieldPath => `9201c4${fieldPath.length.toString(16).padStart(2, '0')}` +
+    Buffer.from(fieldPath).toString('hex');
+  const defaultStub = (name, fieldPath) => {
+    if (name === 'deltadb::history::BufferId') {
+      return `9200${fieldReference(fieldPath)}`; // Scratch buffer.
+    }
+    if (name.startsWith('deltadb::client::RegisterStub<') ||
+        name.startsWith('deltadb::client::map::MapStub<')) {
+      return fieldReference(fieldPath);
+    }
+    const definition = schemas.definitions[name];
+    assert.equal(definition.kind, 3, `unhandled default stub ${name}`);
+    const values = Array(Math.max(...Object.keys(definition.fields).map(Number)) + 1).fill('c0');
+    for (const [index, field] of Object.entries(definition.fields)) {
+      const schema = field.schema.kind === 23 ? field.schema.element : field.schema;
+      assert.equal(schema.kind, 19, `expected named stub field ${name}/${index}`);
+      values[Number(index)] = defaultStub(schema.named, [...fieldPath, Number(index)]);
+    }
+    return array(values);
+  };
+  for (const fieldPath of [[], [7, 9]]) {
+    const expected = defaultStub('thread::ThreadDataStub', fieldPath);
+    for (const input of ['90', '91c0', `dc0054${'c0'.repeat(84)}`, expected]) {
+      const result = decode('thread_decode', input, 4096, fieldPath);
+      check('default thread stub decoded', bytes()[result.output + 8] === 255, false);
+      check('thread stub consumes input', result.remaining, 0);
+      check('canonical default thread references', encode('thread_encode', result.output), expected);
+    }
+  }
+  const invalidRoot = decode('thread_decode', 'c0', 4096, []);
+  check('nil thread root rejected', bytes()[invalidRoot.output + 8], 255);
+  let fieldId = alloc(16);
+  const fieldPath = [7, 9, 23, 0, 255];
+  for (let i = 0; i < fieldPath.length; i++) {
+    const next = alloc(16);
+    e.field_push(next, fieldId, fieldPath[i]);
+    check('FieldId depth', bytes()[next], i + 1);
+    check('FieldId path', readHex(next + 1, i + 1), Buffer.from(fieldPath.slice(0, i + 1)).toString('hex'));
+    fieldId = next;
+  }
   assert.deepEqual(hostCalls, []);
   console.log(`PASS: ${checks} codec checks; 0 browser/network/storage calls`);
   console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);

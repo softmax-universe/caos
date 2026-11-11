@@ -1,0 +1,8 @@
+HELP=<<END
+Probe the standalone Delta connector from CAOS. This does not run the Delta application or execute agent turns. Requires a delta-runner-credentials secret containing this connector's account and actor identity. Never put credentials in arguments.
+@param {string} request-id Fresh value so the probe makes a real network exchange.
+@param {string} [op] probe (the only implemented operation).
+@param {string} [registration-name] Temporarily register, then clear, a diagnostic machine name.
+END
+IMAGE=run --base:@=DEEP-DEPS/flake-builder --in:@=. --lock:@=DEEP-DEPS/flake.lock
+curry --base=$IMAGE --help=$HELP

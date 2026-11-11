@@ -263,7 +263,16 @@ fn forget_if_full(state: &mut State) {
 
 /// Follow `place` and remember what it reached: park it where it stopped, and
 /// add what it found to every set it belongs to.
-fn settle(state: &mut State, source: &dyn Source, place: &Place) {
+///
+/// Returns the directories to evaluate now so the path can be finished. No
+/// ROOT is ever among them: a commit nobody has evaluated stays unevaluated.
+/// But once a root has a value, the commit is in use, and what uses it need
+/// not walk the reader's path. The suite grants `std/llm-step` and runs it
+/// from `tests/<name>/DEEP-DEPS/llm-step`, a copy, so nothing applies
+/// `std/.caos-expr` for that commit, and without its value the approved tree
+/// is unknown. A directory is handed back once, and again only after
+/// [`RETRY`], so an expression that fails is not run at every request.
+fn settle(state: &mut State, source: &dyn Source, place: &Place) -> Vec<String> {
     if let Some(old) = state.reached.remove(place) {
         for tree in &old.parked {
             let mut emptied = false;

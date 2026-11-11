@@ -240,6 +240,14 @@ struct Runner {
     /// with (every entry is tagged with its hash).
     image_oid: Option<String>,
     affinity_oid: Option<String>,
+    /// The first job's `required*` args (`pool_entries`), carried into every
+    /// follow-up poll's required args AND its lineage. The runnerd that started
+    /// us matched them, so they say which pool we are: a container the nix-store
+    /// pool started (with the host's volumes mounted) must take only jobs that
+    /// asked for the store, and a pending job of that pool must be able to
+    /// evict us toward our parent. Empty for the generic pool, which is what
+    /// both used to hard-code.
+    pool: std::collections::BTreeMap<String, String>,
 }
 
 /// `runner --job=<json>` — run the handed-in job through the staged lifecycle,

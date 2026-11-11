@@ -205,6 +205,10 @@ const PLACES_CAP: usize = 200_000;
 /// wrote to the shared redis, or a tree that arrived by fetch, wakes nothing.
 const REFRESH: Duration = Duration::from_secs(60);
 
+/// How long before a directory whose evaluation was asked for, and which is
+/// still without a value, is asked for again.
+const RETRY: Duration = Duration::from_secs(600);
+
 /// The object store and the eval cache, with the values of some trees read
 /// ahead in one round trip.
 struct Store<'a> {

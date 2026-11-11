@@ -43,6 +43,25 @@ pub(crate) fn commits(
     first_parent_commits(&staging.to_string_lossy(), &rev, since)
 }
 
+/// `POST /secrets/commits`: the commits a `reader:@@=` covers, one per line,
+/// newest first. The body is `{"locator": "<locator>", "since": "<sha>"}`,
+/// `since` optional. `secrets-push` asks this, then asks `/eval` for the tool
+/// at each commit (design/secrets.md): resolving a branch and listing its
+/// history are the two things `/eval` cannot do for it.
+pub(crate) fn commits_endpoint(config: &Config, body: &[u8]) -> Result<Vec<u8>, HttpError> {
+    let bad = |e: String| HttpError::new(400, e);
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| bad(format!("body is not JSON: {e}")))?;
+    let locator = json["locator"]
+        .as_str()
+        .ok_or_else(|| bad("locator must be a string".to_string()))?;
+    let since = json["since"].as_str();
+    let pinned = pin(config, locator).map_err(|e| HttpError::new(502, e))?;
+    let git_ref = git_locator::parse_git_ref(&pinned).map_err(bad)?;
+    let found = commits(config, &git_ref, since).map_err(|e| HttpError::new(502, e))?;
+    Ok(format!("{}\n", found.join("\n")).into_bytes())
+}
+
 /// A grant's locator with any `ref=` replaced by the commit the branch names
 /// now. `git+caos://` is this server, so its refs are read here; any other URL
 /// is asked with `ls-remote`, remembered for [`REF_TTL`].

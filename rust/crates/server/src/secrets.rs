@@ -126,7 +126,10 @@ impl Context {
         if self.is_empty() {
             return None;
         }
-        let sets: Vec<String> = self.sets.iter().map(|(_, set)| set.fingerprint()).collect();
+        let mut sets: Vec<String> = Vec::new();
+        for (_, set) in self.sets.iter() {
+            sets.push(set.fingerprint());
+        }
         let head = self.head.as_deref().unwrap_or("");
         Some(format!("{}|{head}|{}", self.scope, sets.join(",")))
     }

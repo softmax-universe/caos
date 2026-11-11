@@ -247,7 +247,7 @@ struct Runner {
     /// asked for that host, and a pending job of that pool must be able to
     /// evict us toward our parent. Empty for the generic pool, which is what
     /// both used to hard-code.
-    pool: std::collections::BTreeMap<String, String>,
+    requires: std::collections::BTreeMap<String, String>,
 }
 
 /// `runner --job=<json>` — run the handed-in job through the staged lifecycle,
@@ -267,7 +267,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         used_next: false,
         image_oid: None,
         affinity_oid: None,
-        pool: std::collections::BTreeMap::new(),
+        requires: std::collections::BTreeMap::new(),
     };
     if runner.cfg.resident {
         serve_next_socket(runner.tx.clone())?;
@@ -285,7 +285,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         if matches!(after, After::Done) {
             return Ok(());
         }
-        match next_job(&runner.t, &oid, &runner.pool, &token)? {
+        match next_job(&runner.t, &oid, &runner.requires, &token)? {
             Some(next) => job = next,
             None => return Ok(()),
         }
@@ -516,7 +516,7 @@ impl Runner {
             return Err("a resident job's args name no base or affinity".to_string());
         };
         let ttl_ms = self.cfg.poll_ms;
-        let mut required = self.pool.clone();
+        let mut required = self.requires.clone();
         required.insert("base".to_string(), image.clone());
         required.insert("affinity".to_string(), affinity.clone());
         let body = serde_json::json!({
@@ -524,7 +524,7 @@ impl Runner {
             "tenure": tenure,
             // Our parent is a runnerd of our pool — it polls with just the pool's
             // args once we die, so a job we can't serve can evict us toward it.
-            "lineage": [ &self.pool ],
+            "lineage": [ &self.requires ],
             "ttl_ms": ttl_ms,
         });
         let url = runner_url(&self.t, "poll")?;
@@ -579,7 +579,7 @@ impl Runner {
             self.affinity_oid = crate::read_hash(&cas.join("args").join("affinity")).ok();
         }
         if fresh {
-            self.pool = pool_entries(&cas.join("args"));
+            self.requires = required_entries(&cas.join("args"));
         }
         // Drop the granted secrets at `/secret/<name>` just before the worker
         // runs (design/secrets.md). `write_secrets` wipes any prior job's
@@ -1107,18 +1107,18 @@ fn remove_secrets() {
 fn next_job(
     t: &HttpTransport,
     image_oid: &str,
-    pool: &std::collections::BTreeMap<String, String>,
+    requires: &std::collections::BTreeMap<String, String>,
     token: &Option<String>,
 ) -> Result<Option<RunnerJob>, String> {
     let ttl_ms = crate::env_u32(RUNNER_TTL_ENV).unwrap_or(DEFAULT_RUNNER_TTL_MS);
-    let mut required = pool.clone();
+    let mut required = requires.clone();
     required.insert("base".to_string(), image_oid.to_string());
     let body = serde_json::json!({
         "required": required,
         // Our parent is a runnerd of our pool (`Runner::pool`; the generic one
         // when that is empty) — it polls with just the pool's args once we die,
         // so a job we can't serve can evict us toward it.
-        "lineage": [ pool ],
+        "lineage": [ requires ],
         "ttl_ms": ttl_ms,
     });
     let url = runner_url(t, "poll")?;
@@ -1150,7 +1150,7 @@ fn next_job(
 /// the way `base` is. These are the pool the job was routed to
 /// (`required-caosd`, `required-pool`); an entry whose hash cannot be read is
 /// left out, which only costs the follow-up poll its specificity.
-fn pool_entries(args: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+fn required_entries(args: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     let mut pool = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(args) else {
         return pool;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -33,7 +34,10 @@ func runCaosCommand(ctx context.Context, args ...string) (string, int, error) {
 	if err := ctx.Err(); err != nil {
 		return "", -1, err
 	}
-	output, err := exec.CommandContext(ctx, "caos", args...).Output()
+	command := exec.CommandContext(ctx, "caos", args...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err == nil {
 		return strings.TrimSpace(string(output)), 0, nil
 	}
@@ -42,11 +46,32 @@ func runCaosCommand(ctx context.Context, args ...string) (string, int, error) {
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return "", exit.ExitCode(), nil
+		if exit.ExitCode() == 2 && len(args) > 0 && args[0] == "ref-get" {
+			return "", 2, nil
+		}
+		return "", exit.ExitCode(), classifyCaosFailure(stderr.String(), exit.ExitCode())
 	}
 	// Neither argv nor stderr belongs in a diagnostic: they can contain a
 	// private prompt, a source locator, or a server-side error with user data.
 	return "", -1, errors.New("could not run the CAOS worker client")
+}
+
+// Never surface raw stderr: a CLI error can echo a prompt or private locator.
+func classifyCaosFailure(stderr string, code int) error {
+	reason := "worker client command failed"
+	for _, category := range []struct{ match, reason string }{
+		{"caos: usage:", "deployed worker client does not support this command"},
+		{"already bound", "request argument is already bound"},
+		{"not found", "required CAOS object was not found"},
+		{"No such file or directory", "required worker path is missing"},
+		{"Permission denied", "worker command was denied access"},
+	} {
+		if strings.Contains(stderr, category.match) {
+			reason = category.reason
+			break
+		}
+	}
+	return fmt.Errorf("%s (exit %d)", reason, code)
 }
 
 // Reuse CAOS's normal agent driver, detached sub-runs and result publisher.

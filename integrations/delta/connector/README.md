@@ -4,8 +4,8 @@ This is a Go implementation of selected Delta protocol operations. It does not
 launch, embed, or download the Delta application. The public reference Wasm is
 used only by the separate [protocol investigation](../protocol/README.md).
 
-**Current state: authentication, registration, and read-only history download
-work; agent-turn execution is not implemented yet.** The CAOS entry implements
+**Current state: authentication, registration, history download, and conversation
+state replay work; agent-turn execution is not implemented yet.** The CAOS entry implements
 bounded checks, not a persistent runner. Do not select a diagnostic machine for
 real work.
 
@@ -42,23 +42,15 @@ the same module, runs its tests, and vendors pinned dependencies. Its source
 filter excludes research artifacts and the evaluated `DEEP-DEPS` tree.
 `tests/delta-protocol` builds that image through the ordinary CAOS suite.
 
-For source revision `ced02e82db97134a5714ef731fb5e54d8e428e1c`, validation
-included the race-enabled Go tests, `go vet`, a native Nix package build, the
-live CAOS probe, and the full salted CAOS suite: **79/79 passed**. This verifies
-the connector's current operations; it is not evidence of agent-turn execution.
+The [landed transport checkpoint](https://github.com/softmax-universe/caos/pull/448)
+passed the full salted CAOS suite (**79/79**), CAOS and native Nix builds,
+race-enabled Go tests, and live connection/history checks. The replay engine was
+added afterward and has separate compatibility checks.
 
-The canonical root entry at revision `7624c1d767cae4866080226c08a01731c6cee0a0`
-also passed the live CAOS probe and the full salted suite (**79/79**), as well as
-`nix build --no-link .#delta-runner`. The offline reference now checks 382 wire
-cases. The dispatch decoder reads typed epochs and timeline identities, accepts
-the reference's defaults for omitted newer fields, and rejects malformed types.
-Parsing a dispatch does not admit the turn or acknowledge execution.
-
-The typed dispatch decoder at revision
-`868fb0085c5b92ce238e66f28d35f651c391f1ad` passed the race-enabled Go tests
-(`-count=10`), `go vet`, the native Nix build, a live CAOS probe, and the full
-salted suite (**79/79**). The history reference checks additionally establish
-default root-object IDs offline; replay and live turn execution remain unbuilt.
+The offline reference runs 8,839 protocol and in-memory state checks, including
+128 generated text-CRDT histories. See the protocol README for exporting those
+cases and comparing the Go implementation against them. The production worker
+does not include or invoke that reference module.
 
 ## Read-only history capture
 
@@ -81,6 +73,38 @@ apply them to a local state database or execute a turn. A capture containing
 replication-pack references is incomplete until those packs are fetched; that
 fetch path is still unimplemented. Raw content and pack metadata stay in the
 private file, never in standard output.
+
+## Read-only conversation state replay
+
+```sh
+connector replay-history \
+  --snapshot-file=/private/path/new-history-snapshot.json \
+  --output-file=/private/path/new-replay-report.json
+```
+
+This command needs no network or account credential. It selects the requested
+timeline frontier, verifies causal closure, and reconstructs registers, maps,
+scratch text, serialized-version state, and seal records. Text edits use UTF-8
+byte offsets in their causal parent view. Concurrent text insertions and
+deletions retain their identities; maps remove only values observed by their
+parent, preserving unseen concurrent updates.
+
+The approved fixture's 24 batches reconstruct a 194-byte conversation buffer,
+8 registers, 10 maps, and one seal range. An independent replay with the public
+client's in-memory text engine produces the same buffer. The optional native
+corpus test also compares 128 synthetic forked histories, under shuffled delivery,
+without adding vendor code to the production worker.
+
+The report contains private thread text. Captures can also contain delegated
+model vouchers, so keep both outside source checkouts and never bind raw captures
+into CAOS arguments or results. Output files are private and never overwritten.
+
+This reconstructs already accepted records; it does not authorize new edits.
+Seal enforcement for a writer, live ownership/epoch admission, native message
+translation, workspace-delta replay, and replication-pack retrieval remain
+unimplemented. Unsupported deltas and incomplete histories fail explicitly.
+A stored generation-state tag is not a liveness check: the fixture retains a
+Streaming value even after its assistant response has completed.
 
 ## Authentication
 
@@ -134,6 +158,10 @@ only counts. It requires an exact match in the bundle's `allowed_threads`; an
 absent or empty list denies all history inspection. This check happens before
 requesting a service token. No thread content or replication-pack URL is
 published to a CAOS result. `registration-name` is accepted only by `op=probe`.
+
+`op=replay-history` uses the same sealed allowlist, downloads the history, and
+reconstructs it in the worker. It returns only counts, not text, map values,
+model vouchers, or other private state. Neither history operation accepts turns.
 
 The image contains the statically compiled connector and CA certificates, plus
 CAOS's normal additions. It contains no desktop, browser, Delta binary, native

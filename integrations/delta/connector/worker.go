@@ -36,7 +36,7 @@ func runWorker(ctx context.Context) (string, error) {
 	if w.Exists("/cas/args/op") {
 		op = w.Read("/cas/args/op")
 	}
-	if op != "probe" && op != "inspect-history" {
+	if op != "probe" && op != "inspect-history" && op != "replay-history" {
 		return "", errors.New("unsupported Delta worker operation")
 	}
 	var name *string
@@ -61,7 +61,7 @@ func runWorker(ctx context.Context) (string, error) {
 		return "", errors.New("invalid Delta runner credential bundle")
 	}
 	var thread threadID
-	if op == "inspect-history" {
+	if op != "probe" {
 		if !w.Exists("/cas/args/thread-id") {
 			return "", errors.New("thread-id is required for history inspection")
 		}
@@ -79,10 +79,22 @@ func runWorker(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if op == "inspect-history" {
+	if op != "probe" {
 		snapshot, err := fetchHistorySnapshot(ctx, defaultRemoteURL, token, actor, thread)
 		if err != nil {
 			return "", err
+		}
+		if op == "replay-history" {
+			state, err := replaySnapshot(snapshot)
+			if err != nil {
+				return "", err
+			}
+			summary, err := summarizeReplay(state)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Reconstructed authorized Delta history in CAOS: %d batches, %d thread-text bytes, %d registers, %d maps, %d recorded seal ranges.\nNo turn was accepted or executed.\n",
+				summary.Batches, summary.ThreadTextBytes, summary.Registers, summary.Maps, summary.RecordedSealRanges), nil
 		}
 		// Thread content and pack metadata may be private. Do not publish them
 		// into a CAOS result merely to establish that the transport works.

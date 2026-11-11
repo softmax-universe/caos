@@ -72,6 +72,13 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             selected_names(data, 0, len(data))
 
+    def test_compiler_clone_suffix_is_not_a_crate_hash(self):
+        name = FUNCTIONS["git_header_encode"]
+        names = uint(2) + uint(1) + text(name) + uint(2) + text(name + "[1]")
+        data = b"\x01" + uint(len(names)) + names
+        self.assertEqual(selected_names(data, 0, len(data)),
+                         {"git_header_encode": 1})
+
     def test_truncated_name_subsection_rejected(self):
         data = b"\x01\x05\x00"
         with self.assertRaises(ValueError):

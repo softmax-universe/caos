@@ -4,11 +4,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {recoverSchemas} = require('./schema_reference.cjs');
+const {verifyTextReference} = require('./text_reference.cjs');
+const {verifyValueReference} = require('./value_reference.cjs');
 
 const directory = process.argv[2];
-const schemaOutput = process.argv[3] === '--schema-output' ? process.argv[4] : null;
-if (!directory || !(process.argv.length === 3 || (process.argv.length === 5 && schemaOutput))) {
-  console.error('usage: node verify_reference.cjs <prepared-reference-directory> [--schema-output <file>]');
+const outputs = {};
+let valid = !!directory && (process.argv.length - 3) % 2 === 0;
+for (let index = 3; valid && index < process.argv.length; index += 2) {
+  const flag = process.argv[index];
+  valid = ['--schema-output', '--text-output'].includes(flag) && !Object.hasOwn(outputs, flag);
+  if (valid) outputs[flag] = process.argv[index + 1];
+}
+if (!valid) {
+  console.error('usage: node verify_reference.cjs <prepared-reference-directory> [--schema-output <file>] [--text-output <file>]');
   process.exit(2);
 }
 
@@ -35,6 +43,11 @@ async function main() {
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
       'server_decode', 'history_path', 'thread_encode', 'thread_decode', 'field_push',
+      'text_empty', 'text_string', 'text_clone', 'text_apply', 'edit_decode',
+      'edit_encode', 'batch_payload_id',
+      'text_create', 'scratch_decode', 'fragment_decode', 'fragment_offset',
+      'snapshot_empty', 'snapshot_clone', 'map_insert', 'map_remove', 'map_get',
+      'map_values', 'map_winner', 'map_insert_decode', 'map_remove_decode',
       'schema_thread', 'schema_batch'].sort(),
   );
   const imports = {};
@@ -330,12 +343,20 @@ async function main() {
     check('FieldId path', readHex(next + 1, i + 1), Buffer.from(fieldPath.slice(0, i + 1)).toString('hex'));
     fieldId = next;
   }
+  const textCases = verifyTextReference(e, {alloc, bytes, view, u32, u64, encode, decode, check});
+  verifyValueReference(e, {alloc, bytes, view, u64, decode, check});
   assert.deepEqual(hostCalls, []);
-  console.log(`PASS: ${checks} codec checks; 0 browser/network/storage calls`);
+  console.log(`PASS: ${checks} protocol/text checks; 0 browser/network/storage calls`);
   console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);
-  if (schemaOutput) {
-    fs.writeFileSync(schemaOutput, JSON.stringify({
+  console.log(`Generated ${textCases.length} native text-CRDT compatibility cases`);
+  if (outputs['--schema-output']) {
+    fs.writeFileSync(outputs['--schema-output'], JSON.stringify({
       version: metadata.version, build: metadata.build, ...schemas,
+    }) + '\n', {flag: 'wx'});
+  }
+  if (outputs['--text-output']) {
+    fs.writeFileSync(outputs['--text-output'], JSON.stringify({
+      version: metadata.version, build: metadata.build, cases: textCases,
     }) + '\n', {flag: 'wx'});
   }
   console.log(`Reference: Delta ${metadata.version}, build ${metadata.build}`);

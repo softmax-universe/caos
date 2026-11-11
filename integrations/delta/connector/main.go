@@ -54,7 +54,7 @@ func readPrivateJSON(path string, value any) error {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|probe|fetch-history [options]")
+		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|probe|fetch-history|replay-history [options]")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	cloudURL := flags.String("cloud-url", defaultCloudURL, "Delta account service origin")
@@ -64,7 +64,8 @@ func run(ctx context.Context, args []string) error {
 	actorFile := flags.String("actor-file", "", "stable actor identity file")
 	registrationName := flags.String("registration-name", "", "temporarily register and clear this diagnostic machine name")
 	thread := flags.String("thread-id", "", "Delta thread ID to read")
-	outputFile := flags.String("output-file", "", "new private history snapshot file")
+	outputFile := flags.String("output-file", "", "new private capture or replay report file")
+	snapshotFile := flags.String("snapshot-file", "", "private history snapshot to replay without network access")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -76,6 +77,36 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	switch args[0] {
+	case "replay-history":
+		if *snapshotFile == "" || *outputFile == "" {
+			return errors.New("--snapshot-file and --output-file are required")
+		}
+		if _, err := os.Lstat(*outputFile); !os.IsNotExist(err) {
+			return errors.New("replay output already exists or cannot be inspected")
+		}
+		var snapshot historySnapshot
+		if err := readPrivateJSON(*snapshotFile, &snapshot); err != nil {
+			return err
+		}
+		state, err := replaySnapshot(snapshot)
+		if err != nil {
+			return err
+		}
+		summary, err := summarizeReplay(state)
+		if err != nil {
+			return err
+		}
+		report := struct {
+			Summary    replaySummary
+			ThreadText string
+		}{Summary: summary}
+		if buffer := state.Buffers[fieldObject(0)]; buffer != nil {
+			report.ThreadText = buffer.stringAt(state.basis)
+		}
+		if err := writePrivateJSON(*outputFile, report); err != nil {
+			return err
+		}
+		fmt.Printf("Replayed %d history batches; state report saved privately. No agent turn was executed.\n", state.Batches)
 	case "auth-start":
 		if *requestFile == "" {
 			return errors.New("--request-file is required")

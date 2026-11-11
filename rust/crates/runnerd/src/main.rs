@@ -334,7 +334,8 @@ fn main() {
         socket: std::env::var("CAOS_RUNNER_SOCKET")
             .ok()
             .filter(|s| !s.is_empty()),
-        required: required_args(&env_or("CAOS_RUNNER_REQUIRE", "")),
+        required,
+        volumes,
     });
     // The required set is part of this line because it is what decides which
     // jobs this process can ever see, and `stack/serve` greps this line to know

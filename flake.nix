@@ -993,7 +993,8 @@ sandbox = false''
         #                tests, a consuming tree) just run it to guarantee a
         #                current stack — no daemon to babysit, no teardown race.
         #   caosd down   stop the stack (all CAOS_DATA state kept).
-        #   caosd reset  stop and wipe CAOS_DATA state for a clean slate.
+        #   caosd reset  stop and wipe CAOS_DATA state and the dev stacks' volume
+        #                (caos-vol-caos-dev) for a clean slate.
         #   caosd logs   follow the running stack's logs (Ctrl-C returns; the stack
         #                keeps running).
         #   caosd up     also answers `caos://` clients (design/
@@ -1191,6 +1192,26 @@ sandbox = false''
                 docker ps --filter label=caos.runnerd.owner --format '{{.Names}}'
               )
               [ -n "$running" ]
+            }
+
+            # EVERY WORKER LEFT ON THIS ENGINE IS AN ORPHAN once the stack
+            # container is removed. runnerd labels what it starts with its own
+            # container id; no replacement will ever reap them (it reaps only
+            # EXITED containers carrying ITS id, and the id is new on every
+            # `up`). A dev-stack worker orphaned by a restart kept running for
+            # three days on caosd-prod, and `caos_containers_running` then made
+            # every later `up` skip the consolidation: the shared dev repo went
+            # from 1 pack to 8,583, every object read got slower with each of
+            # them, and a suite that takes 2.5 minutes took 68. Removing them is
+            # not new damage: the server they were polling is gone, so no job
+            # they hold can finish.
+            remove_orphan_workers() {
+              local orphans
+              mapfile -t orphans < <(docker ps -aq --filter label=caos.runnerd.owner)
+              if [ "''${#orphans[@]}" -gt 0 ]; then
+                echo "==> removing ''${#orphans[@]} worker(s) orphaned by the stack just removed" >&2
+                docker rm -f "''${orphans[@]}" >/dev/null
+              fi
             }
 
             # The script is the staged tree's (below), so it is this revision's.
@@ -1393,23 +1414,7 @@ sandbox = false''
                 || docker network create "$NET" >/dev/null
               docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-              # EVERY WORKER LEFT ON THIS ENGINE IS AN ORPHAN NOW. runnerd labels
-              # what it starts with its own container id, and that container is
-              # the one removed just above; no replacement will ever reap them
-              # (it reaps only EXITED containers carrying ITS id, and the id is
-              # new on every `up`). A dev-stack worker orphaned by a restart
-              # kept running for three days on caosd-prod, and
-              # `caos_containers_running` then made every later `up` skip the
-              # consolidation: the shared dev repo went from 1 pack to 8,583, every
-              # object read got slower with each of them, and a suite that
-              # takes 2.5 minutes took 68. Removing them is not new damage: the
-              # server they were polling is gone, so no job they hold can
-              # finish.
-              mapfile -t orphans < <(docker ps -aq --filter label=caos.runnerd.owner)
-              if [ "''${#orphans[@]}" -gt 0 ]; then
-                echo "==> removing ''${#orphans[@]} worker(s) orphaned by the stack just removed" >&2
-                docker rm -f "''${orphans[@]}" >/dev/null
-              fi
+              remove_orphan_workers
 
               # Docker creates a missing bind source as root. Create it as the
               # invoking user before tree staging writes it and explode_packs
@@ -1585,9 +1590,17 @@ sandbox = false''
               docker rm -f "$NAME" >/dev/null 2>&1 || true
               ;;
             reset)
-              echo "==> stopping stack and wiping CAOS_DATA state" >&2
+              echo "==> stopping stack, wiping CAOS_DATA state and the dev stacks' volume" >&2
               docker rm -f "$NAME" >/dev/null 2>&1 || true
               rm -rf "$CAOS_DATA/stack" "$CAOS_DATA/publish-client-repo"
+              # The dev stacks' repo is not under CAOS_DATA but in a named
+              # volume (see explode_packs). Workers mount it, and a volume in
+              # use cannot be removed, so they go first.
+              remove_orphan_workers
+              if docker volume inspect "$DEV_VOLUME" >/dev/null 2>&1; then
+                docker volume rm "$DEV_VOLUME" >/dev/null \
+                  || die "removing the dev stacks' volume $DEV_VOLUME"
+              fi
               ;;
             logs)
               # The group's members log to files (one container, four daemons —

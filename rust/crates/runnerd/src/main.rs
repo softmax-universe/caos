@@ -438,7 +438,7 @@ fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
     }
     if !grants.volumes.is_empty() {
         eprintln!(
-            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}; granting {}",
+            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}={} (granted on the nix-store pool only)",
             grants.volumes.join(" ")
         );
     }

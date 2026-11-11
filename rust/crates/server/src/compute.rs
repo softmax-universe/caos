@@ -194,23 +194,9 @@ pub(crate) fn eval_endpoint(
                 return raw_root(config, &locator, &git_ref, &root).map(String::into_bytes);
             }
             let dir = git_ref.dir.as_deref().unwrap_or("");
-            let result = eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
+            eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
                 HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message()))
-            })?;
-            if let Some((_, hash)) = std::str::from_utf8(&result)
-                .ok()
-                .and_then(|r| r.split_once(' '))
-            {
-                crate::secrets::record_mount(
-                    config,
-                    hash.trim(),
-                    caos_eval::Origin {
-                        root: root.to_string(),
-                        path: dir.to_string(),
-                    },
-                );
-            }
-            Ok(result)
+            })
         }
     }
 }

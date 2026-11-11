@@ -32,6 +32,15 @@
   #                             under `/caos-dev/runs/<id>` and reachable in here
   #                             as `/caos-run`. dev/stack-up's header says which
   #                             is which and what each one broke before it moved.
+  #
+  #                             DECLARING IS NOT ENOUGH. Volumes are the host's
+  #                             storage, so runnerd grants them only on the
+  #                             nix-store pool, and a job reaches that pool only
+  #                             by carrying `--required-nix-store=true`
+  #                             (dev/test-stack does). Anywhere else this image
+  #                             runs with none of the three, which ./worker
+  #                             tolerates for /mounted-nix and dev/stack-up
+  #                             refuses for /caos-dev.
   #   CAOS_GRANT_SYS_ADMIN      that bind is the only way to replace a directory
   #                             whose replacement is on another filesystem.
   #   CAOS_GRANT_DEVICES        /dev/fuse, so the podman this image carries can

@@ -267,6 +267,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         used_next: false,
         image_oid: None,
         affinity_oid: None,
+        pool: std::collections::BTreeMap::new(),
     };
     if runner.cfg.resident {
         serve_next_socket(runner.tx.clone())?;

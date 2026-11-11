@@ -1273,6 +1273,14 @@ struct ServerEvalHost<'a> {
     dispatches: std::sync::atomic::AtomicUsize,
 }
 
+impl ServerEvalHost<'_> {
+    /// Which of a tree's cached values this walk reads and writes: everything
+    /// an expression's value depends on that its tree does not hold.
+    fn cache_variant(&self) -> String {
+        crate::eval_cache::variant(self.salt, self.secrets.walk_key().as_deref())
+    }
+}
+
 impl caos_eval::EvalHost for ServerEvalHost<'_> {
     fn concurrent(&self) -> Option<&(dyn caos_eval::EvalHost + Sync)> {
         Some(self)

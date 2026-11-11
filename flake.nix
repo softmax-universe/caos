@@ -1679,9 +1679,15 @@ sandbox = false''
             }
           else
             null;
+
+        deltaRunner = import ./integrations/delta/connector/package.nix {
+          inherit pkgs;
+          prelude = ./std/go/prelude;
+        };
       in
       {
         packages = nixpkgs.lib.optionalAttrs (hermesGateway != null) { hermes-gateway = hermesGateway; } // {
+          delta-runner = deltaRunner;
           # The client a cloud container can actually exec, built for the
           # container's architecture rather than this machine's. `caosd up`
           # pushes it into caosd; see `clientForTarget`.

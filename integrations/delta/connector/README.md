@@ -73,7 +73,7 @@ and account credentials never enter command-line arguments or CAOS ArgTrees.
 ## CAOS probe
 
 Grant a secret named `delta-runner-credentials` to a published, pinned revision
-of this entry, following [CAOS's reader rules](../../../SPEC.md#readers).
+of the `integrations/delta` entry, following [CAOS's reader rules](../../../SPEC.md#readers).
 The secret value is a private JSON bundle with this shape:
 
 ```json
@@ -87,7 +87,7 @@ Keep that value in the private secret store, never in the repository, a job
 argument, a result tree, or a transcript. Pin both the code revision and `since`
 to the reviewed revision. A changed source tree needs a new matching grant.
 
-Run the `integrations/delta/connector` entry with a fresh `request-id` and,
+Run the `integrations/delta` entry with a fresh `request-id` and,
 optionally, a `registration-name`. The worker uses only the production service
 origins and the actor sealed into its credential bundle. Callers cannot override
 the identity or redirect its token to another endpoint.

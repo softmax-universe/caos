@@ -1,0 +1,3 @@
+../../std/flake-builder flake-builder
+../../std/go/prelude prelude
+../../flake.lock flake.lock

@@ -161,10 +161,12 @@ fn commits_of(server: &str, locator: &str, since: Option<&str>) -> Result<Vec<St
 /// from the commit's root holds it when it is about to apply the tool's own
 /// `.caos-expr`. `None` when the commit has no such directory.
 ///
-/// The directory, and not the image the tool builds, because the directory
-/// depends on the commit alone. The image also depends on the build of caos
-/// that built it and on what the tool's own dependencies were granted, so one
-/// computed here would not be the one a run forms.
+/// The directory, and not the image the tool builds. The image always depends
+/// on the build of caos that built it, and on what the tool's own dependencies
+/// were granted, so one computed here would not be the one a run forms. The
+/// directory depends on the build only where a parent expression builds
+/// something into it, which caos's do not. design/secrets.md sets out what
+/// pushing the image would take and cost.
 fn tool_tree(server: &str, locator: &str, commit: &str) -> Result<Option<String>, String> {
     let (url, query) = locator.split_once('?').unwrap_or((locator, ""));
     let mut dir = "";

@@ -150,7 +150,7 @@ fn approve(server: &str, spec: &mut Spec) -> Result<(), String> {
 
 /// The commits `locator` covers, newest first. The server answers, because it
 /// can resolve a `ref=` and read the history wherever the repository is.
-fn reader_commits(server: &str, locator: &str, since: Option<&str>) -> Result<Vec<String>, String> {
+fn commits_of(server: &str, locator: &str, since: Option<&str>) -> Result<Vec<String>, String> {
     let body = serde_json::json!({ "locator": locator, "since": since }).to_string();
     let answer = request(server, "/secrets/commits", Some(body.as_bytes()))?;
     let text = String::from_utf8_lossy(&answer);

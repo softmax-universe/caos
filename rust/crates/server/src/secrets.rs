@@ -62,6 +62,7 @@ impl Context {
         let session = session.filter(|c| !c.is_empty()).map(str::to_string);
         let mut pins: HashMap<String, Option<String>> = HashMap::new();
         let mut sets: Vec<(Reader, Arc<Set>)> = Vec::new();
+        let mut unfinished: Vec<String> = Vec::new();
         let mut head = None;
         for reader in stored.iter().flat_map(|s| &s.readers) {
             match reader {

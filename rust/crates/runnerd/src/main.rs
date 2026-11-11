@@ -43,15 +43,15 @@
 //! they get their own netns on a bridge it has to be a name that resolves
 //! there. `stack/serve` supplies whichever the placement needs.
 //!
-//! PERSISTENT VOLUMES BELONG TO THE CAOSD POOL, NOT TO EVERY RUNNER. Named
-//! volumes are the central host's storage — the shared nix store above all —
-//! so a runnerd grants them only when it is the caosd pool: started on that
-//! host with `CAOS_RUNNER_REQUIRE=required-caosd=true`. A job that must run
-//! there carries the same arg (`--required-caosd=true`, caos_world
+//! PERSISTENT VOLUMES ARE GRANTED BY THE CAOSD RUNNER ALONE. Named volumes are
+//! the central host's storage — the shared nix store above all — so a runnerd
+//! grants them only when it is the caosd runner: started on that host with
+//! `CAOS_RUNNER_REQUIRE=required-caosd=true`. A job that must run there
+//! carries the same arg (`--required-caosd=true`, caos_world
 //! `REQUIRED_CAOSD_ARG`), and because the arg is `required*` the server never
-//! offers it to any other runner. So a plain runnerd — the generic pool, on
-//! this machine or any other — mounts no volumes into anything and is safe to
-//! run anywhere, while the jobs that need the central host run there.
+//! offers it to any other runner. So a plain runnerd — on this machine or any
+//! other — mounts no volumes into anything and is safe to run anywhere, while
+//! the jobs that need the central host run there.
 
 use std::collections::HashMap;
 use std::process::Command;

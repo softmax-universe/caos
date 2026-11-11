@@ -194,19 +194,14 @@ pub trait EvalHost {
     /// Record `value` as the answer for `key`. Paired with [`EvalHost::memo_get`];
     /// a host that keeps no memo ignores it.
     fn memo_put(&self, _kind: MemoKind, _key: &str, _value: &(String, String)) {}
-    /// Origins this host already knows for `oid` — the result of a `:@@=`
-    /// resolution keeps the one it had upstream (SPEC, "Secrets").
-    fn origins_of(&self, _oid: &str) -> Vec<Origin> {
-        Vec::new()
-    }
-    /// Called with each value a `.caos-expr` produced and every origin of the
-    /// node it was applied at. What it returns replaces the value; it may only
-    /// mark, never change what the value computes.
-    fn evaluated(
-        &self,
-        _origins: &[Origin],
-        value: (String, String),
-    ) -> Result<(String, String), String> {
+    /// Called with each value a `.caos-expr` produced and the tree it was
+    /// applied at: the directory as the walk had it in hand, every parent's
+    /// expression applied and its own not yet. That tree is what a secrets
+    /// reader approves (design/secrets.md), and it says everything about the
+    /// value, because an expression reads only its own tree. What this returns
+    /// replaces the value; it may only mark, never change what the value
+    /// computes.
+    fn evaluated(&self, _node: &str, value: (String, String)) -> Result<(String, String), String> {
         Ok(value)
     }
     /// This host, if it may be used from several threads at once: then a

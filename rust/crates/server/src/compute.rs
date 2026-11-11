@@ -2232,9 +2232,10 @@ fn result_hash(result: &str) -> &str {
     result.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// Pin `refs/caos/res/<argTreeHash>` at the result so a client can fetch it by
-/// ref and it survives gc. This is part of top-level run success, particularly
-/// when the HTTP caller disconnected before the eventual result.
+/// Pin `refs/caos/res/<argTreeHash>` at the result, so receive-pack advertises
+/// it and a client's next push can build on a result it never fetched. Swept
+/// after a while with the request refs (`spawn_request_ref_pruner`); a result
+/// is fetched by hash. This is part of top-level run success.
 fn pin_result(config: &Config, arg_tree: &str, result: &str) -> Result<(), HttpError> {
     let hash = result_hash(result);
     if hash.is_empty() {

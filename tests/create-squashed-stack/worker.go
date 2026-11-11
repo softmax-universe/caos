@@ -14,8 +14,10 @@
 // Every fixture message carries --test-salt, so a salted run mints new
 // commits; the server's salt does not reach a sub-run's key (CLAUDE.md).
 //
-// Staged: no run can be waited on, so each case is checked in the `then` of
-// its own run, which then starts the next case.
+// IN PARALLEL: the cases are independent, so the first stage prepares every
+// case's request and maps over them (each child runs its request and forwards
+// the result), and one last stage checks them all. Run one after another, the
+// 18 cases were 36 sequential jobs and most of this test's time.
 package main
 
 import (
@@ -25,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"caos/w"
@@ -221,30 +222,43 @@ func build() {
 	folder("squashed", "01-core=c1", "02-tests=c2", "03-docs=c3")
 }
 
-// next is this test curried for stage s, the `then` of a case's run.
-func next(s int) string {
+// stage is this test curried for stage s.
+func stage(s string) string {
 	return caos("curry", "--base:@=/cas/args/base", "--worker1:@=/cas/args/worker1",
-		"--stage="+strconv.Itoa(s), "--test-salt:@=/cas/args/test-salt", "--squash:@=/cas/args/squash")
+		"--stage="+s, "--test-salt:@=/cas/args/test-salt", "--squash:@=/cas/args/squash")
 }
 
-// launch runs case i. The last case names a plan that does not exist.
-func launch(i int) {
-	path := "plans/missing"
+// caseName is case i's entry in the map: ordered, and unique. The last case
+// names a plan that does not exist.
+func caseName(i int) string {
 	if i < len(cases) {
-		path = "plans/" + cases[i].name
+		return fmt.Sprintf("%02d-%s", i, cases[i].name)
 	}
-	w.Step(fmt.Sprintf("case %d: %s", i, path))
-	request := caos("prepare-request", "--base:hash="+caos("hash", "/cas/args/squash"),
-		"--root:@=/cas/conv", "--plan="+path)
-	caos("run-request-then", request, "--then:hash="+next(i))
+	return fmt.Sprintf("%02d-missing", i)
 }
 
-func check(i int) {
+// launch prepares every case's request and maps over them.
+func launch() {
+	w.Step("every case, in parallel")
+	w.Must(os.MkdirAll("/tmp/requests", 0o755))
+	for i := 0; i <= len(cases); i++ {
+		path := "plans/missing"
+		if i < len(cases) {
+			path = "plans/" + cases[i].name
+		}
+		request := caos("prepare-request", "--base:hash="+caos("hash", "/cas/args/squash"),
+			"--root:@=/cas/conv", "--plan="+path)
+		w.Must(os.WriteFile("/tmp/requests/"+caseName(i), []byte(request), 0o644))
+	}
+	caos("put", "/tmp/requests", "/cas/requests")
+	caos("map-then", "/cas/requests", "--map:hash="+stage("run"), "--then:hash="+stage("check"))
+}
+
+func check(i int, r string) {
 	c := testCase{name: "missing", says: []string{"plan: no such path: plans/missing"}}
 	if i < len(cases) {
 		c = cases[i]
 	}
-	const r = "/cas/args/result"
 	caos("get", r)
 	_, err := os.Lstat(filepath.Join(r, "stdout"))
 	w.True(err == nil, "case %s: the result has no stdout", c.name)
@@ -256,8 +270,8 @@ func check(i int) {
 		w.True(!failed && rootErr == nil, "case %s was refused: %s", c.name, out)
 		prop := caos("hash", filepath.Join(r, "root"))
 		session("/tmp/expect", c.into+"=squashed")
-		caos("put", "/tmp/expect", "/cas/expect")
-		w.True(prop == caos("hash", "/cas/expect"),
+		caos("put", "/tmp/expect", "/cas/expect-"+c.name)
+		w.True(prop == caos("hash", "/cas/expect-"+c.name),
 			"case %s: the proposal is not the session with %s replaced by {01-core: C1, 02-tests: C2, 03-docs: C3}; out: %s", c.name, c.into, out)
 		for _, commit := range squashed {
 			w.True(strings.Contains(out, commit), "case %s: out does not name %s: %s", c.name, commit, out)
@@ -279,16 +293,26 @@ func check(i int) {
 func main() {
 	w.Main(func() {
 		salt = strings.TrimSpace(read("/cas/args/test-salt"))
-		build()
-		if _, err := os.Lstat("/cas/args/stage"); err != nil {
-			launch(0)
+		st := ""
+		if _, err := os.Lstat("/cas/args/stage"); err == nil {
+			st = strings.TrimSpace(read("/cas/args/stage"))
+		}
+		switch st {
+		case "run": // one map child: run the case's request, forward its result
+			caos("run-request-then", strings.TrimSpace(read("/cas/args/in")), "--then:hash="+stage("forward"))
+			return
+		case "forward":
+			caos("forward", "/cas/args/result", "/cas/out")
 			return
 		}
-		i := w.Check(strconv.Atoi(strings.TrimSpace(read("/cas/args/stage"))))
-		check(i)
-		if i < len(cases) {
-			launch(i + 1)
+		build()
+		if st == "" {
+			launch()
 			return
+		}
+		caos("get", "/cas/args/children")
+		for i := 0; i <= len(cases); i++ {
+			check(i, "/cas/args/children/"+caseName(i))
 		}
 		w.Report("create-squashed-stack: ALL PASS\n")
 	})

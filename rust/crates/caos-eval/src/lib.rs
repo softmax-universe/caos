@@ -287,7 +287,8 @@ fn eval_path_uncached(
         // the node's contents WITHOUT the directive (see `strip_caos_expr`).
         if node_kind == "tree" {
             if let Some(value) = eval_node(host, &node_oid)? {
-                (node_kind, node_oid) = host.evaluated(&origins, value)?;
+                let marked = host.evaluated(&node_oid, value)?;
+                (node_kind, node_oid) = marked;
             }
         }
         if i == comps.len() {

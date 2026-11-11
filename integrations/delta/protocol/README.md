@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**371 checks pass**, covering:
+**382 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -34,6 +34,8 @@ implement the recovered messages itself, without shipping or loading Delta Web.
   of truncated headers, missing fields, and incorrectly sized object IDs.
 - Default thread-root references, including nested field paths, omitted and nil
   fields, and re-encoding explicit references.
+- The per-history connection path, history request envelopes, and inline
+  history-delta response decoding.
 
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a
@@ -103,6 +105,32 @@ The sign-in implementation redirects the browser to `/api/auth/sign_in`.
 These are static observations, not a captured browser session. The standalone
 connector instead uses the normal device-approval flow and obtains its own
 credential. It does not extract or reuse browser cookies or native-app tokens.
+
+## History transport
+
+The public `history_websocket_path` helper returns
+`/history/<hyphenated history UUID>/connect`. The history driver resolves it
+under the service prefix and adds the actor query parameter. A live read of the
+approved disposable test thread confirmed that the control socket rejects
+history requests and the scoped socket accepts them.
+
+The opaque Delta thread ID is URL-safe base64 of the positional pair
+`[history_uuid, timeline_id]`. `FetchHistorySince` has request tag 6 and payload
+`[history_uuid, timeline_id, known_history_version]`. Its response includes a
+`CompressedDeltaBatchIds` value and timeline metadata. That compressed value is
+a one-field struct `[binary_data]`, not a sequence of independent chunks.
+
+`FetchHistoryDeltas` has request tag 27 and payload
+`[history_uuid, compressed_delta_batch_ids]`. The reader forwards the index's
+compressed value unchanged. It parses the `Deltas` response (variant 0) and
+`DeltasAndReplicationPacks` (variant 2), retaining every batch's ID, causal
+parents, and delta payloads. Superseded, error, and unsupported responses are
+not treated as empty histories.
+
+The native CLI has downloaded 24 inline batches from the fixture through this
+path. That verifies transport and structural decoding, not replay, turn
+ownership, or workspace synchronization. Replication-pack references are
+retained but their download path is still unimplemented.
 
 ## Thread and history descriptors
 

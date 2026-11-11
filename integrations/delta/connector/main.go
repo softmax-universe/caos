@@ -54,7 +54,7 @@ func readPrivateJSON(path string, value any) error {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|probe [options]")
+		return errors.New("usage: caos-delta auth-start|auth-wait|auth-check|probe|fetch-history [options]")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	cloudURL := flags.String("cloud-url", defaultCloudURL, "Delta account service origin")
@@ -63,6 +63,8 @@ func run(ctx context.Context, args []string) error {
 	remoteURL := flags.String("remote-url", defaultRemoteURL, "Delta WebSocket endpoint")
 	actorFile := flags.String("actor-file", "", "stable actor identity file")
 	registrationName := flags.String("registration-name", "", "temporarily register and clear this diagnostic machine name")
+	thread := flags.String("thread-id", "", "Delta thread ID to read")
+	outputFile := flags.String("output-file", "", "new private history snapshot file")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -121,7 +123,19 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Println("Account credentials accepted; Delta service token issued.")
-	case "probe":
+	case "probe", "fetch-history":
+		var target threadID
+		if args[0] == "fetch-history" {
+			if *outputFile == "" {
+				return errors.New("--output-file is required")
+			}
+			if _, err := os.Lstat(*outputFile); !os.IsNotExist(err) {
+				return errors.New("history output already exists or cannot be inspected")
+			}
+			if target, err = parseThreadID(*thread); err != nil {
+				return err
+			}
+		}
 		var account credentials
 		if err := readPrivateJSON(*credentialFile, &account); err != nil {
 			return err
@@ -151,6 +165,19 @@ func run(ctx context.Context, args []string) error {
 		}
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+		if args[0] == "fetch-history" {
+			snapshot, err := fetchHistorySnapshot(ctx, *remoteURL, token, actor, target)
+			if err != nil {
+				return err
+			}
+			if err := writePrivateJSON(*outputFile, snapshot); err != nil {
+				return err
+			}
+			fmt.Printf("Fetched %d inline history batches and %d replication-pack references; snapshot saved privately.\n",
+				len(snapshot.Download.Batches), len(snapshot.Download.ReplicationPacks))
+			fmt.Println("History replay and agent-turn execution are not implemented.")
+			return nil
+		}
 		var name *string
 		if *registrationName != "" {
 			name = registrationName
@@ -171,7 +198,7 @@ func run(ctx context.Context, args []string) error {
 
 func main() {
 	if len(os.Args) == 1 && w.Exists("/cas/args") {
-		w.Main(workerProbe)
+		w.Main(workerMain)
 		return
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)

@@ -144,12 +144,20 @@ func decodeVariant(data []byte) (wireVariant, error) {
 }
 
 func decodeFields(data []byte, minimum, maximum int) ([]msgpack.RawMessage, error) {
+	return decodeArray(data, minimum, maximum, 1024)
+}
+
+func decodeSequence(data []byte, maximum int) ([]msgpack.RawMessage, error) {
+	return decodeArray(data, 0, maximum, maximum)
+}
+
+func decodeArray(data []byte, minimum, retained, limit int) ([]msgpack.RawMessage, error) {
 	decoder := msgpack.NewDecoder(bytes.NewReader(data))
 	length, err := decoder.DecodeArrayLen()
-	if err != nil || length < minimum || length > 1024 {
+	if err != nil || length < minimum || length > limit || length > len(data) {
 		return nil, errors.New("invalid protocol field count")
 	}
-	fields := make([]msgpack.RawMessage, min(length, maximum))
+	fields := make([]msgpack.RawMessage, min(length, retained))
 	for i := 0; i < length; i++ {
 		if i < len(fields) {
 			fields[i], err = decoder.DecodeRaw()

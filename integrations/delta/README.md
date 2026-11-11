@@ -5,7 +5,8 @@ backed by CAOS. It does not host the Delta application, a desktop, or a browser.
 
 **Authentication and machine registration work from a CAOS worker. Agent-turn
 execution and thread/workspace synchronization are still being implemented.**
-The current CAOS entry runs a bounded diagnostic probe, not a persistent agent.
+The current CAOS entry runs bounded connection and allowlisted history checks,
+not a persistent agent.
 
 - [Connector implementation and operator instructions](connector/README.md)
 - [Recovered protocol formats and offline reference checks](protocol/README.md)

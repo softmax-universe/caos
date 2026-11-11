@@ -4,9 +4,10 @@ This is a Go implementation of selected Delta protocol operations. It does not
 launch, embed, or download the Delta application. The public reference Wasm is
 used only by the separate [protocol investigation](../protocol/README.md).
 
-**Current state: authentication and registration work; agent-turn execution is
-not implemented yet.** The CAOS entry currently implements a bounded diagnostic
-probe, not a persistent runner. Do not select a diagnostic machine for real work.
+**Current state: authentication, registration, and read-only history download
+work; agent-turn execution is not implemented yet.** The CAOS entry implements
+bounded checks, not a persistent runner. Do not select a diagnostic machine for
+real work.
 
 ## Verified against the real service
 
@@ -48,7 +49,7 @@ the connector's current operations; it is not evidence of agent-turn execution.
 
 The canonical root entry at revision `7624c1d767cae4866080226c08a01731c6cee0a0`
 also passed the live CAOS probe and the full salted suite (**79/79**), as well as
-`nix build --no-link .#delta-runner`. The offline reference now checks 371 wire
+`nix build --no-link .#delta-runner`. The offline reference now checks 382 wire
 cases. The dispatch decoder reads typed epochs and timeline identities, accepts
 the reference's defaults for omitted newer fields, and rejects malformed types.
 Parsing a dispatch does not admit the turn or acknowledge execution.
@@ -58,6 +59,28 @@ The typed dispatch decoder at revision
 (`-count=10`), `go vet`, the native Nix build, a live CAOS probe, and the full
 salted suite (**79/79**). The history reference checks additionally establish
 default root-object IDs offline; replay and live turn execution remain unbuilt.
+
+## Read-only history capture
+
+The native CLI has downloaded and parsed 24 history delta batches from an
+explicitly approved disposable Delta thread. It uses a separate authenticated
+socket at `/history/<history UUID>/connect`; the control socket rejects history
+requests. The public reference verifies that path and the request envelopes.
+
+```sh
+connector fetch-history \
+  --credential-file=/private/path/credentials.json \
+  --actor-file=/private/path/actor.json \
+  --thread-id="<Delta thread ID>" \
+  --output-file=/private/path/new-history-snapshot.json
+```
+
+The capture preserves batch identities, causal parents, delta payloads, timeline
+metadata, replication-pack references, and ordered notifications. It does not
+apply them to a local state database or execute a turn. A capture containing
+replication-pack references is incomplete until those packs are fetched; that
+fetch path is still unimplemented. Raw content and pack metadata stay in the
+private file, never in standard output.
 
 ## Authentication
 
@@ -92,7 +115,8 @@ The secret value is a private JSON bundle with this shape:
 ```json
 {
   "account": {"user_id": 123, "access_token": "<issued credential>"},
-  "actor": "<this connector's UUID>"
+  "actor": "<this connector's UUID>",
+  "allowed_threads": ["<explicitly approved Delta test thread ID>"]
 }
 ```
 
@@ -104,6 +128,12 @@ Run the `integrations/delta` entry with a fresh `request-id` and,
 optionally, a `registration-name`. The worker uses only the production service
 origins and the actor sealed into its credential bundle. Callers cannot override
 the identity or redirect its token to another endpoint.
+
+`op=inspect-history` with `thread-id` performs the read-only download and returns
+only counts. It requires an exact match in the bundle's `allowed_threads`; an
+absent or empty list denies all history inspection. This check happens before
+requesting a service token. No thread content or replication-pack URL is
+published to a CAOS result. `registration-name` is accepted only by `op=probe`.
 
 The image contains the statically compiled connector and CA certificates, plus
 CAOS's normal additions. It contains no desktop, browser, Delta binary, native

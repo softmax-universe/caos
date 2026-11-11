@@ -71,12 +71,6 @@ pub fn cli_secrets_push(args: &[String]) -> Result<(), String> {
         );
     }
     let body = serde_json::Value::Object(body).to_string();
-    let server = match server {
-        Some(server) => server,
-        None => caos::GitTransport::from_cwd()
-            .and_then(|t| caos::Transport::server_url(&t))
-            .map_err(|e| format!("no --server, and no caos remote here: {e}"))?,
-    };
     let headers = [
         (fmt::PUSH_KEY_HEADER, reader_key.clone()),
         (fmt::PUSH_SEQUENCE_HEADER, sequence.to_string()),

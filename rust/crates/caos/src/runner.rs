@@ -522,8 +522,9 @@ impl Runner {
         let body = serde_json::json!({
             "required": required,
             "tenure": tenure,
-            // Our parent is a runnerd of our pool — it polls with just the pool's
-            // args once we die, so a job we can't serve can evict us toward it.
+            // Our parent is the runnerd that started us — it polls with just the
+            // `required*` args we share with it once we die, so a job we can't
+            // serve can evict us toward it.
             "lineage": [ &self.requires ],
             "ttl_ms": ttl_ms,
         });

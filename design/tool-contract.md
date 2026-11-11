@@ -158,9 +158,9 @@ however many there are.
 
 Why that is enough:
 
-- A grant matches a node's origin, not the path it is reached by, and a
-  `DEEP-DEPS/<name>` mount is a copy, which "carries the origins of what it was
-  copied from" (SPEC, "Readers"). The `@op` entries already mount
+- A grant is a test on the tool's tree, not on the path it is reached by, and
+  a `DEEP-DEPS/<name>` mount is the same tree as the tool at its own path
+  (SPEC, "Readers"; design/secrets.md). The `@op` entries already mount
   `DEEP-DEPS/llm-step` this way.
 - A secret is injected only into a job whose own image was granted (SPEC,
   "Isolation"). So the token is used inside the github worker and nowhere

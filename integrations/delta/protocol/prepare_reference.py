@@ -32,6 +32,7 @@ FUNCTIONS = {
     "ack_local_encode": codec("AcknowledgeLocalMachineTurn", ENCODE),
     "client_encode": codec("ClientMessage", ENCODE),
     "server_decode": codec("ServerMessage", DECODE),
+    "history_path": "delta_remote_protocol::history_websocket_path",
     "thread_encode": f"<thread::ThreadDataStub as versioned::Versioned>::{ENCODE}",
     "thread_decode": f"<thread::ThreadDataStub as versioned::Versioned>::{DECODE}",
     "field_push": "<versioned::FieldId>::push",

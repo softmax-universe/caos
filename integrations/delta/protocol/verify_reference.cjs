@@ -34,7 +34,7 @@ async function main() {
     WebAssembly.Module.exports(module).map(x => x.name).sort(),
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
-      'server_decode', 'thread_encode', 'thread_decode', 'field_push',
+      'server_decode', 'history_path', 'thread_encode', 'thread_decode', 'field_push',
       'schema_thread', 'schema_batch'].sort(),
   );
   const imports = {};
@@ -107,6 +107,44 @@ async function main() {
     assert.equal(actual, expected, name);
     checks++;
   };
+
+  const historyPointer = alloc(16), pathOutput = alloc(12);
+  copyHex(historyPointer, uuid);
+  e.history_path(pathOutput, historyPointer);
+  const pathPointer = view().getUint32(pathOutput + 4, true);
+  const pathLength = view().getUint32(pathOutput + 8, true);
+  check('per-history WebSocket path',
+    Buffer.from(bytes().slice(pathPointer, pathPointer + pathLength)).toString(),
+    '/history/00010203-0405-0607-0809-0a0b0c0d0e0f/connect');
+  const historyID = `92cd01009201c410${uuid}`;
+  const since = alloc(304);
+  u64(since, 256n);
+  bytes()[since + 8] = 1;
+  copyHex(since + 9, uuid);
+  copyHex(since + 32, uuid);
+  u32(since + 256, 9); // FetchHistorySince's Rust discriminant.
+  u32(since + 288, 42);
+  check('history-index request envelope', encode('client_encode', since),
+    `922a920693c410${uuid}${historyID}90`);
+  const fetch = alloc(304);
+  copyHex(fetch + 16, uuid);
+  u32(fetch + 256, 10); // FetchHistoryDeltas's Rust discriminant.
+  u32(fetch + 288, 42);
+  check('history-deltas request envelope', encode('client_encode', fetch),
+    `922a921b92c410${uuid}91c400`);
+  const batch = `94${historyID}c09091920c911c`;
+  for (const response of [
+    `92009191${batch}`, `9202930191${batch}90`,
+    `9202940191${batch}90a6667574757265`,
+  ]) {
+    const result = decode('server_decode', `9205922a921b${response}`, 512);
+    check('history delta response accepted', bytes()[result.output] === 255, false);
+    check('history delta response consumes input', result.remaining, 0);
+  }
+  for (const response of ['920293cf00000001000000009090', '92029301c090']) {
+    const result = decode('server_decode', `9205922a921b${response}`, 512);
+    check('malformed history response rejected', bytes()[result.output], 255);
+  }
 
   for (const [epoch, encoded] of integers) {
     const turn = alloc(104);

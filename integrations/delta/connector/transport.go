@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"time"
 
 	"github.com/coder/websocket"
@@ -14,7 +15,7 @@ import (
 
 const defaultRemoteURL = "wss://delta.zed.dev/connect"
 
-func connectionURL(remoteURL string, actor uuid) (string, error) {
+func connectionURL(remoteURL string, actor uuid, history *uuid) (string, error) {
 	u, err := url.Parse(remoteURL)
 	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return "", errors.New("invalid Delta WebSocket URL")
@@ -29,14 +30,20 @@ func connectionURL(remoteURL string, actor uuid) (string, error) {
 	}
 	query.Set("actor_id", actor.String())
 	u.RawQuery = query.Encode()
+	if history != nil {
+		// The control socket cannot serve history requests. The public client
+		// uses history/<UUID>/connect relative to the same service prefix.
+		u.Path = path.Join(path.Dir(u.Path), "history", history.String(), "connect")
+		u.RawPath = ""
+	}
 	return u.String(), nil
 }
 
-func connectRemote(ctx context.Context, remoteURL, token string, actor uuid) (*websocket.Conn, string, error) {
+func connectRemote(ctx context.Context, remoteURL, token string, actor uuid, history *uuid) (*websocket.Conn, string, error) {
 	if token == "" {
 		return nil, "", errors.New("Delta service token is required")
 	}
-	target, err := connectionURL(remoteURL, actor)
+	target, err := connectionURL(remoteURL, actor, history)
 	if err != nil {
 		return nil, "", err
 	}
@@ -77,7 +84,7 @@ type probeResult struct {
 
 func probeRemote(ctx context.Context, remoteURL, token string, actor uuid, registrationName *string) (probeResult, error) {
 	var result probeResult
-	conn, connectionID, err := connectRemote(ctx, remoteURL, token, actor)
+	conn, connectionID, err := connectRemote(ctx, remoteURL, token, actor, nil)
 	if err != nil {
 		return result, err
 	}

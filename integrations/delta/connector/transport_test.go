@@ -65,7 +65,7 @@ func TestWebSocketUpgradeFailureRedactsCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 	conn, _, err := connectRemote(context.Background(),
-		strings.Replace(server.URL, "http:", "ws:", 1), "test-secret-token", uuidFixture(0))
+		strings.Replace(server.URL, "http:", "ws:", 1), "test-secret-token", uuidFixture(0), nil)
 	if conn != nil || err == nil || strings.Contains(err.Error(), "test-secret-token") ||
 		strings.Contains(err.Error(), "do-not-print-this-response") {
 		t.Fatalf("unsafe failed handshake: %v", err)
@@ -77,7 +77,7 @@ func TestConnectionIdentityAndTLS(t *testing.T) {
 		"ws://example.com/connect", "wss://user:password@example.com/connect",
 		"wss://example.com/connect#fragment", "wss://example.com/connect?actor_id=other",
 	} {
-		if _, err := connectionURL(target, uuidFixture(0)); err == nil {
+		if _, err := connectionURL(target, uuidFixture(0), nil); err == nil {
 			t.Errorf("accepted unsafe connection URL: %s", target)
 		}
 	}

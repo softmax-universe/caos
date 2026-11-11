@@ -26,7 +26,7 @@ func testSession(t *testing.T, serve func(context.Context, *websocket.Conn)) (*s
 		serve(ctx, conn)
 	}))
 	conn, _, err := connectRemote(ctx, strings.Replace(server.URL, "http:", "ws:", 1),
-		"test-session-token", uuidFixture(0))
+		"test-session-token", uuidFixture(0), nil)
 	if err != nil {
 		cancel()
 		server.Close()

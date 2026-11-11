@@ -11,7 +11,7 @@ function anchorReference(e, memory) {
     if (value < 256) return `cc${value.toString(16).padStart(2, '0')}`;
     return `cd${value.toString(16).padStart(4, '0')}`;
   };
-  return (text, timestamp, actor, offset, right) => {
+  return (text, timestamp, actor, offset, right, visible = false) => {
     const snapshot = alloc(272);
     bytes().set(bytes().slice(buffer, buffer + 72), snapshot);
     e.text_clone(snapshot + 72, text);
@@ -26,7 +26,8 @@ function anchorReference(e, memory) {
     const anchor = decode('anchor_decode', wire, 256);
     check('native anchor consumes input', anchor.remaining, 0);
     const result = alloc(8);
-    e.anchor_resolve(result, snapshot, anchor.output);
+    const resolve = visible ? e.anchor_resolve_visible : e.anchor_resolve;
+    resolve(result, snapshot, anchor.output);
     const present = view().getUint32(result, true);
     assert.ok(present === 0 || present === 1);
     return present ? view().getUint32(result + 4, true) : null;

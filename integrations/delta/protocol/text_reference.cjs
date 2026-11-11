@@ -161,7 +161,8 @@ function verifyTextReference(e, memory) {
       const step = anchorRandom(steps.length), offset = anchorRandom(8);
       const right = anchorRandom(2) === 1;
       const expected = anchors(final, steps[step].timestamp, steps[step].actor, offset, right);
-      anchorQueries.push({step, offset, right, expected});
+      const expectedVisible = anchors(final, steps[step].timestamp, steps[step].actor, offset, right, true);
+      anchorQueries.push({step, offset, right, expected, expectedVisible, visibilityChecked: true});
     }
     cases.push({name: `synthetic-${caseIndex}`, steps, heads, expected, anchors: anchorQueries});
   }

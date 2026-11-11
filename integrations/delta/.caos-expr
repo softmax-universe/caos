@@ -1,9 +1,11 @@
 HELP=<<END
 Run a bounded standalone Delta connector check from CAOS. This does not run the Delta application or execute agent turns. Requires a delta-runner-credentials secret containing this connector's account and actor identity. Never put credentials in arguments.
 @param {string} request-id Fresh value so the check makes a real network exchange.
-@param {string} [op] probe (default), inspect-history, or replay-history (both history operations are read-only).
+@param {string} [op] probe (default), inspect-history, replay-history, inspect-workspaces, or bridge-context. bridge-context imports an allowlisted thread into a CAOS session without inference; it does not edit Delta.
 @param {string} [registration-name] Temporarily register, then clear, a diagnostic machine name.
 @param {string} [thread-id] History to inspect; must be allowlisted in the sealed credential bundle. Only counts, never thread content or pack URLs, are returned.
 END
 IMAGE=run --base:@=DEEP-DEPS/flake-builder --in:@=. --lock:@=DEEP-DEPS/flake.lock
-curry --base=$IMAGE --help=$HELP
+AGENT=curry --base:@=DEEP-DEPS/agent
+PUBLISHER=curry --base:@=DEEP-DEPS/result-publisher
+curry --base=$IMAGE --help=$HELP --agent-image=$AGENT --result-publisher=$PUBLISHER

@@ -49,7 +49,7 @@ async function main() {
       'text_empty', 'text_string', 'text_clone', 'text_apply', 'edit_decode',
       'edit_encode', 'batch_payload_id',
       'text_create', 'scratch_decode', 'fragment_decode', 'fragment_offset',
-      'buffer_decode', 'anchor_decode', 'anchor_resolve',
+      'buffer_decode', 'anchor_decode', 'anchor_resolve', 'anchor_resolve_visible',
       'snapshot_empty', 'snapshot_clone', 'map_insert', 'map_remove', 'map_get',
       'map_values', 'map_winner', 'map_insert_decode', 'map_remove_decode',
       'schema_thread', 'schema_batch'].sort(),

@@ -88,6 +88,7 @@ FUNCTIONS = {
     "buffer_decode": f"<deltadb::history::BufferId as versioned::Versioned>::{DECODE}",
     "anchor_decode": f"<deltadb::buffer_anchor::BufferAnchorStub as versioned::Versioned>::{DECODE}",
     "anchor_resolve": "<deltadb::client::BufferSnapshot>::resolve_anchor",
+    "anchor_resolve_visible": "<deltadb::client::BufferSnapshot>::resolve_visible_anchor",
     "snapshot_empty": f"<{SNAPSHOT_TYPE}>::new",
     "snapshot_clone": f"<{SNAPSHOT_TYPE} as core::clone::Clone>::clone",
     "map_insert": (

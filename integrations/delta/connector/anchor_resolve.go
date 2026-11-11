@@ -2,7 +2,17 @@ package main
 
 import "errors"
 
+var errAnchorNotVisible = errors.New("anchor addresses deleted text")
+
 func (state *replayState) resolveAnchor(anchor scratchAnchor) (int, error) {
+	return state.resolveScratchAnchor(anchor, false)
+}
+
+func (state *replayState) resolveVisibleAnchor(anchor scratchAnchor) (int, error) {
+	return state.resolveScratchAnchor(anchor, true)
+}
+
+func (state *replayState) resolveScratchAnchor(anchor scratchAnchor, requireVisible bool) (int, error) {
 	buffer := state.Buffers[anchor.Buffer]
 	if buffer == nil {
 		if anchor.Buffer.Kind != 1 || anchor.Kind == 2 {
@@ -16,7 +26,7 @@ func (state *replayState) resolveAnchor(anchor scratchAnchor) (int, error) {
 	if anchor.Kind == 2 && anchor.Base {
 		return 0, errors.New("scratch anchor refers to an unavailable base insertion")
 	}
-	offset, resolved := 0, anchor.Kind == 1
+	offset, resolved, deleted := 0, anchor.Kind == 1, false
 	buffer.visit(state.basis, func(atom *textAtom, present bool) bool {
 		if anchor.Kind == 2 && atom.Write == anchor.Insertion &&
 			anchor.Offset >= uint64(atom.Offset) &&
@@ -29,6 +39,7 @@ func (state *replayState) resolveAnchor(anchor scratchAnchor) (int, error) {
 					offset++
 				}
 			}
+			deleted = !present
 			resolved = true
 			return false
 		}
@@ -39,6 +50,9 @@ func (state *replayState) resolveAnchor(anchor scratchAnchor) (int, error) {
 	})
 	if !resolved {
 		return 0, errors.New("anchor insertion or byte offset is missing")
+	}
+	if requireVisible && deleted {
+		return 0, errAnchorNotVisible
 	}
 	return offset, nil
 }

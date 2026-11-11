@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**9,627 checks pass**, covering:
+**10,395 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -41,7 +41,8 @@ implement the recovered messages itself, without shipping or loading Delta Web.
 - Observed-remove map behavior, including preservation of unseen concurrent
   values and removal that reveals a previously hidden value.
 - Scratch-buffer anchors, including both biases, deleted text, and byte positions
-  inside Unicode scalars, with 768 queries across the generated histories.
+  inside Unicode scalars, with 768 queries checked against both the ordinary and
+  visible-anchor resolvers across the generated histories.
 - No-op and causal `UpdateHistory` envelopes, outgoing batches, timeline updates,
   and decoding the acceptance response observed in the separate live write check.
 

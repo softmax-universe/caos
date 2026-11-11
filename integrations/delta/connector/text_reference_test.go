@@ -31,10 +31,12 @@ func TestNativeTextReferenceCorpus(t *testing.T) {
 			Heads    []int
 			Expected string
 			Anchors  []struct {
-				Step     int
-				Offset   uint64
-				Right    bool
-				Expected *int
+				Step              int
+				Offset            uint64
+				Right             bool
+				Expected          *int
+				ExpectedVisible   *int
+				VisibilityChecked bool
 			}
 		}
 	}
@@ -99,6 +101,16 @@ func TestNativeTextReferenceCorpus(t *testing.T) {
 						}
 					} else if err != nil || actual != *query.Expected {
 						t.Fatalf("Go anchor %d %v differs from native %d", actual, err, *query.Expected)
+					}
+					if query.VisibilityChecked {
+						actual, err := state.resolveVisibleAnchor(anchor)
+						if query.ExpectedVisible == nil {
+							if err == nil {
+								t.Fatal("Go resolved an anchor hidden in the native snapshot")
+							}
+						} else if err != nil || actual != *query.ExpectedVisible {
+							t.Fatalf("Go visible anchor %d %v differs from native %d", actual, err, *query.ExpectedVisible)
+						}
 					}
 				}
 			}

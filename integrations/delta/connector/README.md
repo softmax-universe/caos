@@ -47,8 +47,9 @@ passed the full salted CAOS suite (**79/79**), CAOS and native Nix builds,
 race-enabled Go tests, and live connection/history checks. The replay engine was
 added afterward and has separate compatibility checks.
 
-The offline reference runs 9,627 protocol and in-memory state checks, including
-128 generated text-CRDT histories and 768 anchor queries. See the protocol README for exporting those
+The offline reference runs 10,395 protocol and in-memory state checks, including
+128 generated text-CRDT histories and 768 queries checked with both ordinary and
+visible-anchor semantics. See the protocol README for exporting those
 cases and comparing the Go implementation against them. The production worker
 does not include or invoke that reference module.
 
@@ -192,6 +193,29 @@ model vouchers, or other private state. Neither history operation accepts turns.
 reconstructs their pinned initial trees. It returns only workspace and object
 counts. It does not write files or accept turns.
 
+`op=bridge-context` imports separate native user and completed assistant messages
+into a CAOS session, using the existing `std/llm-step` recording operations.
+It then exports the pinned context through the normal model-context renderer
+and checks its roles and text. The operation requests no inference and makes
+no Delta edits. Its public report contains only counts; the imported conversation
+and workspace live in the configured CAOS server, like other CAOS sessions.
+Native inference vouchers and unrelated metadata are never passed to that session.
+
+The bridge reconstructs the native workspace tree and verifies that its recorded
+base commit resolves to that exact tree in CAOS before using it. Each continuation
+rechecks the authorized native frontier. A changed thread aborts the import rather
+than mixing versions. Staged jobs release their worker slots between operations.
+
+The execution backend uses CAOS's existing `prepare-request` and `sub-run`
+mechanisms. It does not obtain another CAOS credential or implement a second
+model/tool loop. `std/run-and-update-ref` can publish immutable task-result refs
+for a caller without a CAOS session record; duplicate callbacks reconcile the
+same result by identity without force-writing a ref.
+
+**Unfixed protocol-support gaps:** structured native tool/thinking history,
+attachments, inherited parent context, and multiple or incrementally edited
+workspaces still fail explicitly. They are not flattened or silently omitted.
+
 The image contains the statically compiled connector and CA certificates, plus
 CAOS's normal additions. It contains no desktop, browser, Delta binary, native
 Delta credential store, or Docker-engine grant.
@@ -204,7 +228,8 @@ server outcome, not proof that its effects were canceled.
 
 The connector still needs a long-lived worker runtime, reconnect/lease handling,
 turn admission and ownership checks, history/workspace synchronization, and the
-bridge to CAOS's existing agent execution. A completed implementation must
+connection from its prepared execution backend to admitted turns and Delta
+reply/file updates. A completed implementation must
 demonstrate a real phone-initiated turn, including its reply and workspace
 changes, with the laptop disconnected. The current probe does not establish
 any of those outcomes.

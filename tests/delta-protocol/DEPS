@@ -1,2 +1,3 @@
 ../../std/go go
 ../../integrations/delta connector
+../../std/run-and-update-ref publisher

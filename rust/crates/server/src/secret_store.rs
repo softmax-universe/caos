@@ -242,6 +242,7 @@ fn read_tree(dir: &str, tree: &str) -> Result<Vec<Stored>, String> {
             entropy: spec.entropy.unwrap_or_default(),
             value: blob(part(fmt::PUSHED_VALUE)?)?,
             readers: spec.readers,
+            trees: spec.trees,
         });
     }
     Ok(out)

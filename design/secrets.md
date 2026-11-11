@@ -155,6 +155,32 @@ being evaluated from `T`, and that evaluation is what fills the cache. (The
 exception is a tree someone built by hand to be identical to an evaluation
 the server never ran. It is denied.)
 
+### Finishing a path under a root that is in use
+
+The strict rule needs every parent's expression applied, and a commit can be
+in use without anything applying them all. The test suite showed it on the
+first run: it grants `std/llm-step` in the commit under test and runs the
+tool from `tests/<name>/DEEP-DEPS/llm-step`. That walk applies the root
+expression and never enters `std`, so `std/.caos-expr` is not evaluated for
+the commit, the root parks on the deepened `std`, and the copy, which is the
+approved tree, is refused. The origin index granted it only because it also
+approved the half-evaluated form.
+
+So there is one case where the server evaluates for a reader. When a root
+**has** a cached value, the commit is in use; if a reader's path then stops
+at a directory below the root, the server evaluates that directory's
+expression itself and follows the path on. It does this where the root's
+value is recorded (inside the walk that produced it, on that walk's stack,
+so a cycle is still caught) and at admission, for a root evaluated before
+the reader was known. A directory is tried once, and again only after ten
+minutes, so a failing expression is not run at every request.
+
+A root with no cached value is never evaluated this way. That keeps the cost
+at one evaluation per directory on a reader's path, per commit actually in
+use, and it is the evaluation a mount of that directory would have done
+anyway. A repository whose root has no expression gives no such signal that
+a commit is in use, so its paths are finished only by walks that enter them.
+
 ### The set is live, not built at admission
 
 Admission fixes the reader's commit set `R`, as before, so one run sees one

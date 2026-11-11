@@ -54,19 +54,18 @@ impl Context {
         let session = session.filter(|c| !c.is_empty()).map(str::to_string);
         let mut head = None;
         for reader in stored.iter().flat_map(|s| &s.readers) {
-            match reader {
-                Reader::Session { session: id, .. }
-                    if Some(id) == session.as_ref() && head.is_none() =>
-                {
-                    head = session_head(config, id).unwrap_or_else(|e| {
-                        eprintln!("secrets: session {id}: {e}");
-                        None
-                    });
-                }
-                _ => {}
+            let Reader::Session { session: id, .. } = reader else {
+                continue;
+            };
+            if Some(id) == session.as_ref() && head.is_none() {
+                head = session_head(config, id).unwrap_or_else(|e| {
+                    eprintln!("secrets: session {id}: {e}");
+                    None
+                });
             }
         }
-        let scope = format!("{}|{}", trees.join(","), session.as_deref().unwrap_or(""));
+        let named = session.as_deref().unwrap_or("");
+        let scope = format!("{}|{named}", trees.join(","));
         Ok(Context {
             scope,
             stored: Arc::new(stored),

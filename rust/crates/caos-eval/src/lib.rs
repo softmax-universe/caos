@@ -1198,8 +1198,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod origin_tests {
-    use super::{eval_path, EvalHost, Origin};
+mod evaluated_tests {
+    use super::{eval_path, EvalHost};
     use gix::objs::tree::{Entry, EntryKind};
     use std::cell::RefCell;
     use std::collections::HashMap;

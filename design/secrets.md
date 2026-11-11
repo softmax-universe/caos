@@ -134,12 +134,13 @@ matching: the rule approves what a walk to `dir` reaches, and nothing else.
 
 ## Building the approved set
 
-### Nothing is evaluated to build it
+### No commit is evaluated to build it
 
 Evaluating every ancestor of a branch would run real jobs for each (caos's
 root expression alone is a deep-deps run over the repository), and old
 commits may no longer evaluate at all. So the set is built from evaluations
-the server has **already done**, read from the eval cache below. For each `T`
+the server has **already done**, read from the eval cache below, with the
+one exception in the next section. For each `T`
 in `R` the server follows `parent of dir` one component at a time:
 
 - a directory with no `.caos-expr` is its own value: descend by lookup;

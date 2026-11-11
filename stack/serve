@@ -348,8 +348,8 @@ start_runnerd() { # <log-name> <slots> <require>
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
-  # The caosd pool: the jobs that need this host's persistent volumes
-  # (`--required-caosd=true`, e.g. dev/test-stack) and only those. Without
+  # The caosd pool: the jobs that must run on this host (`--required-caosd=true`:
+  # dev/test-stack, every flake-builder build) and only those. Without
   # it they match no runner and fail at their pending deadline, which is the
   # intended failure — so it is on by default wherever runnerd is.
   caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-${CAOS_RUNNER_SLOTS:-8}}

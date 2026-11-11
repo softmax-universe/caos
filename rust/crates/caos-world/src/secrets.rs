@@ -109,6 +109,7 @@ pub fn parse_spec(file_name: &str, text: &str) -> Result<Spec, String> {
         entropy: None,
         value: None,
         readers: Vec::new(),
+        trees: Vec::new(),
     };
     for raw in text.lines() {
         let line = raw.trim();

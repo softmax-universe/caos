@@ -312,6 +312,8 @@ fn as_address(url: &str) -> String {
 
 fn main() {
     install_termination_handlers();
+    let required = required_args(&env_or("CAOS_RUNNER_REQUIRE", ""));
+    let volumes = grants_volumes(&required);
     let config = Arc::new(Config {
         server_url: as_address(&env_or("CAOS_SERVER_URL", "http://caos-server")),
         worker_redis_addr: std::env::var("CAOS_WORKER_REDIS_ADDR")

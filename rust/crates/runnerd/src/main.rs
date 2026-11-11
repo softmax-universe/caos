@@ -509,6 +509,16 @@ fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
     out
 }
 
+/// Is a runnerd with this required set the nix-store pool — the one runner that
+/// grants persistent volumes? Exactly when it requires
+/// `required-nix-store=true`: the server then hands it ONLY jobs carrying that
+/// arg, and no other runner gets those jobs, so "this runner grants volumes"
+/// and "this job asked for them" are the same statement.
+fn grants_volumes(required: &std::collections::BTreeMap<String, String>) -> bool {
+    required.get(caos_world::REQUIRED_NIX_STORE_ARG)
+        == Some(&blob_oid(caos_world::NIX_STORE_POOL))
+}
+
 /// One long-poll. `Some(job)` to run; `None` on idle/evicted.
 fn poll(config: &Config) -> Result<Option<Job>, String> {
     let body = serde_json::json!({

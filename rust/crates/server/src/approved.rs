@@ -296,7 +296,19 @@ fn settle(state: &mut State, source: &dyn Source, place: &Place) -> Vec<String> 
             set.add(&found.nodes);
         }
     }
+    let mut unfinished = Vec::new();
+    if !source.values(&place.0).is_empty() {
+        for tree in &found.parked {
+            let last = state.tried.get(tree).copied();
+            if *tree == place.0 || last.is_some_and(|at| at.elapsed() < RETRY) {
+                continue;
+            }
+            state.tried.insert(tree.clone(), Instant::now());
+            unfinished.push(tree.clone());
+        }
+    }
     state.reached.insert(place.clone(), found);
+    unfinished
 }
 
 /// Follow every parked place again, at most once per [`REFRESH`].

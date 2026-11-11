@@ -1274,6 +1274,9 @@ struct ServerEvalHost<'a> {
 }
 
 impl caos_eval::EvalHost for ServerEvalHost<'_> {
+    fn concurrent(&self) -> Option<&(dyn caos_eval::EvalHost + Sync)> {
+        Some(self)
+    }
     fn get_object(&self, oid: &str) -> Result<(String, Vec<u8>), String> {
         fetch_object(self.config, oid)
     }

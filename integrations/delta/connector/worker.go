@@ -37,8 +37,14 @@ func runWorker(ctx context.Context) (report string, deferred bool, err error) {
 	if w.Exists("/cas/args/op") {
 		op = w.Read("/cas/args/op")
 	}
-	if op != "probe" && op != "inspect-history" && op != "replay-history" && op != "inspect-workspaces" && op != "bridge-context" && op != "check-model" {
+	if op != "probe" && op != "inspect-history" && op != "replay-history" && op != "inspect-workspaces" && op != "bridge-context" && op != "check-model" && op != "execute-turn" {
 		return "", false, errors.New("unsupported Delta worker operation")
+	}
+	if op == "execute-turn" {
+		clock, clockErr := time.Parse(time.RFC3339Nano, w.Read("/cas/args/request-id"))
+		if clockErr != nil || clock.UnixMilli() < 0 || !w.Exists("/cas/args/model") || strings.TrimSpace(w.Read("/cas/args/model")) == "" {
+			return "", false, errors.New("execute-turn requires an explicit model and an RFC3339 request-id timestamp")
+		}
 	}
 	var name *string
 	if w.Exists("/cas/args/registration-name") {
@@ -91,13 +97,13 @@ func runWorker(ctx context.Context) (report string, deferred bool, err error) {
 		if err != nil {
 			return "", false, err
 		}
-		if op == "replay-history" || op == "inspect-workspaces" || op == "bridge-context" {
+		if op == "replay-history" || op == "inspect-workspaces" || op == "bridge-context" || op == "execute-turn" {
 			state, err := replaySnapshot(snapshot)
 			if err != nil {
 				return "", false, err
 			}
-			if op == "bridge-context" {
-				return runContextBridge(ctx, token, actor, snapshot, state)
+			if op == "bridge-context" || op == "execute-turn" {
+				return runContextBridge(ctx, token, actor, snapshot, state, []byte(identity.Account.AccessToken))
 			}
 			if op == "inspect-workspaces" {
 				references, err := threadWorkspaces(state)
@@ -151,6 +157,11 @@ func workerMain() {
 	}
 	dir := w.Check(os.MkdirTemp("", "delta-connector-"))
 	if err != nil {
+		if errors.Is(err, errPublicationUncertain) || w.Exists("/cas/args/op") && w.Read("/cas/args/op") == "execute-turn" {
+			// Retrying this failed job reconciles its retained batch; a
+			// memoized diagnostic value would prevent that reconciliation.
+			w.Must(err)
+		}
 		// A diagnostic's negative result is a value, not a job failure that
 		// would terminate the caller's entire agent turn.
 		report = "Delta connector operation failed: " + err.Error() + "\n"

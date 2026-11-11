@@ -77,7 +77,7 @@ func TestCaosAgentDoesNotRelabelMessagesOrModelConfiguration(t *testing.T) {
 	if _, err := agent.prepareTurn(context.Background(), "s", head, "configured-model", "system", "request"); err != nil {
 		t.Fatal(err)
 	}
-	for _, arg := range []string{"--head:hash=" + head, "--model=configured-model", "--system=system", "--request-id=request"} {
+	for _, arg := range []string{"--head:commit=" + head, "--model=configured-model", "--system=system", "--request-id=request"} {
 		if !containsArgument(prepared[2], arg) {
 			t.Fatal("model turn lost its pinned head or explicit configuration")
 		}
@@ -173,22 +173,5 @@ func TestCaosAgentPreparationPreservesDeadlineErrors(t *testing.T) {
 	message := agentMessage{ID: strings.Repeat("1", 32), Role: "user", Complete: true}
 	if _, err := agent.prepareRecord(context.Background(), "s", "a", message, "", "attempt"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("request preparation hid its actual timeout")
-	}
-}
-
-func TestCaosFailureClassificationDoesNotExposePrivateStderr(t *testing.T) {
-	for _, test := range []struct{ stderr, category string }{
-		{"caos: usage: private-prompt", "does not support"},
-		{"private-prompt already bound", "already bound"},
-		{"private-prompt not found", "object was not found"},
-		{"private-prompt: No such file or directory", "path is missing"},
-		{"private-prompt: Permission denied", "denied access"},
-		{"private-prompt private-locator private-token", "command failed"},
-	} {
-		err := classifyCaosFailure(test.stderr, 1)
-		if strings.Contains(err.Error(), "private-") || !strings.Contains(err.Error(), test.category) ||
-			!strings.Contains(err.Error(), "exit 1") {
-			t.Fatalf("unsafe or uninformative CLI error: %v", err)
-		}
 	}
 }

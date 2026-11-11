@@ -16,6 +16,7 @@ URL = f"https://cdn.delta.dev/delta-web/production/{BUILD}/symbols/{ASSET}"
 HEADER = b"\0asm\1\0\0\0"
 ENCODE = "encode_versioned::<alloc::vec::Vec<u8>>"
 DECODE = "decode_versioned::<&[u8]>"
+BYTES_DECODE = "decode_versioned::<bytes::buf::reader::Reader<bytes::bytes::Bytes>>"
 ARC_ALLOCATOR = "delta_collections::allocator::ArcAllocator"
 TEXT_TYPE = f"deltadb::text::Text<deltadb::delta::DeltaId, {ARC_ALLOCATOR}>"
 SNAPSHOT_TYPE = f"deltadb::history::HistorySnapshot<{ARC_ALLOCATOR}, deltadb::history::WorktreeFile>"
@@ -105,6 +106,12 @@ FUNCTIONS = {
     "map_insert_decode": f"<deltadb::history::MapInsertDelta as versioned::Versioned>::{DECODE}",
     "map_remove_decode": f"<deltadb::history::MapRemoveDelta as versioned::Versioned>::{DECODE}",
     "schema_thread": "<thread::ThreadDataStub as versioned::Versioned>::versioned_schema",
+    "message_decode": f"<thread::message_segment::MessageSegmentStub as versioned::Versioned>::{BYTES_DECODE}",
+    "message_encode": f"<thread::message_segment::MessageSegmentStub as versioned::Versioned>::{ENCODE}",
+    "actor_decode": f"<deltadb::delta::ActorIdStub as versioned::Versioned>::{BYTES_DECODE}",
+    "actor_encode": f"<deltadb::delta::ActorIdStub as versioned::Versioned>::{ENCODE}",
+    "actor_metadata_decode": f"<thread::message_segment::AgentActorMetadataStub as versioned::Versioned>::{BYTES_DECODE}",
+    "actor_metadata_encode": f"<thread::message_segment::AgentActorMetadataStub as versioned::Versioned>::{ENCODE}",
     "schema_batch": (
         "<versioned::schema::SchemaCollector>::register::<"
         "deltadb::history::HistoryDeltaBatch, "

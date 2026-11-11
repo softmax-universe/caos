@@ -8,6 +8,7 @@ const {verifyTextReference} = require('./text_reference.cjs');
 const {verifyValueReference} = require('./value_reference.cjs');
 const {anchorReference} = require('./anchor_reference.cjs');
 const {verifyHistoryWriteReference} = require('./history_write_reference.cjs');
+const {verifyMessageWriteReference} = require('./message_write_reference.cjs');
 
 const directory = process.argv[2];
 const outputs = {};
@@ -52,7 +53,8 @@ async function main() {
       'buffer_decode', 'anchor_decode', 'anchor_resolve', 'anchor_resolve_visible',
       'snapshot_empty', 'snapshot_clone', 'map_insert', 'map_remove', 'map_get',
       'map_values', 'map_winner', 'map_insert_decode', 'map_remove_decode',
-      'schema_thread', 'schema_batch'].sort(),
+      'schema_thread', 'schema_batch', 'message_decode', 'message_encode',
+      'actor_decode', 'actor_encode', 'actor_metadata_decode', 'actor_metadata_encode'].sort(),
   );
   const imports = {};
   const hostCalls = [];
@@ -104,9 +106,13 @@ async function main() {
     const data = Buffer.from(hex, 'hex');
     const input = alloc(data.length);
     bytes().set(data, input);
-    const slice = alloc(8), output = alloc(size), fieldId = alloc(24);
-    u32(slice, input);
-    u32(slice + 4, data.length);
+    const slice = alloc(32), output = alloc(size), fieldId = alloc(24);
+    const bytesReader = ['message_decode', 'actor_decode', 'actor_metadata_decode'].includes(name);
+    // This pinned Bytes layout stores its borrowed pointer/length at 4/8.
+    // These pure codecs copy bytes without invoking its ownership vtable.
+    const pointerOffset = bytesReader ? 4 : 0;
+    u32(slice + pointerOffset, input);
+    u32(slice + pointerOffset + 4, data.length);
     if (fieldPath !== null) {
       assert.ok(fieldPath.length <= 15);
       // Pinned Option<FieldId>: Some flag, then a 16-byte inline FieldId.
@@ -115,7 +121,7 @@ async function main() {
       bytes().set(fieldPath, fieldId + 2);
     }
     e[name](output, slice, fieldId);
-    return {output, remaining: view().getUint32(slice + 4, true)};
+    return {output, remaining: view().getUint32(slice + pointerOffset + 4, true)};
   };
   const readHex = (pointer, length) =>
     Buffer.from(bytes().slice(pointer, pointer + length)).toString('hex');
@@ -351,6 +357,7 @@ async function main() {
   const textCases = verifyTextReference(e, {alloc, bytes, view, u32, u64, encode, decode, check, anchors});
   verifyValueReference(e, {alloc, bytes, view, u64, decode, check});
   verifyHistoryWriteReference(e, {alloc, bytes, u32, copyHex, encode, decode, check});
+  verifyMessageWriteReference(e, {decode, encode, check});
   assert.deepEqual(hostCalls, []);
   console.log(`PASS: ${checks} protocol/text checks; 0 browser/network/storage calls`);
   console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);

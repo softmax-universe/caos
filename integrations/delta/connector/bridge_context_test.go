@@ -69,10 +69,11 @@ func TestContextBridgeIdentityPinsTheNativeHistoryAndTimelineFrontier(t *testing
 	if _, err := contextBridgeSession(snapshot); err == nil {
 		t.Fatal("bridge identity did not require a known native frontier")
 	}
-	// Continuations contain counters and object identities, never thread text
-	// or the native metadata that can hold inference vouchers.
+	// Import continuations contain counters and object identities, never
+	// native metadata that can hold inference vouchers. A final publication
+	// continuation additionally retains the newly generated reply batch.
 	state, err := json.Marshal(contextBridgeState{Session: first, Next: 2, Head: strings.Repeat("a", 40), Exporting: true})
-	if err != nil || strings.Contains(string(state), "Content") || strings.Contains(string(state), "voucher") {
+	if err != nil || strings.Contains(string(state), "voucher") {
 		t.Fatal("bridge continuation retained conversation metadata")
 	}
 }

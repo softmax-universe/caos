@@ -4,10 +4,10 @@ This is a Go implementation of selected Delta protocol operations. It does not
 launch, embed, or download the Delta application. The public reference Wasm is
 used only by the separate [protocol investigation](../protocol/README.md).
 
-**Current state: authentication, registration, conversation replay, and initial
-workspace-tree reconstruction work; agent-turn execution is not implemented yet.**
-The CAOS entry implements bounded checks, not a persistent runner. Do not select
-a diagnostic machine for real work.
+**Current state: authentication, registration, conversation replay, initial
+workspace reconstruction, and bounded one-shot execution are implemented.**
+The one-shot bridge does not implement Personal Runner dispatch or persistent
+service. Do not select a diagnostic machine for real work.
 
 ## Verified against the real service
 
@@ -212,7 +212,7 @@ model/tool loop. `std/run-and-update-ref` can publish immutable task-result refs
 for a caller without a CAOS session record; duplicate callbacks reconcile the
 same result by identity without force-writing a ref.
 
-### Model authorization preflight and current external blocker
+### Model authorization preflight
 
 Delta connection credentials are not themselves model credentials. The native
 operator can check the connector's own model authorization without inference:
@@ -232,16 +232,47 @@ On 2026-11-11 the approved connector's account lookup returned HTTP 200, but its
 default organization's model-token request returned HTTP 402:
 “Organization does not have an active subscription.” The approved fixture's
 one existing user message contains no nonempty delegated inference voucher.
-Consequently, no real model response or visible CAOS-generated Delta reply has
-been demonstrated. Fixing the external account entitlement or supplying an
-explicitly authorized alternative inference credential is necessary before
-that path can run; this work does neither.
+This does not block use of CAOS's separately approved existing
+`anthropic.inference` credential workflow. Its key belongs only in the private
+CAOS secret store under the normal exact-revision `std/llm-step` grant, never in
+an ArgTree or native history. The execution model must be selected explicitly.
+The preflight reports only Delta model-token authorization, not end-to-end
+readiness. The existing driver uses Anthropic transport, not Delta's model API.
 
-This is not a claim that enabling billing completes the integration. **Unfixed
-bugs:** the live context bridge still fails during CAOS request preparation,
-and the existing driver only implements Anthropic transport, not Delta's model
-API. Turn admission and visible reply writes are also not connected yet. The
-preflight reports only model-token authorization, not end-to-end readiness.
+### Isolated one-shot prompt execution
+
+This operator-driven path is deliberately restricted to an approved disposable
+fixture with **one writer at a time**. The operator must exclude native agents
+and other connector writers for the entire submission, execution, and readback.
+Frontier checks detect changes but are not an atomic server-side compare-and-swap.
+
+1. `connector submit-prompt --identity-file=<private sealed identity>
+   --thread-id=<allowlisted fixture> --text-file=<private prompt>
+   --plan-file=<new private plan>` appends a real native user message. The exact
+   batch is retained before send; retry with the same plan to reconcile it.
+2. Run `integrations/delta` with `op=execute-turn`, that `thread-id`, an explicit
+   Anthropic `model`, and a fresh RFC3339 timestamp as `request-id`. The connector
+   imports separate native messages, verifies the pinned workspace, then runs
+   the existing `std/llm-step` model/tool loop. It does not delegate execution to
+   an existing Delta agent.
+3. The bridge exports the driver's actual final model context and publishes its
+   final assistant text, completion marker, model identity and user-submission
+   link. Native tool-segment translation remains unimplemented: the full tool
+   trace stays in the normal CAOS session. The public result contains counts,
+   not thread text.
+4. Fresh native replay must show the exact reply in the selected timeline and
+   preserve every earlier projected message. A stored but off-timeline batch is
+   not success. Publication retries retain the same batch identity and contents.
+
+Continuations are HMAC-authenticated with the sealed connector identity and bound
+to actor, thread, operation, model, and request. Each callback result is checked
+against its retained task's immutable CAOS result before being consumed.
+
+This checkpoint asks the model to inspect files without edits or delegation and
+rejects net workspace changes before reply publication. That instruction is not
+a capability sandbox: the ordinary driver remains tool-capable, and the final
+tree comparison does not detect reverted edits or external effects. Use only the
+approved, trusted fixture prompt. No ongoing dispatch/lease guarantee is implied.
 
 **Unfixed protocol-support gaps:** structured native tool/thinking history,
 attachments, inherited parent context, and multiple or incrementally edited

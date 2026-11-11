@@ -9,16 +9,23 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"caos/w"
 )
 
 type contextBridgeState struct {
-	Session   string
-	Next      int
-	Head      string
-	Exporting bool
+	Session     string
+	Next        int
+	Head        string
+	Exporting   bool
+	Inferred    bool
+	Content     string
+	Task        agentTask
+	Publication *historyDeltaBatch
+	ReplyBytes  int
+	ToolCalls   int
 }
 
 func contextBridgeSession(snapshot historySnapshot) (string, error) {
@@ -72,10 +79,37 @@ func verifyExportedContext(data []byte, expected []agentMessage) error {
 	return nil
 }
 
-// Bridge the approved native context through normal staged CAOS jobs. There is
-// no inference here and no worker waits for another worker. Every callback
-// rechecks the authorized native frontier before continuing its import.
-func runContextBridge(ctx context.Context, token string, actor uuid, snapshot historySnapshot, state *replayState) (string, bool, error) {
+// Bridge approved native context through normal staged CAOS jobs. Only
+// execute-turn requests inference/publication. No worker waits for another
+// worker; every callback rechecks the authorized native frontier.
+func runContextBridge(ctx context.Context, token string, actor uuid, snapshot historySnapshot, state *replayState, signingKey []byte) (string, bool, error) {
+	execute := w.Read("/cas/args/op") == "execute-turn"
+	bindingValues := []string{actor.String(), w.Read("/cas/args/thread-id"), w.Read("/cas/args/op"), w.Read("/cas/args/request-id")}
+	if w.Exists("/cas/args/model") {
+		bindingValues = append(bindingValues, w.Read("/cas/args/model"))
+	}
+	bindingData, err := json.Marshal(bindingValues)
+	if err != nil {
+		return "", false, err
+	}
+	binding := string(bindingData)
+	var retained contextBridgeState
+	if w.Exists("/cas/args/bridge-state") {
+		retained, err = verifyBridgeState([]byte(w.Read("/cas/args/bridge-state")), signingKey, binding)
+		if err != nil {
+			return "", false, err
+		}
+		if retained.Publication != nil {
+			if !execute {
+				return "", false, errors.New("reply publication requires an execution continuation")
+			}
+			thread := threadID{History: snapshot.History, Timeline: snapshot.Timeline}
+			if err := publishNativeBatch(ctx, token, actor, thread, retained.Session, *retained.Publication); err != nil {
+				return "", false, err
+			}
+			return fmt.Sprintf("Executed the native Delta prompt through CAOS's existing agent driver and verified its reply in the same thread: %d reply bytes, %d tool calls. Model: %s.\n", retained.ReplyBytes, retained.ToolCalls, w.Read("/cas/args/model")), false, nil
+		}
+	}
 	messages, err := projectConversation(state)
 	if err != nil {
 		return "", false, err
@@ -88,19 +122,30 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 			return "", false, errors.New("incomplete or empty assistant context import is not implemented")
 		}
 	}
+	if execute && (messages[len(messages)-1].Role != "user" || !w.Exists("/cas/args/model") || strings.TrimSpace(w.Read("/cas/args/model")) == "") {
+		return "", false, errors.New("execution requires a final native user prompt and an explicitly selected model")
+	}
 	session, err := contextBridgeSession(snapshot)
 	if err != nil {
 		return "", false, err
 	}
 	progress := contextBridgeState{Session: session}
+	agent, err := newCaosAgent(w.Hash("/cas/args/agent-image"), w.Hash("/cas/args/result-publisher"))
+	if err != nil {
+		return "", false, err
+	}
 	if w.Exists("/cas/args/bridge-state") {
-		if json.Unmarshal([]byte(w.Read("/cas/args/bridge-state")), &progress) != nil ||
-			progress.Session != session || progress.Next < 1 || progress.Next > len(messages) {
+		progress = retained
+		if progress.Session != session || progress.Next < 1 || progress.Next > len(messages) {
 			return "", false, errors.New("native context changed or the bridge continuation is invalid")
 		}
 		const result = "/cas/args/result"
 		if !w.Exists(result) {
 			return "", false, errors.New("bridge continuation has no agent result")
+		}
+		expected, done, err := agent.poll(ctx, progress.Task)
+		if err != nil || !done || w.Hash(result) != expected {
+			return "", false, errors.New("callback result does not match its retained CAOS task")
 		}
 		w.Get(result)
 		if !w.Exists(result + "/session") {
@@ -114,16 +159,36 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 			if head != progress.Head {
 				return "", false, errors.New("CAOS context export changed its pinned head")
 			}
-			if err := verifyExportedContext([]byte(w.Read(result+"/messages.json")), messages); err != nil {
+			data := []byte(w.Read(result + "/messages.json"))
+			if execute {
+				reply, calls, err := executedReply(data, messages)
+				if err != nil {
+					return "", false, err
+				}
+				// The request's timestamp is immutable across callback retries.
+				// Never allocate different bytes for the same native batch ID.
+				clock, err := time.Parse(time.RFC3339Nano, w.Read("/cas/args/request-id"))
+				if err != nil || clock.UnixMilli() < 0 {
+					return "", false, errors.New("execute-turn requires an RFC3339 request-id timestamp")
+				}
+				batch, err := appendMessageBatch(snapshot, state, actor, "assistant", reply, w.Read("/cas/args/model"), uint64(clock.UnixMilli()))
+				if err != nil {
+					return "", false, err
+				}
+				progress.Publication, progress.ReplyBytes, progress.ToolCalls = &batch, len(reply), calls
+				// The memoized export is a barrier that retains the exact reply
+				// batch in an immutable callback before its first send.
+				return deferContextBridge(progress.Task, progress, signingKey, binding)
+			}
+			if err := verifyExportedContext(data, messages); err != nil {
 				return "", false, err
 			}
 			return fmt.Sprintf("Imported and verified %d native Delta messages using CAOS's normal agent context renderer.\nNo inference was requested and no Delta turn was accepted or executed.\n", len(messages)), false, nil
 		}
 		progress.Head = head
-	}
-	agent, err := newCaosAgent(w.Hash("/cas/args/agent-image"), w.Hash("/cas/args/result-publisher"))
-	if err != nil {
-		return "", false, err
+		if progress.Inferred && progress.Content != bridgeContent(head) {
+			return "", false, errors.New("agent changed workspace files; native file publication is not implemented")
+		}
 	}
 	var task agentTask
 	if progress.Next < len(messages) {
@@ -138,6 +203,11 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 		w.Step("prepare native message in the CAOS session")
 		task, err = agent.prepareRecord(ctx, session, actor.String(), messages[progress.Next], locator, w.Read("/cas/args/request-id"))
 		progress.Next++
+	} else if execute && !progress.Inferred {
+		progress.Content = bridgeContent(progress.Head)
+		task, err = agent.prepareTurn(ctx, session, progress.Head, w.Read("/cas/args/model"),
+			"You are the CAOS agent answering the latest user prompt from an authorized Delta thread. Use the existing file and tool capabilities to inspect its mounted source tree. Do not delegate to other agents. This bounded run is read-only: do not edit files or run external side effects. Answer the prompt with evidence from the actual files, not a canned response.", w.Read("/cas/args/request-id"))
+		progress.Inferred = true
 	} else {
 		w.Step("export the pinned CAOS model context")
 		task, err = agent.prepareContext(ctx, session, progress.Head, w.Read("/cas/args/request-id"))
@@ -146,7 +216,7 @@ func runContextBridge(ctx context.Context, token string, actor uuid, snapshot hi
 	if err != nil {
 		return "", false, err
 	}
-	return deferContextBridge(task, progress)
+	return deferContextBridge(task, progress, signingKey, binding)
 }
 
 func bridgeWorkspaceContent(ctx context.Context, token string, actor uuid, state *replayState) (string, error) {
@@ -175,8 +245,9 @@ func bridgeWorkspaceContent(ctx context.Context, token string, actor uuid, state
 	return "git+caos://local?rev=" + head, nil
 }
 
-func deferContextBridge(task agentTask, progress contextBridgeState) (string, bool, error) {
-	data, err := json.Marshal(progress)
+func deferContextBridge(task agentTask, progress contextBridgeState, signingKey []byte, binding string) (string, bool, error) {
+	progress.Task = task
+	data, err := signBridgeState(progress, signingKey, binding)
 	if err != nil {
 		return "", false, errors.New("could not encode bridge continuation")
 	}

@@ -66,6 +66,9 @@ func run(ctx context.Context, args []string) error {
 	thread := flags.String("thread-id", "", "Delta thread ID to read")
 	outputFile := flags.String("output-file", "", "new private capture or replay report file")
 	snapshotFile := flags.String("snapshot-file", "", "private history snapshot to replay without network access")
+	identityFile := flags.String("identity-file", "", "private sealed connector identity and thread allowlist")
+	textFile := flags.String("text-file", "", "private UTF-8 prompt file")
+	planFile := flags.String("plan-file", "", "private retained prompt publication plan, reused for retries")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -77,6 +80,15 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	switch args[0] {
+	case "submit-prompt":
+		var identity runnerIdentity
+		if err := readPrivateJSON(*identityFile, &identity); err != nil {
+			return err
+		}
+		if err := submitPrompt(ctx, identity, *thread, *textFile, *planFile); err != nil {
+			return err
+		}
+		fmt.Println("Prompt accepted and verified in the allowlisted Delta thread. No inference was requested.")
 	case "replay-history":
 		if *snapshotFile == "" || *outputFile == "" {
 			return errors.New("--snapshot-file and --output-file are required")

@@ -42,6 +42,16 @@
 //! same reason: where workers share the stack's netns it is loopback, and where
 //! they get their own netns on a bridge it has to be a name that resolves
 //! there. `stack/serve` supplies whichever the placement needs.
+//!
+//! PERSISTENT VOLUMES ARE A POOL, NOT A DEFAULT. Named volumes are this host's
+//! storage — the shared nix store above all — so a runnerd grants them only
+//! when it is the nix-store pool: started with
+//! `CAOS_RUNNER_REQUIRE=required-nix-store=true`. A job says it needs them by
+//! carrying the same arg (`--required-nix-store=true`, caos_world
+//! `REQUIRED_NIX_STORE_ARG`), and because the arg is `required*` the server
+//! never offers such a job to any other runner. So a plain runnerd — the generic
+//! pool, on this machine or any other — mounts no volumes into anything, and is
+//! safe to run anywhere; the jobs that need the store run where the store is.
 
 use std::collections::HashMap;
 use std::process::Command;

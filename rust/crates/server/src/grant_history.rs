@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use git_locator::GitRef;
 
-use crate::Config;
+use crate::{Config, HttpError};
 
 /// How many commits a reader with no `since=` covers. Each is evaluated when
 /// the secret is pushed, so this is what a push costs; a session pinned to an

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -54,29 +55,61 @@ func encodeWire(value any) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-func encodeRequest(id uint32, tag uint64, payload any) ([]byte, error) {
-	return encodeWire([]any{id, []any{tag, payload}})
+type clientRequest struct {
+	tag     uint64
+	payload any
 }
 
-func encodeMachineRunner(id uint32, name *string) ([]byte, error) {
+func (request clientRequest) encode(id uint32) ([]byte, error) {
+	if request.tag > math.MaxUint8 {
+		return nil, errors.New("protocol request tag exceeds one byte")
+	}
+	return encodeWire([]any{id, []any{request.tag, request.payload}})
+}
+
+func machineRunnerRequest(name *string) clientRequest {
 	option := []any{}
 	if name != nil {
 		option = append(option, *name)
 	}
-	return encodeRequest(id, 51, []any{option})
+	return clientRequest{51, []any{option}}
 }
 
-func encodeHeartbeat(id uint32) ([]byte, error) {
-	return encodeRequest(id, 33, []any{})
+func heartbeatRequest() clientRequest {
+	return clientRequest{33, []any{}}
 }
 
-func encodeTurnAcknowledgment(id uint32, request uuid) ([]byte, error) {
-	return encodeRequest(id, 53, []any{request[:], []any{}})
+func turnAcknowledgmentRequest(request uuid) clientRequest {
+	return clientRequest{53, []any{request[:], []any{}}}
 }
 
 type wireVariant struct {
 	Tag     uint64
 	Payload msgpack.RawMessage
+}
+
+func decodeUnsigned(decoder *msgpack.Decoder, maximum uint64) (uint64, error) {
+	code, err := decoder.PeekCode()
+	if err != nil {
+		return 0, err
+	}
+	var value uint64
+	if code >= 0xd0 && code <= 0xd3 {
+		var signed int64
+		signed, err = decoder.DecodeInt64()
+		if signed < 0 {
+			return 0, errors.New("negative protocol integer")
+		}
+		value = uint64(signed)
+	} else if code <= 0x7f || (code >= 0xcc && code <= 0xcf) {
+		value, err = decoder.DecodeUint64()
+	} else {
+		return 0, errors.New("expected an unsigned protocol integer")
+	}
+	if err != nil || value > maximum {
+		return 0, errors.New("protocol integer out of range")
+	}
+	return value, nil
 }
 
 func decodeVariant(data []byte) (wireVariant, error) {
@@ -86,8 +119,8 @@ func decodeVariant(data []byte) (wireVariant, error) {
 	if err != nil {
 		return result, errors.New("empty protocol message")
 	}
-	if code <= 0x7f || code == 0xcc || code == 0xcd || code == 0xce || code == 0xcf {
-		result.Tag, err = decoder.DecodeUint64()
+	if code <= 0x7f || (code >= 0xcc && code <= 0xd3) {
+		result.Tag, err = decodeUnsigned(decoder, math.MaxUint8)
 	} else {
 		var length int
 		length, err = decoder.DecodeArrayLen()
@@ -95,7 +128,7 @@ func decodeVariant(data []byte) (wireVariant, error) {
 			err = errors.New("protocol variant must have two elements")
 		}
 		if err == nil {
-			result.Tag, err = decoder.DecodeUint64()
+			result.Tag, err = decodeUnsigned(decoder, math.MaxUint8)
 		}
 		if err == nil {
 			result.Payload, err = decoder.DecodeRaw()
@@ -131,6 +164,22 @@ func decodeFields(data []byte, minimum, maximum int) ([]msgpack.RawMessage, erro
 		return nil, errors.New("trailing protocol fields")
 	}
 	return fields, nil
+}
+
+func decodeResponse(message wireVariant) (uint32, wireVariant, error) {
+	if message.Tag != 5 {
+		return 0, wireVariant{}, errors.New("message is not a protocol response")
+	}
+	fields, err := decodeFields(message.Payload, 2, 2)
+	if err != nil {
+		return 0, wireVariant{}, err
+	}
+	id, err := decodeUnsigned(msgpack.NewDecoder(bytes.NewReader(fields[0])), math.MaxUint32)
+	if err != nil {
+		return 0, wireVariant{}, errors.New("invalid response request id")
+	}
+	body, err := decodeVariant(fields[1])
+	return uint32(id), body, err
 }
 
 func decodeUUID(data []byte) (uuid, error) {

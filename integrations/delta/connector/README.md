@@ -98,8 +98,12 @@ Delta credential store, or Docker-engine grant.
 
 ## Remaining implementation
 
-The connector still needs a persistent receive loop, reconnect/lease handling,
-turn admission and ownership checks, history/workspace synchronization, and a
+The connection reader now preserves notifications in order while correlating
+concurrent RPCs. A canceled or disconnected request is treated as an uncertain
+server outcome, not proof that its effects were canceled.
+
+The connector still needs a long-lived worker runtime, reconnect/lease handling,
+turn admission and ownership checks, history/workspace synchronization, and the
 bridge to CAOS's existing agent execution. A completed implementation must
 demonstrate a real phone-initiated turn, including its reply and workspace
 changes, with the laptop disconnected. The current probe does not establish

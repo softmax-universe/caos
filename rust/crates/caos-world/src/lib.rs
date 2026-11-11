@@ -100,18 +100,26 @@ pub const REQUIRED_POOL_ARG: &str = "required-pool";
 /// attribute. An exclusion cannot race; a preference can.
 pub const SEEDED_POOL: &str = "seeded";
 
-/// The arg a job carries when it needs the HOST'S persistent storage: the
-/// shared nix store and the other named volumes an image declares in
-/// `CAOS_GRANT_VOLUMES` (`/mounted-nix`, `/caos-dev`, `/caos-images` for
-/// dev/devbox). Bound as `--required-caosd=true`.
+/// The arg a job carries when it must run ON THE CENTRAL SERVER (the caosd
+/// host): it needs something that only exists there. Bound as
+/// `--required-caosd=true`. Today that is two workers:
+///
+/// - dev/test-stack, the devbox daemon, which needs the host's persistent
+///   volumes (`CAOS_GRANT_VOLUMES`: the shared nix store, the dev stacks' git
+///   repo, their podman store) and reaches the host's redis and registry by name;
+/// - every flake-builder build, which pushes to the registry as
+///   `caos-registry:5000`. std/flake-builder curries the arg onto its image, so
+///   a `run --base:@=DEEP-DEPS/flake-builder` carries it without saying so. The
+///   IMAGE such a build produces runs anywhere.
 ///
 /// It is a `required*` arg on purpose, so the rendezvous does the routing: the
 /// generic pool advertises no entry of this name and so never takes such a job,
 /// and only a runnerd started with `CAOS_RUNNER_REQUIRE=required-caosd=true`
-/// — the main server's nix pool — can. That runnerd is also the ONLY one that
-/// grants volumes at all, so a runner on any other machine mounts nothing of the
-/// host's into anything, whatever an image asks for. Being `required*`, it is
-/// also inherited by a job's continuations (server `inherited_pool_entries`).
+/// — the caosd pool, which `stack/serve` runs beside the generic one — can.
+/// That runnerd is also the ONLY one that grants volumes at all, so a runner on
+/// any other machine mounts nothing of the host's into anything, whatever an
+/// image asks for. Being `required*`, it is also inherited by a job's
+/// continuations (server `inherited_pool_entries`).
 pub const REQUIRED_CAOSD_ARG: &str = "required-caosd";
 
 /// The value [`REQUIRED_CAOSD_ARG`] is bound to. One spelling, because the

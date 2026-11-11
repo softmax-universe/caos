@@ -348,13 +348,20 @@ start_runnerd() { # <log-name> <slots> <require>
 }
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
-  start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
+  # CAOS_RUNNER_SLOTS is this host's TOTAL, shared by the two runnerds, so
+  # starting the caosd runner does not raise how many containers the host runs
+  # at once. Half each by default; the plain runnerd gets whatever the caosd
+  # runner does not, and never fewer than one.
+  total_slots=${CAOS_RUNNER_SLOTS:-8}
+  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-$((total_slots / 2))}
+  plain_slots=$((total_slots - caosd_slots))
+  if [ "$plain_slots" -lt 1 ]; then plain_slots=1; fi
+  start_runnerd runnerd "$plain_slots" ""
   # The caosd runner: it runs the jobs that must run on this host
   # (`--required-caosd=true`: dev/test-stack, every flake-builder build) and
   # only those. Without it they match no runner and fail at their pending
   # deadline, which is the intended failure — so it starts by default wherever
   # runnerd does.
-  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-${CAOS_RUNNER_SLOTS:-8}}
   if [ "$caosd_slots" -gt 0 ]; then
     start_runnerd runnerd-caosd "$caosd_slots" "required-caosd=true"
   fi

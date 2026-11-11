@@ -85,15 +85,16 @@
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
 #   CAOS_RUNNER_SLOTS         the general pool's concurrency
-#   CAOS_STACK_CAOSD_SLOTS  the caosd pool's concurrency (default:
+#   CAOS_STACK_CAOSD_SLOTS    the caosd pool's concurrency (default:
 #                             CAOS_RUNNER_SLOTS; 0 runs no such pool). It is a
 #                             second runnerd, started only when RUNNERD=yes,
-#                             requiring `required-caosd=true`: it alone
-#                             serves jobs that carry that arg and it alone
-#                             grants persistent volumes (the shared nix store
-#                             above all). The general pool grants none, which
-#                             is what makes it safe to run runnerds on OTHER
-#                             machines — they are general pools too.
+#                             requiring `required-caosd=true`: it alone serves
+#                             the jobs that must run on this host (they carry
+#                             that arg: dev/test-stack, every flake-builder
+#                             build) and it alone grants persistent volumes.
+#                             The general pool grants none, which is what makes
+#                             it safe to run runnerds on OTHER machines — they
+#                             are general pools too.
 #   CAOS_PENDING_TIMEOUT_SECS how long a job waits for a runner to exist
 #   CAOS_STACK_IROH           "yes" to answer `caos://` clients as well
 #                             (design/iroh-transport.md): an iroh endpoint that

@@ -181,7 +181,18 @@ namespace=${namespace%%-*}
 # binary and where its store lives. The store is a granted volume so images
 # survive the container; otherwise every run would re-pull std.
 engine_store=/caos-images
-mkdir -p "$engine_store/store" "$engine_store/run"
+#
+# CONTAINER STATE IS THIS STACK'S OWN, AND IN MEMORY. A container's metadata
+# (podman's sqlite db, containers.json, the container layers' records) is
+# written and fsynced on every create, start and remove — ~55 fsyncs per job,
+# measured — and on the store's btrfs those fsyncs took up to 20s under a
+# suite's load, while podman held the store lock that every other container
+# start waits on: a trivial `podman run` went from 0.1s idle to a 0.7s median
+# and 4s p90. `--transient-store` keeps all of it under runroot instead, and a
+# runroot on tmpfs makes those fsyncs free. Images stay in the shared store; a
+# worker container never outlives this stack, so nothing is lost with it.
+engine_run=/dev/shm/caos-engine-run
+mkdir -p "$engine_store/store" "$engine_run"
 command -v podman >/dev/null 2>&1 || fail "no podman in this image"
 [ -e /dev/fuse ] || fail "no /dev/fuse — the image must declare CAOS_GRANT_DEVICES"
 
@@ -242,7 +253,7 @@ CAOS_CACHE_NAMESPACE="$namespace" \
 CAOS_RUNNER_SLOTS="${CAOS_RUNNER_SLOTS:-48}" \
 CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
 CAOS_DOCKER_BIN=podman \
-CAOS_DOCKER_ARGS="--root $engine_store/store --runroot $engine_store/run" \
+CAOS_DOCKER_ARGS="--root $engine_store/store --runroot $engine_run --transient-store" \
 CAOS_DOCKER_NETWORK=host \
 CAOS_STACK_RUNNER_SERVER_URL=http://127.0.0.1 \
 CAOS_REGISTRY_PULL_HOST="${CAOS_DEV_REGISTRY:-caos-registry:5000}" \

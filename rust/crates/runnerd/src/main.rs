@@ -807,3 +807,23 @@ fn post_failure(config: &Config, job: &Job, error: &str, log: &str) -> Result<()
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{grants_volumes, required_args};
+
+    #[test]
+    fn only_the_nix_store_pool_grants_volumes() {
+        // The generic pool, here or on any other machine.
+        assert!(!grants_volumes(&required_args("")));
+        // Another pool entirely.
+        assert!(!grants_volumes(&required_args("required-pool=seeded")));
+        // The right name with the wrong value is a pool nobody's jobs name.
+        assert!(!grants_volumes(&required_args("required-nix-store=yes")));
+        // The nix-store pool, alone or alongside another requirement.
+        assert!(grants_volumes(&required_args("required-nix-store=true")));
+        assert!(grants_volumes(&required_args(
+            "required-pool=x,required-nix-store=true"
+        )));
+    }
+}

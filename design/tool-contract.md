@@ -365,9 +365,9 @@ change what they describe.
 - Whether the server accepts `/git/push` and `/git/import` from a worker, and
   under which credentials. To check before step 5.
 - That a `reader:@@=` grant to `std/github` still matches when only other
-  directories of a caos copy changed. SPEC says a copy carries the origins of
-  what it was copied from; to confirm with an edited `stack-publish` in a
-  conversation.
+  directories of a caos copy changed. It should: the grant is a test on the
+  tool's tree (design/secrets.md), which other directories are not part of.
+  To confirm with an edited `stack-publish` in a conversation.
 - The batch format: how operations and results are spelled, and whether a
   batch may continue past a failure.
 - Whether `caos-std/github`'s agent-facing parameters (`method`, `path`,

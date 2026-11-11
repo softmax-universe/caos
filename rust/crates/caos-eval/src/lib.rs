@@ -1266,15 +1266,12 @@ mod origin_tests {
         fn dispatch(&self, _: &str, _: Vec<Entry>) -> Result<(String, String), String> {
             Err("no runs here".into())
         }
-        fn origins_of(&self, oid: &str) -> Vec<Origin> {
-            self.known.get(oid).cloned().unwrap_or_default()
-        }
         fn evaluated(
             &self,
-            origins: &[Origin],
+            node: &str,
             value: (String, String),
         ) -> Result<(String, String), String> {
-            self.seen.borrow_mut().push(origins.to_vec());
+            self.seen.borrow_mut().push(node.to_string());
             Ok(value)
         }
     }

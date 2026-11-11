@@ -92,7 +92,8 @@ impl Context {
     /// on the build of caos that built it and on what its own dependencies
     /// were granted. An image written by hand is honored all the same.
     fn grants(&self, config: &Config, secret: &Stored, node: &str, value: &str) -> bool {
-        if secret.trees.iter().any(|tree| tree == node || tree == value) {
+        let mut trees = secret.trees.iter();
+        if trees.any(|tree| tree == node || tree == value) {
             return true;
         }
         let Some(head) = self.head.as_deref() else {

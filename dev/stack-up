@@ -216,6 +216,11 @@ exec 8>"$state/.users.lock"
 if flock -xn 8; then
   phase "exploding packs in $state/git: no other stack is using it"
   bash ./stack/explode-packs "$state/git" || fail "exploding packs in $state/git"
+  # The same proof lets the refs earlier runs left go too (stack/prune-dev-refs
+  # says why that is most of a push's cost). A failure only costs speed.
+  bash ./stack/prune-dev-refs "$state/git" --alone || echo "stack-up: pruning refs failed" >&2
+else
+  bash ./stack/prune-dev-refs "$state/git" || echo "stack-up: pruning refs failed" >&2
 fi
 flock -s 8
 

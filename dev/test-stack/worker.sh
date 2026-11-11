@@ -264,6 +264,24 @@ op_start() {
   reply /tmp/reply
 }
 
+# Each test's time from a report's `  ✓ name  12s  hash` lines, merged into
+# $DURATIONS over what was there, and written whole by rename so a concurrent
+# reader sees one version or the other.
+DURATIONS=/caos-dev/test-durations
+record_durations() { # <report>
+  local mark name secs
+  declare -A seen=()
+  if [ -s "$DURATIONS" ]; then
+    while read -r secs name; do seen[$name]=$secs; done < "$DURATIONS"
+  fi
+  while read -r mark name secs _; do
+    case "$mark" in "✓"|"✗") ;; *) continue ;; esac
+    case "$secs" in *s) seen[$name]=${secs%s} ;; esac
+  done < "$1"
+  for name in "${!seen[@]}"; do printf '%s %s\n' "${seen[$name]}" "$name"; done \
+    > "$DURATIONS.$$" && mv -f "$DURATIONS.$$" "$DURATIONS"
+}
+
 op_run_tests() {
   ensure_stack
   cd "$WS"
@@ -282,6 +300,13 @@ op_run_tests() {
   # HOW MANY TESTS RUN AT ONCE, passed to the suite's `map-then`, which is the
   # only place that can bound it.
   if have max-parallel; then args+=("--max-parallel=$(arg max-parallel)"); fi
+  # The tests slowest first, from what earlier runs on this host recorded, so
+  # the suite can start the long ones first (dev/run-tests, "LONGEST FIRST").
+  # A hint shared by every stack on the host: a missing or stale file changes
+  # only the order tests start in, never what runs.
+  if [ -s "$DURATIONS" ]; then
+    args+=("--order=$(sort -rn "$DURATIONS" | while read -r _ name; do printf '%s ' "$name"; done)")
+  fi
 
   # THE TREE THE SUITE RUNS IS A COMMIT THE DEV STACK HOLDS, so a secret can be
   # granted to a path in it by locator (SPEC, "Secrets"). Committed at a fixed
@@ -374,6 +399,8 @@ op_run_tests() {
       echo "this stack's logs, on the host: /caos-dev/runs/$(cat /etc/hostname)/logs"
     fi
   } >> /tmp/suite/report
+
+  record_durations /tmp/suite/report || echo "==> could not record test durations" >&2
 
   # THE WHOLE RESULT TREE, not just the report. A tree with a `report` file has
   # the report printed, and a FAILED banner in it marks the call a failure, while

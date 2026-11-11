@@ -42,7 +42,7 @@ if caos get /cas/args/stage 2>/dev/null; then stage=$(cat /cas/args/stage); fi
 # name. One function so a new one is added in one place rather than three, which
 # is how the old version of this lost `--only` for a while.
 forwarded() {
-  for a in only test-salt max-parallel; do
+  for a in only test-salt max-parallel order; do
     if [ -e "/cas/args/$a" ]; then printf '%s ' "--$a:@=/cas/args/$a"; fi
   done
 }
@@ -132,6 +132,19 @@ fanout)
     only=" $(cat /cas/args/only) "
   fi
 
+  # LONGEST FIRST. map-then dispatches its children in name order, so each one
+  # is named `<rank>~<test>`, ranked by `--order` (the test names, slowest
+  # first, from the last runs dev/test-stack saw). A test that has no time yet
+  # ranks 0 and goes first: it may be the slowest. Dispatched alphabetically,
+  # the long tests near the end of the alphabet started last and made the
+  # tail; the name is not part of a child's key, so ranking costs no cache hit.
+  declare -A rank=()
+  if [ -e /cas/args/order ]; then
+    caos get /cas/args/order
+    i=0
+    for n in $(cat /cas/args/order); do i=$((i + 1)); rank[$n]=$i; done
+  fi
+
   mkdir /tmp/sel
   for d in /cas/args/ws/tests/*/; do
     t=$(basename "$d")
@@ -163,7 +176,7 @@ fanout)
     # passed when dev/run-test calls the test's ArgTree, and the last two turned
     # out to be things the tests could DECLARE (`../../rust`, `../../std`) or
     # read from `/secret`. A test is self-contained, so its tree is the child.
-    ln -s "/cas/args/result/tests/$t" "/tmp/sel/$t"
+    ln -s "/cas/args/result/tests/$t" "/tmp/sel/$(printf '%04d' "${rank[$t]:-0}")~$t"
   done
   # AN EMPTY SELECTION IS A USER ERROR, said here. `--only` is SPACE-separated
   # (the match above is `*" $t "*`), so the comma form everyone reaches for first
@@ -215,13 +228,15 @@ summarize)
   mkdir -p /tmp/rep
   passn=0 failn=0
   {
-    names=() marks=() times=() hashes=() excerpts=()
+    names=() children=() marks=() times=() hashes=() excerpts=()
     width=0
-    for c in /cas/args/children/*; do
-      t=$(basename "$c")
-      caos get "/cas/args/children/$t"
-      caos get "/cas/args/children/$t/verdict"
-      caos get "/cas/args/children/$t/seconds"
+    # Each child is `<rank>~<test>` (the fan-out's dispatch order); the report
+    # and `results` are by test name, alphabetically, as they always were.
+    while IFS=$'\t' read -r t child; do
+      c=/cas/args/children/$child
+      caos get "$c"
+      caos get "$c/verdict"
+      caos get "$c/seconds"
       s=$(cat "$c/seconds")
       excerpt=""
       if grep -q "^RUN-TEST: PASS" "$c/verdict"; then
@@ -232,13 +247,16 @@ summarize)
         # THE LAST LINES, NOT THE FIRST: a test narrates its way down and
           # ends at `fail`, so the tail is the assertion that broke with its stage
         # heading right above it.
-        caos get "/cas/args/children/$t/output"
+        caos get "$c/output"
         excerpt=$(tail -n "$EXCERPT_LINES" "$c/output")
       fi
-      names+=("$t"); marks+=("$mark"); times+=("$s"); excerpts+=("$excerpt")
-      hashes+=("$(caos hash "/cas/args/children/$t")")
+      names+=("$t"); children+=("$child"); marks+=("$mark"); times+=("$s"); excerpts+=("$excerpt")
+      hashes+=("$(caos hash "$c")")
       if [ ${#t} -gt "$width" ]; then width=${#t}; fi
-    done
+    done < <(for c in /cas/args/children/*; do
+      n=$(basename "$c")
+      printf '%s\t%s\n' "${n#*~}" "$n"
+    done | sort)
 
     echo "tests ($(($(date +%s) - start_time))s)"
     # A mark rather than a word, and no color: this report is a VALUE in a git
@@ -270,7 +288,10 @@ summarize)
       while IFS= read -r line; do printf '  %s\n' "$line"; done <<< "${excerpts[$i]}"
     done
   } > /tmp/rep/report
-  ln -s /cas/args/children /tmp/rep/results
+  mkdir /tmp/rep/results
+  for i in "${!names[@]}"; do
+    ln -s "/cas/args/children/${children[$i]}" "/tmp/rep/results/${names[$i]}"
+  done
   caos put /tmp/rep /cas/out
   ;;
 

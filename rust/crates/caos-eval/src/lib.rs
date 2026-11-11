@@ -216,43 +216,6 @@ pub trait EvalHost {
 /// the tree it walks (the server gives its own evaluating threads the same).
 const ARG_EVAL_STACK_BYTES: usize = 64 * 1024 * 1024;
 
-/// Where a node sits: a root tree and its path there (SPEC, "Secrets").
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Origin {
-    pub root: String,
-    pub path: String,
-}
-
-impl Origin {
-    fn child(&self, name: &str) -> Origin {
-        Origin {
-            root: self.root.clone(),
-            path: if self.path.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}/{name}", self.path)
-            },
-        }
-    }
-}
-
-/// A node's origins: the ones its parent's imply, plus any the host knows.
-fn with_known(host: &dyn EvalHost, mut origins: Vec<Origin>, oid: &str) -> Vec<Origin> {
-    let known = host.origins_of(oid);
-    if known.is_empty() {
-        return origins;
-    }
-    // A set, not `contains` per entry: a shared subtree accumulates tens of
-    // thousands of origins, and the scan was quadratic in them, once per node.
-    let mut seen: HashSet<Origin> = origins.iter().cloned().collect();
-    for origin in known {
-        if seen.insert(origin.clone()) {
-            origins.push(origin);
-        }
-    }
-    origins
-}
-
 /// Which question a memoized answer answers. The two are *different* questions
 /// and both pay, which is why the walk asks at both granularities:
 ///

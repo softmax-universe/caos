@@ -95,6 +95,9 @@ impl Spec {
             out.push_str(&reader.render());
             out.push('\n');
         }
+        for tree in &self.trees {
+            out.push_str(&format!("tree={tree}\n"));
+        }
         out
     }
 }

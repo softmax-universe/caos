@@ -180,6 +180,62 @@ async function main() {
     const result = decode('server_decode', hex, 512);
     check('incomplete LocalMachineTurn rejected', bytes()[result.output], 255);
   }
+
+  const dispatch = start =>
+    `921294c410${uuid}c410${requestId}c410${historyId}${start}`;
+  const startFields = [`c410${senderId}`, '2a', '90', '90', '90', '90', 'c2'];
+  for (let length = 2; length < 7; length++) {
+    const result = decode('server_decode',
+      dispatch(`${(0x90 + length).toString(16)}${startFields.slice(0, length).join('')}`), 512);
+    check('omitted StartTurn fields use defaults', bytes()[result.output], 14);
+    check('omitted fields consume input', result.remaining, 0);
+    check('default runner-started flag', bytes()[result.output + 152], 0);
+  }
+  for (let index = 2; index < 7; index++) {
+    const values = startFields.map((value, i) => i === index ? 'c0' : value);
+    const result = decode('server_decode', dispatch(`97${values.join('')}`), 512);
+    check('nil StartTurn default accepted', bytes()[result.output], 14);
+    check('nil default consumes input', result.remaining, 0);
+  }
+  for (const [tag, actor, binary] of [[0, oid, 'c414'], [1, uuid, 'c410']]) {
+    for (const [timestamp, encoded] of integers) {
+      const value = alloc(104);
+      copyHex(value + 48, senderId);
+      u64(value + 64, 18446744073709551615n);
+      string(value + 72, 'org');
+      u32(value, 1);
+      u64(value + 8, 18446744073709551615n);
+      string(value + 84, 'turn');
+      u64(value + 16, timestamp);
+      bytes()[value + 24] = tag;
+      copyHex(value + 25, actor);
+      bytes()[value + 96] = 1;
+      const expected = `97c410${senderId}cfffffffffffffffff91a36f7267` +
+        `91cfffffffffffffffff91a47475726e9192${encoded}92${tag.toString(16).padStart(2, '0')}${binary}${actor}c3`;
+      check(`timeline actor ${tag}, timestamp ${timestamp}`,
+        encode('start_turn_encode', value), expected);
+      const result = decode('server_decode', dispatch(expected), 512);
+      check('present StartTurn fields decode', bytes()[result.output], 14);
+      check('present StartTurn consumes input', result.remaining, 0);
+      check('decoded timeline timestamp', view().getBigUint64(result.output + 72, true), timestamp);
+      check('decoded timeline actor tag', bytes()[result.output + 80], tag);
+      check('decoded timeline actor ID', readHex(result.output + 81, actor.length / 2), actor);
+      check('decoded runner-started flag', bytes()[result.output + 152], 1);
+    }
+  }
+  for (const [index, invalid] of [
+    [0, 'c0'], [0, `b0${senderId}`], [0, `dc0010${'01'.repeat(16)}`],
+    [1, 'c0'], [1, 'ff'], [1, 'd0ff'], [1, 'ca42280000'],
+    [2, '91c4036f7267'], [2, '92a36f726701'],
+    [3, '91ff'], [3, '91c0'], [4, '91c4047475726e'],
+    [5, '91c0'], [5, `9192ff9201c410${uuid}`],
+    [5, `9192019202c410${uuid}`], [5, '91920101'],
+    [5, `9192019200c410${uuid}`], [5, `9192019201c414${oid}`], [6, '00'],
+  ]) {
+    const values = startFields.map((value, i) => i === index ? invalid : value);
+    const result = decode('server_decode', dispatch(`97${values.join('')}`), 512);
+    check('malformed typed StartTurn field rejected', bytes()[result.output], 255);
+  }
   const schemas = recoverSchemas(e);
   assert.deepEqual(recoverSchemas(e), schemas, 'schema descriptors must not contain uninitialized memory');
   assert.deepEqual(hostCalls, []);

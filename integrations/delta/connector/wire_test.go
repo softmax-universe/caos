@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/hex"
 	"testing"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 func uuidFixture(start byte) uuid {
@@ -65,16 +63,10 @@ func TestMachineTurnFixture(t *testing.T) {
 			turn.History != uuidFixture(32) {
 			t.Fatalf("incorrect dispatch identities: %+v", turn)
 		}
-		start, err := decodeFields(turn.Start, 7, 7)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sender, err := decodeUUID(start[0])
-		if err != nil || sender != uuidFixture(48) {
+		if turn.Start.Sender != uuidFixture(48) {
 			t.Fatal("incorrect sender identity")
 		}
-		var epoch uint64
-		if err := msgpack.Unmarshal(start[1], &epoch); err != nil || epoch != 42 {
+		if turn.Start.Epoch != 42 {
 			t.Fatal("incorrect turn epoch")
 		}
 	}

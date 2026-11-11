@@ -19,10 +19,13 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**152 checks pass**, covering:
+**336 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
-  an optional generation-state timestamp, and the runner-started flag.
+  an optional generation-state timestamp, timeline IDs backed by UUID or Git
+  commit actors, and the runner-started flag.
+- Turn-start decoding with omitted newer fields, explicit nil defaults, and
+  rejection of malformed field types and option payloads.
 - Machine-runner name payloads and full client envelopes.
 - Successful machine-turn acknowledgment encoding.
 - Inbound machine-turn dispatch decoding, including the machine, request,
@@ -54,8 +57,8 @@ tested header are binary values containing 20 bytes.
 | Git blob frame header | `[nil, oid_20_bytes, byte_length_u64]` |
 
 The full client envelope for an absent machine-runner name, with request ID 42,
-is `922a92339190`. This was generated locally, **not sent to Delta**. The effect
-of an absent name on server registration has not been tested.
+is `922a92339190`. The standalone connector has since verified against the live
+service that an absent name clears its diagnostic machine registration.
 
 Disassembly also identifies request tags 52 (`SendLocalMachineTurn`) and
 53 (`AcknowledgeLocalMachineTurn`). Their complete envelope encodings are not
@@ -73,11 +76,17 @@ The recovered `StartTurn` field order is:
 6. `timeline_id`: optional `TimelineId`
 7. `runner_started`: boolean
 
+Only sender and epoch are required. Later fields default when omitted or
+explicitly nil. Canonical optional values still encode as `[]` or `[value]`.
+A timeline ID encodes as `[timestamp_u64, actor]`, where the actor is either
+`[0, commit_oid_20_bytes]` or `[1, uuid_16_bytes]`. These rules are checked against
+the compiled encoder and decoder, including unsigned integer boundaries.
+
 Field names came from the compiled debug formatter; field order and types came
-from the encoder. The probe covers an absent timeline ID, not its full schema.
-It also distinguishes Rust in-memory layouts from wire values: for example,
-the registration enum's in-memory discriminant is 39, but its wire tag is 51.
-The Rust layouts are build-specific test inputs, not an adapter interface.
+from the encoder. The probe also distinguishes Rust in-memory layouts from wire
+values: for example, the registration enum's in-memory discriminant is 39, but
+its wire tag is 51. The Rust layouts are build-specific test inputs, not an
+adapter interface.
 
 ## Connection and authentication clues
 

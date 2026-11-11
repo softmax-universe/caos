@@ -242,9 +242,9 @@ struct Runner {
     affinity_oid: Option<String>,
     /// The first job's `required*` args (`pool_entries`), carried into every
     /// follow-up poll's required args AND its lineage. The runnerd that started
-    /// us matched them, so they say which pool we are: a container the nix-store
+    /// us matched them, so they say which pool we are: a container the caosd
     /// pool started (with the host's volumes mounted) must take only jobs that
-    /// asked for the store, and a pending job of that pool must be able to
+    /// asked for that host, and a pending job of that pool must be able to
     /// evict us toward our parent. Empty for the generic pool, which is what
     /// both used to hard-code.
     pool: std::collections::BTreeMap<String, String>,

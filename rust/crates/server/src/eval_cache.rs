@@ -13,8 +13,9 @@
 //!   value is assembled from job results.
 //!
 //! An entry is a redis hash per tree with a field per variant, not a key per
-//! `(tree, variant)`: the secrets approved set asks for EVERY value a tree has
-//! had, whoever evaluated it, and a hash answers that in one read.
+//! `(tree, variant)`: a secrets session reader asks for EVERY value a tree has
+//! had, whoever evaluated it ([`crate::approved`]), and a hash answers that in
+//! one read.
 //!
 //! Only a successful evaluation is stored. Expressions pin every locator by
 //! commit (`locator::resolve_root` refuses anything else), so nothing a stored

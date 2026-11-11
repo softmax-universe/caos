@@ -345,15 +345,23 @@ fn refresh(state: &mut State, config: &Config) -> Vec<String> {
 /// The first call for a commit range follows the path from every root in it,
 /// which is a tree lookup per root and one redis round trip for them all; a
 /// range that grew by a commit follows only the new one.
-pub(crate) fn locator_set(config: &Config, roots: &Arc<HashSet<String>>, dir: &str) -> Arc<Set> {
+///
+/// With the set come the directories to evaluate so its paths can be
+/// finished ([`settle`]); the caller evaluates them, which this module
+/// cannot.
+pub(crate) fn locator_set(
+    config: &Config,
+    roots: &Arc<HashSet<String>>,
+    dir: &str,
+) -> (Arc<Set>, Vec<String>) {
     let dir = components(dir).collect::<Vec<_>>().join("/");
     let id = (Arc::as_ptr(roots) as usize, dir.clone());
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.get_or_insert_with(State::default);
     forget_if_full(state);
     if let Some(set) = state.sets.get(&id).cloned() {
-        refresh(state, config);
-        return set;
+        let unfinished = refresh(state, config);
+        return (set, unfinished);
     }
     if state.refreshed.is_none() {
         state.refreshed = Some(Instant::now());

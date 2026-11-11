@@ -1207,8 +1207,7 @@ mod origin_tests {
     #[derive(Default)]
     struct Memory {
         objects: RefCell<HashMap<String, (String, Vec<u8>)>>,
-        known: HashMap<String, Vec<Origin>>,
-        seen: RefCell<Vec<Vec<Origin>>>,
+        seen: RefCell<Vec<String>>,
     }
 
     impl Memory {

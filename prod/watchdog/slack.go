@@ -11,7 +11,7 @@ import (
 	"caos/w"
 )
 
-// notify posts one message to #proj-caos through the incoming webhook. Every
+// notify posts one message to #alerts-caos through the incoming webhook. Every
 // human-facing word this program or its Claude session emits goes through
 // here: the poller's "something is alerting", the session's report, and its
 // requests for a human to do what it may not.

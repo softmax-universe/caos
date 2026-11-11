@@ -3000,6 +3000,25 @@ pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
     read_array_reply(&mut BufReader::new(stream))
 }
 
+/// `HGET key field` — one field of a hash, or None when the key or the field
+/// is absent.
+pub(crate) fn hash_get(addr: &str, key: &str, field: &str) -> Result<Option<String>, String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HGET", key, field]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_bulk_reply(&mut BufReader::new(stream))
+}
+
+/// `HSET key field value` — set one field of a hash, creating the hash.
+pub(crate) fn hash_set(addr: &str, key: &str, field: &str, value: &str) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HSET", key, field, value]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_integer_reply(&mut BufReader::new(stream)).map(|_| ())
+}
+
 /// `LRANGE key 0 -1` — the whole list, in insertion order.
 pub(crate) fn list_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
     let mut stream = redis_connect(addr)?;

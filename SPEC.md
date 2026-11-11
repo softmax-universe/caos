@@ -509,14 +509,14 @@ reader:@=imports/caos/std/llm-step session=<id>
 
 ## Readers
 
-- **`reader:@@=<locator> [since=<sha>]`** grants the image at `dir=` in the
+- **`reader:@@=<locator> [since=<sha>]`** grants the tool at `dir=` in the
   locator's `rev` and in each of its first-parent ancestors, back to and
-  including `since` (or to the root without `since`). First-parent, so a branch forked
+  including `since`, or in the newest 20 commits without `since`.
+  First-parent, so a branch forked
   before `since` and merged after it does not bring back the code `since`
   excluded. The range is content; the URL only says where to fetch it. A
-  `ref=` in place of `rev=` names a branch, resolved when a request is admitted
-  (`git+caos://` is this server's own; any other URL is asked), so the range
-  moves with it — and trusts whoever can move that branch.
+  `ref=` in place of `rev=` names a branch, resolved when the secret is
+  pushed (`git+caos://` is this server's own; any other URL is asked).
 - **`reader:@=<path> session=<id>`** grants whatever is at `path` in that
   session's tree, and only in that session. The agent can edit that
   code, so this exposes the secret to the agent. Secret files written

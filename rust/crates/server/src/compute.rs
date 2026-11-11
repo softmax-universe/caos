@@ -1325,14 +1325,6 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         let dir = git_ref.dir.as_deref().unwrap_or("");
         let (kind, hash) = caos_eval::eval_path(self, &root.to_string(), dir)
             .map_err(|e| format!("git ref {value:?}: {e}"))?;
-        crate::secrets::record_mount(
-            self.config,
-            &hash,
-            caos_eval::Origin {
-                root: root.to_string(),
-                path: dir.to_string(),
-            },
-        );
         Ok((
             caos_eval::mode_of_kind(&kind),
             gix::ObjectId::from_hex(hash.as_bytes())

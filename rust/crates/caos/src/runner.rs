@@ -1164,10 +1164,10 @@ fn required_entries(args: &std::path::Path) -> std::collections::BTreeMap<String
             continue;
         }
         if let Ok(oid) = crate::read_hash(&entry.path()) {
-            pool.insert(name, oid);
+            out.insert(name, oid);
         }
     }
-    pool
+    out
 }
 
 /// The server's runner endpoint `/runner/<leaf>`.

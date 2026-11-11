@@ -123,8 +123,13 @@ for three reasons.
   binaries the stack built, including a copy of the stack's own `caos`
   (AGENTS.md: "a rebuilt `caos` re-keys every worker image"). The same commit
   is a different image after a server deploy, so every user's grants would
-  lapse at each deploy. The directory is the repository's own files
-  rearranged by deep-deps, and depends on the commit alone.
+  lapse at each deploy. The directory is stable across builds only as far
+  as the expressions above it are: for caos they run deep-deps and nothing
+  else, which rearranges the repository's own files, so the directory is
+  the same on any build. That is a property of those expressions, not of
+  this design. A repository whose parent expression builds something into
+  the tool's directory gets a tree that changes with the server's build,
+  and its secrets lapse at a deploy, silently, until the next push.
 - **It depends on other grants.** A granted image is marked with
   `secret-hash`, and an image that binds another holds it by hash. If tool A
   binds tool B and B is granted, A's image differs per user (`tests/secrets`
@@ -135,6 +140,64 @@ for three reasons.
 - **It costs a build per commit**, cold after every deploy. The directory
   costs the parents' expressions only: for caos, two deep-deps runs per
   commit, shared by every reader of that repository.
+
+### Switching to the built tool: what it would take and cost
+
+Pushing `eval(C.tree, dir)`, the image, in place of the tool's directory is a
+live option, and the server already honors such a tree. This is the case for
+and against, as of 2026-W46.
+
+The two approve different things, and that is the argument for switching:
+
+- **The directory** approves "this source, with these dependencies,
+  whatever the server builds from it". A server on another build of caos
+  makes a different binary from the same approved directory, and that
+  binary gets the secret.
+- **The image** approves "this exact artifact". Nothing that was not
+  evaluated at push is ever granted. It is the more literal reading of a
+  grant.
+
+What changes in the code is small. Moving the work to push time was the
+simplification, and it is the same for both.
+
+- `secrets-push` asks `/eval` for `dir` itself and pushes the answer. The
+  fetch of the parent's tree and the lookup of the tool in it go away,
+  about 50 lines with their test.
+- The server's check compares the value only. One comparison fewer.
+- Nothing else moves. Session readers cannot be pushed, so they still need
+  the directory, `EvalHost::evaluated` still passes it, and `approved.rs`
+  stays as it is.
+
+What it costs:
+
+| | Directory (now) | Image |
+|---|---|---|
+| Push again after the granted code changes | yes | yes |
+| Push again after a server deploy | only if a parent expression builds into the tool's directory; not for caos | always, for everyone |
+| A granted tool that binds another granted tool | granted | never matches (below) |
+| Work per commit at push | the parents' expressions | a build of the tool, cold after each deploy |
+| A commit too old to build | not a problem unless its parents fail | approves nothing |
+
+Two things would have to be faced before switching, and neither has been
+tested here:
+
+- **Nested grants.** A granted image carries `secret-hash`, and an image
+  that binds another holds it by hash. The push evaluates before the store
+  exists, so what it computes for a tool that binds a granted tool is not
+  what a run forms, and the push cannot tell. The test suite is the likely
+  first casualty: it grants `std/go` so that everything built on it is
+  granted, and `std/llm-step`, which binds `rgrep` and
+  `run-and-update-ref`. If either of those is built on `std/go`, llm-step
+  stops matching. A fix would compare images with their marks removed, or
+  evaluate at push under the store being pushed; neither is designed.
+- **Reproducible builds.** A salted suite, and a server deploy, rebuild
+  tools. An image hash only survives that if the rebuild is bit-identical.
+  Whether caos's tool builds are is unknown.
+
+The deploy cost has a fix of its own, listed under "Not yet done": if a
+tool's image were built from the pinned commit alone, with no copy of the
+serving stack's `caos` in it, the image would depend on the commit and
+nothing else, and this table's second row would read "no" for both.
 
 ## Evaluated when the secret is pushed
 

@@ -649,8 +649,24 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
     for dev in &grants.devices {
         command.args(["--device", dev]);
     }
-    for path in &grants.volumes {
-        command.args(["-v", &format!("{}:{path}", volume_name(path))]);
+    // Only on the nix-store pool (`grants_volumes`). Anywhere else an image's
+    // request is refused rather than half-honored: these volumes are THIS
+    // host's storage, and a job that needs them has to say so with
+    // `--required-nix-store=true` so it is routed to the host that has them.
+    // The worker sees the mountpoints absent, and says what it is missing.
+    if config.volumes {
+        for path in &grants.volumes {
+            command.args(["-v", &format!("{}:{path}", volume_name(path))]);
+        }
+    } else if !grants.volumes.is_empty() {
+        eprintln!(
+            "runnerd slot {slot}: {} declares {VOLUME_GRANT_ENV}={}, but this runner is not \
+             the nix-store pool; granting none (the job must carry --{}={})",
+            job.image_ref,
+            grants.volumes.join(" "),
+            caos_world::REQUIRED_NIX_STORE_ARG,
+            caos_world::NIX_STORE_POOL,
+        );
     }
     // A worker's own scratch cache, when this deployment offers one. Passed
     // only when set, so an unset address reaches the worker as an ABSENT env

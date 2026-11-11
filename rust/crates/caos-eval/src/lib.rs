@@ -56,7 +56,7 @@
 //! token parses through [`parse_arg`], the one arg-type vocabulary this crate
 //! owns and the client shares.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gix::objs::tree::{Entry, EntryKind, EntryMode};
 

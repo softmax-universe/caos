@@ -532,6 +532,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_is_a_directory_of_the_tree_that_holds_it() {
+        use gix::objs::tree::{Entry, EntryKind};
+        use gix::objs::WriteTo;
+        let oid = gix::ObjectId::from_hex(b"4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap();
+        let entries = vec![
+            Entry {
+                mode: EntryKind::Blob.into(),
+                filename: "file".into(),
+                oid,
+            },
+            Entry {
+                mode: EntryKind::Tree.into(),
+                filename: "tool".into(),
+                oid,
+            },
+        ];
+        let mut object = b"tree 0\0".to_vec();
+        gix::objs::Tree { entries }.write_to(&mut object).unwrap();
+        let tool = child_tree(&object, "tool").unwrap();
+        assert_eq!(tool, Some(oid.to_string()));
+        assert_eq!(child_tree(&object, "file").unwrap(), None);
+        assert_eq!(child_tree(&object, "absent").unwrap(), None);
+        assert!(child_tree(b"no header", "tool").is_err());
+        assert_eq!(percent_encode("a?b=c&d"), "a%3Fb%3Dc%26d");
+    }
+
+    #[test]
     fn hex_round_trips() {
         assert_eq!(unhex(&hex(&[0, 1, 254, 255])), Some(vec![0, 1, 254, 255]));
         assert_eq!(unhex("zz"), None);

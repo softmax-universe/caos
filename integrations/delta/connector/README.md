@@ -48,10 +48,16 @@ the connector's current operations; it is not evidence of agent-turn execution.
 
 The canonical root entry at revision `7624c1d767cae4866080226c08a01731c6cee0a0`
 also passed the live CAOS probe and the full salted suite (**79/79**), as well as
-`nix build --no-link .#delta-runner`. The offline reference now checks 336 wire
+`nix build --no-link .#delta-runner`. The offline reference now checks 371 wire
 cases. The dispatch decoder reads typed epochs and timeline identities, accepts
 the reference's defaults for omitted newer fields, and rejects malformed types.
 Parsing a dispatch does not admit the turn or acknowledge execution.
+
+The typed dispatch decoder at revision
+`868fb0085c5b92ce238e66f28d35f651c391f1ad` passed the race-enabled Go tests
+(`-count=10`), `go vet`, the native Nix build, a live CAOS probe, and the full
+salted suite (**79/79**). The history reference checks additionally establish
+default root-object IDs offline; replay and live turn execution remain unbuilt.
 
 ## Authentication
 

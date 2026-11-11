@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**336 checks pass**, covering:
+**371 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -32,6 +32,8 @@ implement the recovered messages itself, without shipping or loading Delta Web.
   history, sender, and epoch; unknown fields; and incomplete-message rejection.
 - Git blob header encoding and decoding, unknown trailing fields, and rejection
   of truncated headers, missing fields, and incorrectly sized object IDs.
+- Default thread-root references, including nested field paths, omitted and nil
+  fields, and re-encoding explicit references.
 
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a
@@ -126,6 +128,20 @@ Default verification remains read-only, and export refuses to overwrite an
 existing file. Numeric schema kinds and field flags are preserved rather than
 assigned unverified meanings. The descriptors are evidence for implementing
 state synchronization, not an implementation or proof of correct replay.
+
+The reference now also decodes an empty `ThreadDataStub` with an explicit root
+field context and encodes the resulting references. Its output matches bytes
+composed independently from the declared field paths, both at the root and
+under a nested context. The field-reference branch is `[1, binary_field_path]`;
+each path component is one byte. `FieldId::push` confirms the inline path
+representation and appends components up to a maximum depth of 15.
+
+For these thread fields, omitted or nil values create references from their
+field context. Register and map stubs contain only those references, not their
+values or entries; the default text buffer is a scratch-buffer reference.
+This verifies the contextual-default behavior represented by schema kind 23
+in this root. Other untested schema wrappers remain unverified. This is an
+offline serialization fixture, not a synchronized thread or a history replay.
 
 ## Reproduce without signing in
 

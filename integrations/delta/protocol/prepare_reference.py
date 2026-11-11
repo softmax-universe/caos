@@ -32,6 +32,9 @@ FUNCTIONS = {
     "ack_local_encode": codec("AcknowledgeLocalMachineTurn", ENCODE),
     "client_encode": codec("ClientMessage", ENCODE),
     "server_decode": codec("ServerMessage", DECODE),
+    "thread_encode": f"<thread::ThreadDataStub as versioned::Versioned>::{ENCODE}",
+    "thread_decode": f"<thread::ThreadDataStub as versioned::Versioned>::{DECODE}",
+    "field_push": "<versioned::FieldId>::push",
     "schema_thread": "<thread::ThreadDataStub as versioned::Versioned>::versioned_schema",
     "schema_batch": (
         "<versioned::schema::SchemaCollector>::register::<"

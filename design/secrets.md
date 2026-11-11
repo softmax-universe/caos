@@ -113,6 +113,24 @@ parent has an expression, `eval(T, parent)` is the parent itself, and the
 rule reduces to the committed directory, so a repository without reshaping
 parents behaves as before.
 
+### Why a `DEEP-DEPS` copy is the approved tree
+
+Dropping the half-evaluated forms is only safe if the copies tools are
+actually run from are the fully reshaped tree, so this was checked against
+`worker-deep-deps`:
+
+- deep-deps stages a directory's `DEEP-DEPS/<name>` by calling the same
+  `deepen` on the dependency that it calls on the dependency's own path, so
+  the copy and `eval(T, "")/std/<name>` are one tree.
+- `std/.caos-expr` runs deep-deps again over the already deepened `std`. No
+  `DEPS` file is left, so its output is its input, and
+  `eval(T, std)/<name>` is that same tree again.
+
+So `stack-publish/DEEP-DEPS/github` is the tree a reader on `std/github`
+approves. A parent expression that did reshape its children a second time
+would separate the two, and copies made by the first pass would then stop
+matching: the rule approves what a walk to `dir` reaches, and nothing else.
+
 ## Building the approved set
 
 ### Nothing is evaluated to build it

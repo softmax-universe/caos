@@ -240,13 +240,13 @@ struct Runner {
     /// with (every entry is tagged with its hash).
     image_oid: Option<String>,
     affinity_oid: Option<String>,
-    /// The first job's `required*` args (`pool_entries`), carried into every
-    /// follow-up poll's required args AND its lineage. The runnerd that started
-    /// us matched them, so they say which pool we are: a container the caosd
-    /// pool started (with the host's volumes mounted) must take only jobs that
-    /// asked for that host, and a pending job of that pool must be able to
-    /// evict us toward our parent. Empty for the generic pool, which is what
-    /// both used to hard-code.
+    /// The first job's `required*` args (`required_entries`), carried into
+    /// every follow-up poll's required args AND its lineage. The runnerd that
+    /// started us required them, so they say which runner we came from: a
+    /// container the caosd runner started (with the host's volumes mounted)
+    /// must take only jobs that asked for that host, and a pending job that
+    /// names that runner must be able to evict us toward it. Empty when a plain
+    /// runnerd started us, which is what both used to hard-code.
     requires: std::collections::BTreeMap<String, String>,
 }
 

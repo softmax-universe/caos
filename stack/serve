@@ -347,6 +347,14 @@ start_runnerd() { # <log-name> <slots> <require>
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
+  # The nix-store pool: the jobs that need this host's persistent volumes
+  # (`--required-nix-store=true`, e.g. dev/test-stack) and only those. Without
+  # it they match no runner and fail at their pending deadline, which is the
+  # intended failure — so it is on by default wherever runnerd is.
+  nix_slots=${CAOS_STACK_NIX_STORE_SLOTS:-${CAOS_RUNNER_SLOTS:-8}}
+  if [ "$nix_slots" -gt 0 ]; then
+    start_runnerd runnerd-nix "$nix_slots" "required-nix-store=true"
+  fi
 fi
 
 # --- caos-iroh: the same server, reachable by ticket -------------------------

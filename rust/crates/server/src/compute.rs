@@ -1356,6 +1356,23 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
                 .map_err(|_| format!("git ref {value:?}: {hash:?} is not an object id"))?,
         ))
     }
+    /// The eval cache, for one expression (`MemoKind::Node`). A whole walk
+    /// (`MemoKind::Path`) is left to [`evaluate`], which already keeps the
+    /// top-level ones; with every expression on the way a hit, the rest of a
+    /// walk is tree lookups.
+    fn memo_get(&self, kind: caos_eval::MemoKind, key: &str) -> Option<(String, String)> {
+        match kind {
+            caos_eval::MemoKind::Node => {
+                crate::eval_cache::get(self.config, key, &self.cache_variant())
+            }
+            caos_eval::MemoKind::Path => None,
+        }
+    }
+    fn memo_put(&self, kind: caos_eval::MemoKind, key: &str, value: &(String, String)) {
+        if kind == caos_eval::MemoKind::Node {
+            crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
+        }
+    }
     fn origins_of(&self, oid: &str) -> Vec<caos_eval::Origin> {
         // Origins are read in one place, `evaluated`, and it returns at once
         // for a run with no secrets. Loading them for such a run was most of

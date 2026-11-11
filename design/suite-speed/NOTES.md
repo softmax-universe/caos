@@ -82,3 +82,69 @@ base1 449/8m28 (CAOS_SALT, no edit) · run4 476 · run5 369 · run6 359/6m50 (ru
     layer, the nix volume and $HOME — so each push waits for everyone's writeback, and
     everyone's fsync waits behind it. ~140 pushes per suite run. Likely source of the
     4-20s fsync tails in 19. Not yet measured or changed.
+
+## Night 2 (2026-11-10/11): a fair A/B, then the ref and test work
+
+### Did night 1 do anything? (A/B, same client, same host stack, alternating)
+- `--test-salt` (sub-runs stay cached): main 249/260/277/288s, night-1 stack
+  254/263/271/267s. No difference: this mode never re-runs a cargo job, and
+  its tail was mcp-serve and the stack-* tests, which night 1 did not touch.
+- after a Rust edit (the edit loop): main 433/409s total (phase 392/375),
+  night-1 stack 365/363s (phase 330/329). ~14% faster, from the cargo fixes.
+- Both drifted up run over run: the cause was refs (below).
+
+### The shared dev repo's refs were most of a turn
+- llm-step's timing: each session push ~1.25s idle; a 7-call turn spent 11s of
+  12.4s pushing. A one-commit push was 880ms: 118ms advertisement, 708ms
+  server (450ms of it `rev-list --not --all` over 12,906 ref tips).
+- Pruning the per-run namespaces (res, req, v3, v4, test branches) to 391
+  refs: push 60ms, copy-tool alone 17s -> 4s, suite phase 268s -> 168s, total
+  test time 1763s -> 896s.
+- Refs come back ~325/run (res ~130, sessions ~140). Back-to-back runs on one
+  tree: 2215 refs -> 954s total test time; pruned to 432 -> 713s.
+- Done: dev/stack-up prunes (all, when alone; loose non-session refs >1h
+  otherwise); the server sweeps refs/caos/res with refs/caos/req (600s).
+- NOT done: session refs in a busy day. Stacks are resident for hours, so a
+  stack rarely starts alone, and sessions can't be aged out safely while a dev
+  stack may be serving a real cloud session. Options: tests delete the
+  sessions they make; or interactive stacks leave a marker the prune honours.
+
+### Tests (alone, before -> after)
+- mcp-serve 125s -> 21s: gates instead of 60s of sleeps.
+- actor 46s -> 20s: 4 concurrent writers, not 12 (rounds are sequential).
+- git-import fixture 23s -> 15.5s: hard-linked damaged stores, 256 KiB/2000.
+- create-squashed-stack 27s -> 7s, move-sed 20s -> 5s: cases in parallel.
+- std-grep 24s -> 6s: calls at once.
+- ordering, TRIED AND DROPPED (#454): start the longest tests first, from a
+  durations file every stack shared. Phase 121s -> 116s, total test time up
+  (694s -> 789s, the long tests contending); it only ever closes the gap to
+  total work / 8 slots, which shrinks as tests do, and it added shared state.
+
+### Findings, not done
+- llm-step runs a response's tool calls one at a time (resume() takes
+  pending.first()); each call is >= 2 sequential jobs. Concurrent independent
+  calls would speed every LLM test and real sessions. Deep change.
+- Go stages: `go run` compiles+links in every fresh container, ~0.5s idle per
+  Go job (exec of the built binary: 3ms). Build each Go tool once, as
+  std/rustc does for Rust tools.
+- Edit loop: a new caos binary -> new cache namespace -> every Rust std tool
+  (llm-step, llm-call, file tools, bash-tool...) rebuilt from unchanged
+  sources, ~20s each. A test naming several waited for them one at a time:
+  root-tools spent 75s evaluating before it ran.
+- max-parallel 16: everything ~2x slower and mcp-serve failed; keep 8.
+- #444 regressed the /result restart race (fixed again on this stack).
+- The edit loop's long pole is evaluation before tests run: git-import evaluated
+  for 126s (a 33s cargo build, then a 91s flake-builder job that was a registry
+  hit, so the time is unexplained: the server and runner logs have no
+  timestamps, which made it impossible to attribute).
+- The other agent's TRIM/LUKS work coincided with a ~1.5x slowdown of every
+  test between ~00:15 and ~01:25, on unchanged trees; A/Bs alternate, so they
+  stayed fair, but absolute numbers from that hour are inflated.
+
+### Run log (test phase / total test time)
+round 1 (--test-salt, alternating): main 249/260/277/288, stack 254/263/271/267
+round 2 (edit loop): main 392/375, stack 330/329 (totals 433/409 vs 365/363)
+after hand prune: 168 (sum 896); v15 121 (694); with ordering (dropped) 116 (789)
+v19 after prune 113 (713); with 2215 refs 143 (954)
+round 3 (prune before each, slow-machine hour): v19 171/171, tip 174/134
+tip, edit loop: 210 (total 242), 78/78 but the edit's own unit-fmt.

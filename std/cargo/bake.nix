@@ -90,9 +90,14 @@ let
       # recompiled. Without this loop every per-crate job (decompose.rs
       # `mode=all`) re-checks the whole dep graph.
       #
-      # Three commands, and `doc` is deliberately not a fourth: rustdoc consumes
-      # the same dependency artifacts rustc does, so `check` already warms
-      # everything `cargo doc --no-deps -p <member>` needs.
+      # One warm per command decompose.rs runs, with its exact flags, because
+      # the flags change the resolution too: `--all-targets` and `test` bring
+      # a member's dev-dependencies in, `build` and plain `check` leave them
+      # out (caos-iroh's `tempfile` adds bitflags/std and rustix, which
+      # re-fingerprints most of iroh's graph). `doc --no-deps -p` reads what
+      # plain `check` warms. To see a miss, run a job's command in the image
+      # with CARGO_LOG=cargo::core::compiler::fingerprint=info: each dirty
+      # dependency names its reason.
       #
       # The members are crane's DUMMY sources, and that is the point — their
       # dependencies are the target; their own artifacts are discarded when the
@@ -108,7 +113,9 @@ let
                      | ${pkgs.jq}/bin/jq -r '.packages[].name'); do
           echo "bake: warming -p $m" >&2
           cargo check --locked -p "$m"
-          cargo clippy --locked -p "$m"
+          cargo check --locked -p "$m" --all-targets
+          cargo clippy --locked -p "$m" --all-targets
+          cargo build --locked -p "$m"
           cargo test --no-run --locked -p "$m"
         done
       '';
@@ -179,6 +186,11 @@ in
     # Must match the bake above.
     "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
     "${muslCCEnv}"
+    # The value stdenv gave the bake. blake3's build script reruns when CC
+    # changes, and unset is a change: every job that reached iroh rebuilt
+    # blake3, iroh-relay and iroh (cargo's fingerprint log: `EnvVarChanged {
+    # name: "CC", old_value: Some("gcc"), new_value: None }`).
+    "CC=gcc"
   ];
 
   # fakeRootCommands fragment: inflate the baked (musl, dev) target/ as REAL,

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 const defaultRemoteURL = "wss://delta.zed.dev/connect"
@@ -76,57 +75,29 @@ type probeResult struct {
 	RegistrationVerified bool
 }
 
-func exchangeProbe(ctx context.Context, conn *websocket.Conn, requestID uint32, request []byte) (wireVariant, error) {
-	if err := conn.Write(ctx, websocket.MessageBinary, request); err != nil {
-		return wireVariant{}, errors.New("could not send protocol request")
-	}
-	for {
-		kind, data, err := conn.Read(ctx)
-		if err != nil {
-			return wireVariant{}, errors.New("Delta closed before acknowledging the protocol request")
-		}
-		if kind != websocket.MessageBinary {
-			return wireVariant{}, errors.New("expected a binary Delta message")
-		}
-		message, err := decodeVariant(data)
-		if err != nil {
-			return wireVariant{}, err
-		}
-		if message.Tag == 18 {
-			return wireVariant{}, errors.New("a diagnostic connection must not receive a turn")
-		}
-		if message.Tag != 5 {
-			continue
-		}
-		fields, err := decodeFields(message.Payload, 2, 2)
-		if err != nil {
-			return wireVariant{}, errors.New("invalid protocol response")
-		}
-		var responseID uint32
-		if err := msgpack.Unmarshal(fields[0], &responseID); err != nil || responseID != requestID {
-			continue
-		}
-		body, err := decodeVariant(fields[1])
-		if err != nil {
-			return wireVariant{}, errors.New("invalid protocol response body")
-		}
-		return body, nil
-	}
-}
-
 func probeRemote(ctx context.Context, remoteURL, token string, actor uuid, registrationName *string) (probeResult, error) {
 	var result probeResult
 	conn, connectionID, err := connectRemote(ctx, remoteURL, token, actor)
 	if err != nil {
 		return result, err
 	}
-	defer conn.CloseNow()
+	s := newSession(ctx, conn)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for message := range s.events {
+			if message.Tag == 18 {
+				s.Abort(errors.New("a diagnostic connection must not receive a turn"))
+				return
+			}
+		}
+	}()
+	defer func() {
+		s.Close()
+		<-drained
+	}()
 	result.ConnectionID = connectionID
-	heartbeat, err := encodeHeartbeat(1)
-	if err != nil {
-		return result, err
-	}
-	body, err := exchangeProbe(ctx, conn, 1, heartbeat)
+	body, err := s.Call(ctx, heartbeatRequest())
 	if err != nil {
 		return result, err
 	}
@@ -139,13 +110,8 @@ func probeRemote(ctx context.Context, remoteURL, token string, actor uuid, regis
 	}
 	// This tests registration, then clears it. It must not advertise an
 	// unfinished executor as an available machine after this probe exits.
-	for i, name := range []*string{registrationName, nil} {
-		requestID := uint32(i + 2)
-		request, err := encodeMachineRunner(requestID, name)
-		if err != nil {
-			return result, err
-		}
-		body, err := exchangeProbe(ctx, conn, requestID, request)
+	for _, name := range []*string{registrationName, nil} {
+		body, err := s.Call(ctx, machineRunnerRequest(name))
 		if err != nil {
 			return result, err
 		}

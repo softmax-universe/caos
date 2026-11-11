@@ -23,13 +23,13 @@ func TestRequestWireFixtures(t *testing.T) {
 		encode   func() ([]byte, error)
 		expected string
 	}{
-		{"runner absent", func() ([]byte, error) { return encodeMachineRunner(42, nil) },
+		{"runner absent", func() ([]byte, error) { return machineRunnerRequest(nil).encode(42) },
 			"922a92339190"},
-		{"runner named", func() ([]byte, error) { return encodeMachineRunner(42, &name) },
+		{"runner named", func() ([]byte, error) { return machineRunnerRequest(&name).encode(42) },
 			"922a92339191af43414f5320e2809320657368656172"},
-		{"turn acknowledgment", func() ([]byte, error) { return encodeTurnAcknowledgment(42, request) },
+		{"turn acknowledgment", func() ([]byte, error) { return turnAcknowledgmentRequest(request).encode(42) },
 			"922a923592c410000102030405060708090a0b0c0d0e0f90"},
-		{"heartbeat", func() ([]byte, error) { return encodeHeartbeat(42) },
+		{"heartbeat", func() ([]byte, error) { return heartbeatRequest().encode(42) },
 			"922a922190"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,6 +83,7 @@ func TestMachineTurnFixture(t *testing.T) {
 func TestRejectMalformedWire(t *testing.T) {
 	for _, value := range []string{
 		"", "c0", "90", "9212", "92129000", "9212ddffffffff",
+		"92ff90", "92cd010090", "cfffffffffffffffff",
 	} {
 		raw, err := hex.DecodeString(value)
 		if err != nil {
@@ -97,6 +98,25 @@ func TestRejectMalformedWire(t *testing.T) {
 	}
 	if _, err := decodeUUID([]byte{0xc4, 0}); err == nil {
 		t.Error("accepted invalid UUID")
+	}
+}
+
+func TestProtocolUnsignedIntegersDoNotWrap(t *testing.T) {
+	for _, raw := range [][]byte{
+		{0x92, 0x05, 0x92, 0xff, 0x21},
+		{0x92, 0x05, 0x92, 0xd0, 0xff, 0x21},
+		{0x92, 0x05, 0x92, 0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x21},
+	} {
+		message, err := decodeVariant(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := decodeResponse(message); err == nil {
+			t.Fatal("negative/overflowing response id accepted")
+		}
+	}
+	if _, err := (clientRequest{tag: 256, payload: []any{}}).encode(1); err == nil {
+		t.Fatal("oversized request tag accepted")
 	}
 }
 

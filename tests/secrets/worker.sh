@@ -197,13 +197,20 @@ out=$("$CAOS_CLI" run later --base:@=mytool) || fail "run at the later commit fa
   || fail "a changed tool off the granted branch was granted: $(cat later/verdict)"
 echo "  ok: a changed tool off the granted branch is not covered" >&2
 
-echo "== moving the granted branch moves the grant, with no new push ==" >&2
+echo "== a moved branch is granted by the next push, and not before ==" >&2
+# What a reader approves is fixed when the store is pushed (design/secrets.md):
+# the server holds the trees secrets-push asked it to evaluate, not a branch to
+# follow.
 git push -q caos "HEAD:refs/heads/${test_run_id}-secrets-test" || fail "moving the granted branch"
-out=$("$CAOS_CLI" run moved --base:@=mytool) || fail "run on the moved branch failed: $out"
+out=$("$CAOS_CLI" run unmoved --base:@=mytool) || fail "run on the moved branch failed: $out"
+[ "$(cat unmoved/verdict)" = "deploytok-missing" ] \
+  || fail "a moved branch was granted with no push: $(cat unmoved/verdict)"
+push || fail "pushing again after the branch moved failed"
+out=$("$CAOS_CLI" run moved --base:@=mytool) || fail "run after the new push failed: $out"
 [ "$(cat moved/verdict)" = "deploytok-ok" ] \
-  || fail "the moved branch did not carry the grant: $(cat moved/verdict)"
+  || fail "the new push did not grant the moved branch: $(cat moved/verdict)"
 git reset -q --hard "$head"
-echo "  ok: the grant follows the branch" >&2
+echo "  ok: the grant moves with a push" >&2
 
 echo "== a malformed reader is refused by secrets-push ==" >&2
 printf 'value=x\nreader:@@=%s until=never\n' "$(at mytool)" > "$STORE/badreader"

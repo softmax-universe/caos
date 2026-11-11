@@ -1,9 +1,14 @@
 # Secrets: deciding which tool is granted
 
-**Status:** design, 2026-W46. Replaces the origin index in
-`rust/crates/server/src/secrets.rs`. SPEC.md, "Secrets", is the contract
-(stores, readers, `secret-hash`, isolation); this file is how the server
-decides that a tool is one a reader approved, and why it is done this way.
+**Status:** built, 2026-W46; not yet measured on a deployed server. SPEC.md,
+"Secrets", is the contract (stores, readers, `secret-hash`, isolation); this
+file is how the server decides that a tool is one a reader approved, and why
+it is done this way.
+
+In one paragraph: a reader names a tool by where it sits in a repository.
+`secrets-push` asks the server to evaluate that place at each of the reader's
+commits and pushes the resulting trees with the secret. From then on the
+server holds a list of trees per secret, and granting is a lookup.
 
 ## The problem this replaces
 
@@ -17,15 +22,14 @@ whose result is now a cache hit.
 
 The first implementation answered with an index from tree oid to every
 `(root, path)` the tree had ever been seen at (its *origins*), and matched a
-reader against all of them. The index could not know which roots a later
-reader would name, so it recorded every root. Each session step has a new
-root, and that root's evaluated tree holds all of `caos-std`, so every shared
-subtree gained a few hundred origins per tool call and lost none. On
-caosd-prod, 2026-11-11: sets of 56k to 328k origins per tree, about 170k
-`SADD`s per tool call, and roughly 8 of the 15 seconds a tool call took spent
-loading, cloning, hashing and scanning them. A run with no secrets paid about
-half of that too, because origins were loaded before anyone asked whether the
-run had readers.
+reader against all of them at every evaluated node. The index could not know
+which roots a later reader would name, so it recorded every root. Each
+session step has a new root, and that root's evaluated tree holds all of
+`caos-std`, so every shared subtree gained a few hundred origins per tool
+call and lost none. On caosd-prod, 2026-11-11: sets of 56k to 328k origins
+per tree, about 170k `SADD`s per tool call, and roughly 8 of the 15 seconds a
+tool call took spent loading, cloning, hashing and scanning them. A run with
+no secrets paid about half of that too.
 
 Three earlier fixes (list to set, a sent-filter, per-origin markers) each cut
 a constant. None bounded what a tree carries.
@@ -45,46 +49,34 @@ one in `std`, then take the child `llm-step` without evaluating it.
 
 ## The rule
 
-A reader is a set of root trees `R` and one path `dir`.
+A `reader:@@=<locator> [since=<sha>]` names a set of commits and a path
+`dir`. The commits are the locator's commit and its first-parent ancestors,
+back to and including `since`, or the newest 20 with no `since`
+(`grant_history::DEFAULT_COMMITS`). A `ref=` in the locator is the branch's
+head when the secret is pushed.
 
-- `reader:@@=<locator> [since=<sha>]`: `R` is `C.tree` for the locator's
-  commit and each first-parent ancestor back to `since` (or to the root
-  commit), and `dir` is the locator's `dir=`. `grant_history::allowed_roots`
-  computes `R` with `git log --first-parent --format=%T` and caches it per
-  `(url, rev, since)`. It is a range and not one commit because a session
-  keeps the caos build it started with, and its token has to go on working
-  after main moves.
-- `reader:@=<path> session=<id>`: the same shape with the session's head as
-  the only root. A source tree's gitlink starts a walk of its own, so every
-  split of `path` into a prefix that descends raw from the head and a
-  remainder is tried, with the tree at the prefix as `T` and the remainder as
-  `dir` (as `match_session` did).
+For each commit `C` the reader approves one tree:
 
-A reader approves, for each `T` in `R`, exactly one tree:
+> `eval(C.tree, parent of dir) / last name of dir`
 
-> `eval(T, parent of dir) / last name of dir`
-
-That is the directory a walk from an approved root has in hand at the moment
-it is about to apply the tool's own `.caos-expr`: after every parent
-expression has reshaped it, before its own has run. Call the set of these
-trees, over all of `R`, the reader's **approved set**.
-
-A tool is granted a reader's secret when the directory whose `.caos-expr`
-evaluation is applying is in that reader's approved set. The test is on the
-tree's oid. The path the run took to reach it is not consulted.
+That is the directory a walk from the commit's root has in hand at the moment
+it is about to apply the tool's own `.caos-expr`: every parent's expression
+applied, its own not yet. A tool is granted the secret when the directory
+whose `.caos-expr` evaluation is applying is one of those trees. The test is
+on the tree's oid. The path the run took to reach it is not consulted.
 
 ### Why that tree, and not the source directory
 
-`T/std/llm-step`, the directory as committed, is the wrong thing to test. The
-same source directory evaluates very differently depending on what its
-parents put around it: caos's root expression mounts each tool's dependencies
-into it as `DEEP-DEPS/<name>`, and the tool's expression names them by path.
-The committed directory has no `DEEP-DEPS`; evaluated on its own it fails, or
-is a program nobody reviewed in that form.
+`C.tree/std/llm-step`, the directory as committed, is the wrong thing to
+test. The same source directory evaluates very differently depending on what
+its parents put around it: caos's root expression mounts each tool's
+dependencies into it as `DEEP-DEPS/<name>`, and the tool's expression names
+them by path. The committed directory has no `DEEP-DEPS`; evaluated on its
+own it fails, or is a program nobody reviewed in that form.
 
-`eval(T, std)/llm-step` has the dependencies inside it. Its oid covers the
-tool's files and everything the parents mounted, so it identifies the whole
-program.
+`eval(C.tree, std)/llm-step` has the dependencies inside it. Its oid covers
+the tool's files and everything the parents mounted, so it identifies the
+whole program.
 
 ### Why testing one oid is sound
 
@@ -99,217 +91,196 @@ the directory. So:
 - an attacker who places an approved tree somewhere of their choosing gets
   the approved program and nothing else.
 
-This is also why a byte-identical copy is granted (`tests/secrets`,
-`embedder/mytool`), and it always was: the origin index was keyed by oid, so
-its rule was already "this content has been seen at an approved place". The
+This is why a mount, a `DEEP-DEPS` copy and a byte-identical copy
+(`tests/secrets`, `embedder/mytool`) are granted, and why nothing needs to
+remember where a tree came from. The origin index was keyed by oid, so its
+rule was already "this content has been seen at an approved place"; the
 provenance bookkeeping bought no security the oid did not already give.
 
-### What is deliberately not approved
+### Why a `DEEP-DEPS` copy is the approved tree
 
-The origin index also granted the committed source directory and every
-half-evaluated form of it (`eval(T, "")/std/llm-step`), as a side effect of
-recording every subtree of every tree it saw. Those are dropped. Where no
-parent has an expression, `eval(T, parent)` is the parent itself, and the
-rule reduces to the committed directory, so a repository without reshaping
-parents behaves as before.
+Tools are mostly run from copies, so this was checked against
+`worker-deep-deps`:
 
-## Building the approved set
+- deep-deps stages a directory's `DEEP-DEPS/<name>` by calling the same
+  `deepen` on the dependency that it calls on the dependency's own path, so
+  the copy and `eval(T, "")/std/<name>` are one tree.
+- `std/.caos-expr` runs deep-deps again over the already deepened `std`. No
+  `DEPS` file is left, so its output is its input, and
+  `eval(T, std)/<name>` is that same tree again.
 
-### Nothing is evaluated to build it
+So `stack-publish/DEEP-DEPS/github` is the tree a reader on `std/github`
+approves. A parent expression that reshaped its children a second time would
+separate the two, and copies made by the first pass would then stop matching.
 
-Evaluating every ancestor of a branch would run real jobs for each (caos's
-root expression alone is a deep-deps run over the repository), and old
-commits may no longer evaluate at all. So the set is built from evaluations
-the server has **already done**, read from the eval cache below. For each `T`
-in `R` the server follows `parent of dir` one component at a time:
+### Why the directory and not the image the tool builds
 
-- a directory with no `.caos-expr` is its own value: descend by lookup;
-- a directory with one: use the cached values of that tree (there may be
-  several, see "Variants") and descend into each;
-- a directory with one and no cached value: this root contributes nothing
-  yet. It is **parked** on that tree.
+`eval(C.tree, dir)`, the built tool, looks like the simpler thing to push,
+and a `tree=` line naming one is honored. `secrets-push` does not compute it,
+for three reasons.
 
-A commit nobody has evaluated on this server therefore contributes nothing,
-which loses nothing: a tree equal to `eval(T, …)/name` gets into a session by
-being evaluated from `T`, and that evaluation is what fills the cache. (The
-exception is a tree someone built by hand to be identical to an evaluation
-the server never ran. It is denied.)
+- **It depends on the server's build of caos.** A tool's image contains
+  binaries the stack built, including a copy of the stack's own `caos`
+  (AGENTS.md: "a rebuilt `caos` re-keys every worker image"). The same commit
+  is a different image after a server deploy, so every user's grants would
+  lapse at each deploy. The directory is the repository's own files
+  rearranged by deep-deps, and depends on the commit alone.
+- **It depends on other grants.** A granted image is marked with
+  `secret-hash`, and an image that binds another holds it by hash. If tool A
+  binds tool B and B is granted, A's image differs per user (`tests/secrets`
+  asserts exactly that of `embedder`). A push evaluates A before the store
+  exists, with B unmarked; a run evaluates it with B marked. The pushed hash
+  never matches. The directory is taken before any expression in it runs, so
+  nothing in it is marked.
+- **It costs a build per commit**, cold after every deploy. The directory
+  costs the parents' expressions only: for caos, two deep-deps runs per
+  commit, shared by every reader of that repository.
 
-### The set is live, not built at admission
+## Evaluated when the secret is pushed
 
-Admission fixes the reader's commit set `R`, as before, so one run sees one
-answer to "where is the branch". The approved set underneath is a structure
-shared by the whole server process, per `(R, dir)`, and each check reads it as
-it is at that moment.
+`caos-cli secrets-push` does the work, before it signs:
 
-It has to be. The evaluation that makes a tool's tree exist often happens
-inside the run that then uses the tool (the first tool call after a pin
-moves). A set frozen at admission would not contain it.
+1. For each `reader:@@=`, it asks the server for the reader's commits
+   (`POST /secrets/commits`). The server resolves a `ref=` and reads the
+   history; nothing is evaluated.
+2. For each commit it asks the server to evaluate the parent of `dir`
+   (`GET /eval?root:@@=`, the request `caos-cli run` makes for a `:@@=`
+   argument), reads that tree, and takes the child. That oid becomes a
+   `tree=<oid>` line of the pushed secret.
+3. It signs and pushes. The signature covers the trees.
 
-When the server caches "tree `Y` evaluated to `V`", it looks `Y` up among the
-parked roots. If a root is waiting on `Y`, it continues that root's path
-from `V` and adds what it reaches to the set, before the walk that produced
-`V` moves on. A session root is never parked on, so ordinary evaluation pays
-one hash lookup.
+The server then holds a list of trees per secret, in `secrets.git`, and
+decides nothing later. What follows from that:
 
-### Why the entry exists by the time it is needed, and when it does not
+- **The user sees what they approved.** `secrets-push` reports, per reader,
+  how many commits had the tool, and warns about a reader that approves
+  nothing and about a commit that failed to evaluate.
+- **Nothing is silent.** A reader that names an alias of a tool works,
+  because the path it names is what gets evaluated. A commit that cannot be
+  evaluated is a warning at push, not a missing secret in a session.
+- **Granting needs no cache to survive.** The trees are in the store. The
+  eval cache only makes the push, and every walk, faster.
+- **A grant does not follow a branch.** New code is approved by the next
+  push. The approved tree includes the tool's mounted dependencies, so most
+  changes to a repository change it: after moving a session to a newer caos,
+  push again. Updating automatically is not built.
+- **Old commits are the user's choice.** A session pinned to a commit older
+  than the newest 20 needs a `since=` that reaches it. A long `since=` makes
+  a long push: every commit in it is evaluated.
 
-For a walk to hold the tree `eval(T, parent)/name`, something must have
-produced `eval(T, parent)`:
+A commit where `dir` does not exist approves nothing and is not reported;
+the newest commits of a branch routinely include ones older than the tool.
 
-- this walk did, having started at `T`; or
-- an earlier evaluation did, and the tree arrived inside a mount or a copy.
-  Only the server resolves a `:@@=` locator, and it does so by evaluating
-  from the commit's tree.
+### What was built first, and why it went
 
-Either way the cache entry is written before the tool's directory can be
-tested, so the approved set already holds it.
+The first version of this design kept the reader on the server and built the
+set of approved trees there, from evaluations the server had happened to do:
+a root with an unevaluated expression on the reader's path was parked and
+followed again when the eval cache recorded a value. It passed the suite,
+and it needed a shared live set per reader, wake-ups on every cached value,
+a periodic refresh for values another process wrote, a fingerprint of each
+set in every walk's cache key, and one case where the server evaluated on a
+reader's behalf anyway (the suite grants `std/llm-step` and runs it from a
+`DEEP-DEPS` copy, so nothing else applied `std/.caos-expr` for the commit).
+A lost cache entry could deny a grant, and an alias reader was denied
+without a word. Evaluating at push removes all of it, at the cost of pushing
+again when the code changes.
 
-This argument holds when the reader names the place the tool's content
-**came from**. It fails when the reader names an alias. Suppose the grant is
-on `my-repo`, `dir=custom-tree/caos-std/github`, where `custom-tree` mounts
-caos, and a run reaches the identical tool through a direct caos mount
-elsewhere. The trees are equal, but the server can only know that by
-evaluating `eval(my-repo.tree, custom-tree)`, and nothing in the run makes it
-do so. The root stays parked and the grant is denied. The origin index had
-the same gap.
+## Session readers
 
-### The two sides are not symmetric
+`reader:@=<path> session=<id>` grants whatever is at `path` in the session's
+current head, to requests of that session. The head moves with every edit,
+so there is nothing to push. It is worked out when asked
+(`approved::session_approves`): the same rule, with the head's tree as the
+root, followed through values the eval cache already holds. The walk that
+is asking has just evaluated each parent on its way to the tool, so they are
+there. A walk may also start at a source tree inside the session, so every
+split of `path` into a prefix descended raw from the head (a gitlink
+entered) and a remainder is tried.
 
-- **Grant side:** the reader names a position under a commit root, and the
-  server must have evaluated that position from that root.
-- **Usage side:** any path at all, so long as the directory is the identical
-  tree.
+## The check, in two stages
 
-In normal use the second forces the first: the identical tree gets into a
-session through a locator mount, and resolving the mount is the grant-side
-evaluation.
-
-| The grant names | The run reaches the tool via | Result |
-|---|---|---|
-| caos, `std/github` | `custom-tree/caos-std/github` in a session | granted: resolving the mount evaluated caos from its root |
-| my-repo, `custom-tree/caos-std/github` | a direct caos mount elsewhere | denied: nothing evaluated my-repo's `custom-tree` |
-
-So: **grant where the tool is defined, use it from anywhere.** Usage does not
-connect when the surrounding tree changed anything inside the tool's
-directory (a different program, correctly refused) or when the tool was
-vendored as source and evaluated under different parents.
-
-A denied alias reader is silent today. Two remedies, neither built here:
-report, per reader, which roots resolved and which are parked on what; and
-evaluate the branch head's `parent of dir` in the background when a reader is
-first used. Either can be added without changing the model.
+1. **When evaluation applies a directory's `.caos-expr`**
+   (`EvalHost::evaluated`, given the directory's tree and the value): for
+   each secret of the run, if the directory, or the value, is one of the
+   secret's trees, or a session reader approves the directory, the image gets
+   a `secret-hash` entry and the server records "this image, these names"
+   under the run's scope. Marking has to happen where the image is formed, so
+   that anything embedding the tool is keyed per user too.
+2. **When an ArgTree is dispatched:** a secret is injected only if the
+   ArgTree contains every entry of a recorded image and carries the
+   `secret-hash` the server computes. The final ArgTree never equals
+   anything in a list; containing a recorded image is what lets a caller add
+   arguments to a granted tool. A granted tool must treat those arguments as
+   untrusted.
 
 ## The eval cache
 
-The approved set is only as good as the server's memory of what it has
-evaluated, and until now the server did not keep one per directory.
 `caos-eval` asks its host for a memo at each `.caos-expr`
-(`MemoKind::Node`, keyed on the tree alone); the server did not implement it,
-so every walk re-evaluated every expression on its way, and a `:@@=` mount
-resolved inside a walk re-walked its whole path. Job results were cached, so
-this cost redis lookups and tree assembly, not containers, but it was most of
-the time before dispatch.
-
-The cache is built first because the approved set reads it, and because it
-is worth having on its own.
+(`MemoKind::Node`, keyed on the tree alone); the server did not implement
+it, so every walk re-evaluated every expression on its way, and a `:@@=`
+mount resolved inside a walk re-walked its whole path. Job results were
+cached, so this cost redis lookups and tree assembly, not containers, but it
+was most of the time before dispatch.
 
 - **Entry:** "tree `Y` evaluated to `<kind> <oid>`", for the unmarked value
   `eval_node` returns.
 - **Variants:** one tree can have more than one value. A salted run re-keys
   every job under it, and a value that embeds a granted tool carries that
-  tool's `secret-hash`, which differs per secret store. So an entry is a
-  redis hash per tree, `caos:eval:[<namespace>:]<tree>`, with one field per
-  `(salt, walk key)` variant. A walk reads its own variant. The approved set
-  reads every variant: any value this server produced from an approved tree
-  is a legitimate parent to descend through.
+  tool's `secret-hash`. So an entry is a redis hash per tree,
+  `caos:eval:[<namespace>:]<tree>`, with one field per `(salt, walk key)`.
+  A walk reads its own variant; a session reader's path reads them all.
 - **Namespace:** the same `CAOS_CACHE_NAMESPACE` prefix as job results. An
   evaluation's value is built from job results, and those differ between
   builds of caos.
 - **Only successes are stored.** One exposure is shared with the walk cache
-  that already existed (`evaluate`): a job that caught a failure
-  returns a value, is itself not cached, and an evaluation built on it is.
-  Expressions run builds, which do not catch, so this has not been closed.
+  that already existed (`evaluate`): a job that caught a failure returns a
+  value, is itself not cached, and an evaluation built on it is. Expressions
+  run builds, which do not catch, so this has not been closed.
 
-### Durability
-
-Until now a lost cache entry cost time. Now it can deny a grant: if the entry
-for a mounted commit is evicted while the job that resolved the mount is
-still a cache hit, nothing re-evaluates the commit, its root parks, and the
-tool is refused. caosd-prod's redis is `allkeys-lru`. The origin index had
-the same exposure and it was never observed, but these entries should be kept
-where they are not evicted; that is deployment work, tracked under "Not yet
-done".
-
-## The check, in two stages
-
-Only the first stage changes.
-
-1. **When evaluation applies a directory's `.caos-expr`** (`EvalHost::evaluated`,
-   now given the directory's oid in place of its origins): for each secret of
-   the run, if the oid is in the approved set of one of its readers, the
-   image the expression produced gets a `secret-hash` entry and the server
-   records "this image, these names" under the run's scope. Marking has to
-   happen where the image is formed, so that anything embedding the tool is
-   keyed per user too.
-2. **When an ArgTree is dispatched:** a secret is injected only if the
-   ArgTree contains every entry of a recorded image and carries the
-   `secret-hash` the server computes. The final ArgTree never equals
-   anything in a set; containing a recorded image is what lets a caller add
-   arguments to a granted tool. A granted tool must treat those arguments as
-   untrusted.
+It is a cache and nothing more: losing an entry costs time. Only a session
+reader reads it to decide a grant, and the walk that asks has just written
+what it reads.
 
 ## What a walk's result depends on
 
 A walk under secrets is cached on its tree, its path and a walk key: the
-stores' trees, the session and its head, the commits its branches resolved
-to, and now a fingerprint of each locator reader's approved set. The
-fingerprint is there because the set can grow after a walk was cached: a
-reader that matched nothing when a tool was first evaluated (the alias case,
-once someone evaluates the alias) must not go on being answered from the walk
-that denied it. It changes only when a reader's set gains a tree, which is
-when a commit of the granted repository is evaluated for the first time.
+stores' trees, the session, and the session's head when a session reader
+names it. The approved trees are part of a store's tree, so nothing else is
+needed: a push changes the key, and a branch moving does not. A run that
+carries secrets used to re-key every walk each time a `ref=` branch moved.
 
-Grant records stay keyed by the scope without the fingerprint: a record says
-what was granted to an image, and that does not become false when the set
-grows.
-
-Still true, and worth changing later: a `ref=` reader re-keys every walk of
-its users each time the branch moves, whether or not the code at `dir`
-changed, and the session id is in the scope whether or not a session reader
-uses it. With the approved set in hand both could be replaced by the
-fingerprint alone, which would let sessions share walks. That waits for
-measurements.
+Still true, and worth changing later: the session id is in the key whether
+or not a session reader uses it, so two sessions of one user share no walks.
 
 ## What is removed
 
 `Origin`, `with_known` and `EvalHost::origins_of` in `caos-eval`; in the
 server, `KNOWN_ORIGINS`, `SENT`, `INDEXED`, `index_subtrees`, `index_root`,
-`record_mount`, and the redis keys `caos:secrets:origins2:*` and
-`caos:secrets:indexed3:*`. Nothing reads those keys afterwards, so they can
-be deleted from a deployed redis at any time after the change is live.
+`record_mount`, the per-request matching of readers against roots, and the
+redis keys `caos:secrets:origins2:*` and `caos:secrets:indexed3:*`. Nothing
+reads those keys afterwards, so they can be deleted from a deployed redis at
+any time after the change is live.
 
-## Order of work
-
-1. This document.
-2. Stop loading origins for a run with no secrets. One line; no behavior
-   change; it stands alone as relief if the rest is delayed.
-3. The eval cache.
-4. Approved sets, the new check, and removal of the origin index.
-5. Measure against the baselines in the 2026-11-11 investigation (median
-   server time per tool call 15.2 s; about 170k `SADD` and 27 `SMEMBERS` per
-   call).
+A store pushed before this change holds readers and no trees, so its
+`reader:@@=` lines grant nothing until it is pushed again.
 
 ## Not yet done
 
-- Keep eval-cache entries out of an evicting redis.
-- Report parked readers to the user (`secrets-push` reply or a status call).
-- Evaluate a reader's branch head on first use, so alias readers work.
-- Entries written by another server process sharing the redis wake nothing
-  here; parked roots are re-read at most once a minute.
-- A tool directory whose parent is itself a granted image is not followed:
-  the approved set descends through unmarked values only.
-- Re-key walks on the fingerprint alone (see above).
+- Measure against the baselines in the 2026-11-11 investigation (median
+  server time per tool call 15.2 s; about 170k `SADD` and 27 `SMEMBERS` per
+  call).
+- Update a store automatically when the code a reader names moves.
+- `secrets-push` sends no Git token, so a reader on a private repository
+  the server cannot already read is not evaluated.
+- How far back a commit still evaluates on the current server is untested;
+  an old commit that does not is a warning at push.
+- An eval-cache entry gains a field for every (salt, walk key) a tree is
+  evaluated under. Nothing trims them short of a new namespace, which every
+  deploy brings.
 - Separately: build the prod server optimized, and give each stack its own
-  `caos:secrets:*` keys (dev test stacks wrote about 53k origins into prod's
-  sets).
+  `caos:secrets:*` keys.
+- Separately: a tool's image depends on the server's build of caos because
+  every worker image carries the stack's own `caos` binary. If images were
+  built from the pinned commit alone, a result would not need the build in
+  its cache key, and the server would not redo everything after a deploy.

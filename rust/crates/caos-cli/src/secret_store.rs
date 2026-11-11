@@ -121,7 +121,7 @@ fn approve(server: &str, spec: &mut Spec) -> Result<(), String> {
         let fmt::Reader::Locator { locator, since } = reader else {
             continue;
         };
-        let commits = reader_commits(server, locator, since.as_deref())
+        let commits = commits_of(server, locator, since.as_deref())
             .map_err(|e| format!("secret {name}: {locator}: {e}"))?;
         let mut found = 0;
         for commit in &commits {

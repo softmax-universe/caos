@@ -79,7 +79,10 @@ impl Context {
                         continue;
                     }
                     match approved_set(config, pinned, since.as_deref()) {
-                        Ok(set) => sets.push((reader.clone(), set)),
+                        Ok((set, more)) => {
+                            sets.push((reader.clone(), set));
+                            unfinished.extend(more);
+                        }
                         Err(e) => eprintln!(
                             "secrets: a reader could not be checked, so it grants nothing: {e}"
                         ),

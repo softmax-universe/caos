@@ -43,7 +43,18 @@ pub fn cli_secrets_push(args: &[String]) -> Result<(), String> {
     let (dir, server) = parse_flags(args)?;
     let key = read_writer_key(&dir)?;
     let reader_key = hex(&key.verifying_key().to_bytes());
-    let secrets = load_dir(&dir)?;
+    let mut secrets = load_dir(&dir)?;
+    let server = match server {
+        Some(server) => server,
+        None => caos::GitTransport::from_cwd()
+            .and_then(|t| caos::Transport::server_url(&t))
+            .map_err(|e| format!("no --server, and no caos remote here: {e}"))?,
+    };
+    // Before signing: what is signed is the trees themselves, so the server
+    // holds exactly what this user approved and decides nothing later.
+    for (spec, _) in &mut secrets {
+        approve(&server, spec)?;
+    }
 
     let tree = tree_oid(&secrets)?;
     let sequence = std::time::SystemTime::now()

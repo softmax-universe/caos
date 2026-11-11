@@ -250,8 +250,8 @@ echo "  ok: a child received its reader-matched secret through server context" >
 
 echo "== a granted tool is marked, and so is anything embedding it ==" >&2
 # mytool matches the deploytok reader, so evaluating it marks it with
-# secret-hash. embedder/mytool is a byte-identical COPY, so it carries mytool's
-# origin and is marked too — which is what makes its embedder per-user.
+# secret-hash. embedder/mytool is a byte-identical COPY, so it is the same tree
+# and is marked too — which is what makes its embedder per-user.
 withsecret=$("$CAOS_CLI" eval-path mytool) || fail "eval-path mytool failed"
 emb_with=$("$CAOS_CLI" eval-path embedder) || fail "eval-path embedder failed"
 rm "$STORE/deploytok"

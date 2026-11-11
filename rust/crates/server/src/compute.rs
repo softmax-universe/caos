@@ -3607,9 +3607,12 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
     if ticket.len() != 40 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(HttpError::new(400, format!("invalid ticket: {ticket:?}")));
     }
-    let state = cache_get(&config.redis_addr, &ticket_key(config, ticket))
-        .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
-        .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))?;
+    let read = || {
+        cache_get(&config.redis_addr, &ticket_key(config, ticket))
+            .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
+            .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))
+    };
+    let state = read()?;
     // What callers read is a bare `pending`: the owner is the servers' business.
     let state = match pending_owner(&state) {
         None => state,
@@ -3619,7 +3622,19 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
             if here || peer_alive(config, owner) {
                 "pending".to_string()
             } else {
-                "failed 500 the server restarted before this finished; start it again".to_string()
+                // READ AGAIN before calling it dead: a ticket of this server's
+                // that finished between the read above and the look at
+                // `live_tickets` has left the set, and TicketGuard records the
+                // outcome before it leaves, so the second read has it. One read
+                // answered a call that had just succeeded as a restart (seen
+                // failing tests/mcp-serve in a loaded suite run).
+                let again = read()?;
+                if pending_owner(&again).is_none() {
+                    again
+                } else {
+                    "failed 500 the server restarted before this finished; start it again"
+                        .to_string()
+                }
             }
         }
     };

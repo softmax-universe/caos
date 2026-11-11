@@ -2,13 +2,13 @@
 //! request's SecretReaderKeys hold, which images evaluation granted them to,
 //! and injection at dispatch.
 //!
-//! A grant is decided where evaluation applies a directory's `.caos-expr`: the
-//! directory's tree is looked up in each reader's APPROVED SET
-//! ([`crate::approved`]). A granted image is marked with `secret-hash` and
-//! recorded; dispatch injects only into a job whose ArgTree is a superset of a
-//! recorded image. The record is what proves the image came from this
-//! server's evaluation: `secret-hash` alone is visible to anyone who has seen
-//! a granted run.
+//! A grant is decided where evaluation applies a directory's `.caos-expr`. A
+//! pushed secret carries the trees it is granted to, so the decision is a
+//! lookup: is this directory, or the image it evaluated to, one of them. A
+//! granted image is marked with `secret-hash` and recorded; dispatch injects
+//! only into a job whose ArgTree is a superset of a recorded image. The record
+//! is what proves the image came from this server's evaluation: `secret-hash`
+//! alone is visible to anyone who has seen a granted run.
 //!
 //! Records are kept in redis as well as here, so a restart does not forget
 //! them and a cached walk needs nothing replayed. A record is a fact about a
@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex};
 use caos_eval::EvalHost;
 use caos_world::secrets::Reader;
 
-use crate::approved::Set;
 use crate::compute::{list_append_many, list_read};
 use crate::secret_store::Stored;
 use crate::{Config, HttpError};
@@ -30,15 +29,8 @@ use crate::{Config, HttpError};
 #[derive(Clone, Default)]
 pub(crate) struct Context {
     stored: Arc<Vec<Stored>>,
-    /// Each `reader:@@=` with its approved set, for the commit range the
-    /// locator names at admission: a `ref=` is resolved once, so one run sees
-    /// one answer to where the branch is. A reader that could not be resolved
-    /// is absent, which grants nothing. The set itself is shared with every
-    /// other run and grows as the server evaluates (design/secrets.md, "The
-    /// set is live").
-    sets: Arc<Vec<(Reader, Arc<Set>)>>,
-    /// Every input a grant record depends on, the stores' trees, the session
-    /// and the pinned commits, so a push, a moved branch or another session
+    /// Every input a grant depends on: the stores' trees, which hold the
+    /// approved trees themselves, and the session. A push or another session
     /// sees none of this run's records.
     scope: String,
     session: Option<String>,
@@ -60,35 +52,9 @@ impl Context {
         let (stored, trees) =
             crate::secret_store::load(config, &keys).map_err(|e| HttpError::new(400, e))?;
         let session = session.filter(|c| !c.is_empty()).map(str::to_string);
-        let mut pins: HashMap<String, Option<String>> = HashMap::new();
-        let mut sets: Vec<(Reader, Arc<Set>)> = Vec::new();
-        let mut unfinished: Vec<String> = Vec::new();
         let mut head = None;
         for reader in stored.iter().flat_map(|s| &s.readers) {
             match reader {
-                Reader::Locator { locator, since } => {
-                    let pinned = pins.entry(locator.clone()).or_insert_with(|| {
-                        let pinned = crate::grant_history::pin(config, locator);
-                        pinned
-                            .map_err(|e| eprintln!("secrets: {locator}: {e}; it grants nothing"))
-                            .ok()
-                    });
-                    let Some(pinned) = pinned else {
-                        continue;
-                    };
-                    if sets.iter().any(|(known, _)| known == reader) {
-                        continue;
-                    }
-                    match approved_set(config, pinned, since.as_deref()) {
-                        Ok((set, more)) => {
-                            sets.push((reader.clone(), set));
-                            unfinished.extend(more);
-                        }
-                        Err(e) => eprintln!(
-                            "secrets: a reader could not be checked, so it grants nothing: {e}"
-                        ),
-                    }
-                }
                 Reader::Session { session: id, .. }
                     if Some(id) == session.as_ref() && head.is_none() =>
                 {
@@ -100,21 +66,10 @@ impl Context {
                 _ => {}
             }
         }
-        // A reader's path that stops at a directory under a commit already in
-        // use is finished before the run starts, so its set holds the tool
-        // (design/secrets.md, "Finishing a path").
-        crate::compute::finish_paths(config, &unfinished);
-        let mut pinned: Vec<&str> = pins.values().flatten().map(String::as_str).collect();
-        pinned.sort();
+        let scope = format!("{}|{}", trees.join(","), session.as_deref().unwrap_or(""));
         Ok(Context {
-            scope: format!(
-                "{}|{}|{}",
-                trees.join(","),
-                session.as_deref().unwrap_or(""),
-                pinned.join(",")
-            ),
+            scope,
             stored: Arc::new(stored),
-            sets: Arc::new(sets),
             session,
             head,
         })
@@ -126,52 +81,32 @@ impl Context {
 
     /// What a walk's result depends on besides its tree and path: `None` with
     /// no secrets, since then it depends on nothing more.
-    ///
-    /// The approved sets are in it by fingerprint. A set grows as the server
-    /// evaluates, and a walk cached while a tool's tree was not yet in the set
-    /// must not go on answering once it is.
     pub(crate) fn walk_key(&self) -> Option<String> {
-        if self.is_empty() {
-            return None;
-        }
-        let mut sets: Vec<String> = Vec::new();
-        for (_, set) in self.sets.iter() {
-            sets.push(set.fingerprint());
-        }
-        let head = self.head.as_deref().unwrap_or("");
-        Some(format!("{}|{head}|{}", self.scope, sets.join(",")))
+        (!self.is_empty()).then(|| format!("{}|{}", self.scope, self.head.as_deref().unwrap_or("")))
     }
 
-    /// Whether `reader` approves the directory `node` (a tree oid): it is in
-    /// the reader's approved set.
-    fn approves(&self, config: &Config, reader: &Reader, node: &str) -> bool {
-        match reader {
-            Reader::Locator { .. } => {
-                let mut sets = self.sets.iter();
-                sets.any(|(known, set)| known == reader && set.contains(node))
-            }
+    /// Whether `secret` is granted to the directory `node`, which evaluated to
+    /// `value` (both tree oids).
+    ///
+    /// A pushed tree may name either. `secrets-push` sends the directory: it
+    /// depends on the commit alone, where the image a tool builds also depends
+    /// on the build of caos that built it and on what its own dependencies
+    /// were granted. An image written by hand is honored all the same.
+    fn grants(&self, config: &Config, secret: &Stored, node: &str, value: &str) -> bool {
+        if secret.trees.iter().any(|tree| tree == node || tree == value) {
+            return true;
+        }
+        let Some(head) = self.head.as_deref() else {
+            return false;
+        };
+        secret.readers.iter().any(|reader| match reader {
             Reader::Session { path, session } => {
-                if self.session.as_deref() != Some(session.as_str()) {
-                    return false;
-                }
-                let Some(head) = self.head.as_deref() else {
-                    return false;
-                };
-                crate::approved::session_approves(config, head, path, node)
+                self.session.as_deref() == Some(session.as_str())
+                    && crate::approved::session_approves(config, head, path, node)
             }
-        }
+            Reader::Locator { .. } => false,
+        })
     }
-}
-
-/// A set, and the directories to evaluate so its paths can be finished.
-type Approved = (Arc<Set>, Vec<String>);
-
-/// The approved set of a `reader:@@=` whose locator is pinned to a commit.
-fn approved_set(config: &Config, pinned: &str, since: Option<&str>) -> Result<Approved, String> {
-    let git_ref = git_locator::parse_git_ref(pinned)?;
-    let roots = crate::grant_history::allowed_roots(config, &git_ref, since)?;
-    let dir = git_ref.dir.as_deref().unwrap_or("");
-    Ok(crate::approved::locator_set(config, &roots, dir))
 }
 
 // ---- records ----------------------------------------------------------------
@@ -233,9 +168,9 @@ fn record_grant(config: &Config, scope: &str, record: Record) {
 
 // ---- granting ---------------------------------------------------------------
 
-/// [`EvalHost::evaluated`] for the server: mark and record `value` when the
-/// directory it was evaluated from, `node`, is in the approved set of a
-/// reader of the run's secrets.
+/// [`EvalHost::evaluated`] for the server: mark and record `value` when it, or
+/// the directory `node` it was evaluated from, is a tree one of the run's
+/// secrets is granted to.
 pub(crate) fn evaluated(
     config: &Config,
     host: &dyn EvalHost,
@@ -246,11 +181,11 @@ pub(crate) fn evaluated(
     if context.is_empty() {
         return Ok(value);
     }
-    let approved = |secret: &&Stored| {
-        let mut readers = secret.readers.iter();
-        readers.any(|reader| context.approves(config, reader, node))
-    };
-    let granted: Vec<&Stored> = context.stored.iter().filter(approved).collect();
+    let granted: Vec<&Stored> = context
+        .stored
+        .iter()
+        .filter(|secret| context.grants(config, secret, node, &value.1))
+        .collect();
     if granted.is_empty() {
         return Ok(value);
     }

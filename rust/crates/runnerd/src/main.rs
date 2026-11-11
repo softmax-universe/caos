@@ -34,7 +34,7 @@
 //! `CAOS_RUNNER_SOCKET` (an engine socket, granted only to images that declare
 //! `CAOS_GRANT_ENGINE_SOCKET=1` in their own config env; `CAOS_GRANT_VOLUMES`
 //! is declared the same way and backs the listed mountpoints with persistent
-//! named volumes), and
+//! named volumes — but ONLY on the nix-store pool, see below), and
 //! `CAOS_WORKER_REDIS_ADDR` (a redis a worker may use for its own caching,
 //! injected into the containers; unset means none is offered).
 //!

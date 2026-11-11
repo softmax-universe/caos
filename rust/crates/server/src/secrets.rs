@@ -100,6 +100,10 @@ impl Context {
                 _ => {}
             }
         }
+        // A reader's path that stops at a directory under a commit already in
+        // use is finished before the run starts, so its set holds the tool
+        // (design/secrets.md, "Finishing a path").
+        crate::compute::finish_paths(config, &unfinished);
         let mut pinned: Vec<&str> = pins.values().flatten().map(String::as_str).collect();
         pinned.sort();
         Ok(Context {

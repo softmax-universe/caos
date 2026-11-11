@@ -126,6 +126,12 @@ pub fn parse_spec(file_name: &str, text: &str) -> Result<Spec, String> {
             "value:@" => spec.value = Some(Value::File(val.trim().to_string())),
             "reader:@@" => spec.readers.push(parse_locator_reader(file_name, val)?),
             "reader:@" => spec.readers.push(parse_session_reader(file_name, val)?),
+            "tree" if is_full_sha(val.trim()) => spec.trees.push(val.trim().to_string()),
+            "tree" => {
+                return Err(format!(
+                    "secret {file_name}: tree={val:?} is not a 40-hex tree"
+                ))
+            }
             other => return Err(format!("secret {file_name}: unknown key {other:?}")),
         }
     }

@@ -357,7 +357,9 @@ if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   # at once. Half each by default; the plain runnerd gets whatever the caosd
   # runner does not, and never fewer than one.
   total_slots=${CAOS_RUNNER_SLOTS:-8}
-  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-$((total_slots / 2))}
+  half=$((total_slots / 2))
+  if [ "$half" -lt 1 ]; then half=1; fi
+  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-$half}
   plain_slots=$((total_slots - caosd_slots))
   if [ "$plain_slots" -lt 1 ]; then plain_slots=1; fi
   start_runnerd runnerd "$plain_slots" ""

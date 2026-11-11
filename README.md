@@ -277,7 +277,8 @@ build (the registry, by name; std/flake-builder curries the arg onto its
 image). Only the caosd runner — a runnerd on the central host started with
 `CAOS_RUNNER_REQUIRE=required-caosd=true` — runs them, and it is the only
 runner that grants volumes. `stack/serve` starts both runners on the central
-host (`CAOS_STACK_CAOSD_SLOTS` sizes the second).
+host and splits `CAOS_RUNNER_SLOTS` between them, half each by default
+(`CAOS_STACK_CAOSD_SLOTS` sets the caosd runner's share).
 
 ### Compute
 

@@ -84,10 +84,14 @@
 #                             image as one of these (design/one-stack-image.md,
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
-#   CAOS_RUNNER_SLOTS         the general pool's concurrency
-#   CAOS_STACK_CAOSD_SLOTS    the caosd runner's concurrency (default:
-#                             CAOS_RUNNER_SLOTS; 0 starts no caosd runner). It
-#                             is a second runnerd, started only when
+#   CAOS_RUNNER_SLOTS         how many workers this host runs at once, in total
+#                             (default 8): split between the plain runnerd and
+#                             the caosd runner below, half each by default
+#   CAOS_STACK_CAOSD_SLOTS    the caosd runner's share of CAOS_RUNNER_SLOTS
+#                             (default: half, rounded down; 0 starts no caosd
+#                             runner); the plain runnerd gets the rest, at
+#                             least one. The caosd runner is a second runnerd,
+#                             started only when
 #                             RUNNERD=yes, requiring `required-caosd=true`: it
 #                             alone runs the jobs that must run on this host
 #                             (they carry that arg: dev/test-stack, every

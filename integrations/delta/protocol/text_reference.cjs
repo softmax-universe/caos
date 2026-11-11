@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 
 function verifyTextReference(e, memory) {
-  const {alloc, bytes, view, u32, u64, encode, decode, check} = memory;
+  const {alloc, bytes, view, u32, u64, encode, decode, check, anchors} = memory;
   const empty = () => {
     const text = alloc(192); // Pinned Text<DeltaId, ArcAllocator>.
     e.text_empty(text);
@@ -55,6 +55,11 @@ function verifyTextReference(e, memory) {
   check('empty native text', string(initial), '');
   check('insert native text', apply(initial, 1, 1, edit('abc', [[0, 0, 3]])), 'abc');
   check('insert at a byte offset', apply(initial, 2, 1, edit('X', [[1, 0, 1]])), 'aXbc');
+  for (let offset = 0; offset < 3; offset++) {
+    const before = [0, 2, 3][offset];
+    check('Right anchor precedes its byte', anchors(initial, 1, 1, offset, true), before);
+    check('Left anchor follows its visible byte', anchors(initial, 1, 1, offset, false), before + 1);
+  }
   const unicode = empty();
   apply(unicode, 1, 1, edit('😀é', [[0, 0, 6]]));
   check('native offsets count UTF-8 bytes',
@@ -94,6 +99,11 @@ function verifyTextReference(e, memory) {
     return seed % limit;
   };
   const cases = [];
+  let anchorSeed = 991;
+  const anchorRandom = limit => {
+    anchorSeed = (Math.imul(anchorSeed, 1664525) + 1013904223) >>> 0;
+    return anchorSeed % limit;
+  };
   for (let caseIndex = 0; caseIndex < 128; caseIndex++) {
     const steps = [], ancestors = [], bases = [], cache = new Map();
     const materialize = selected => {
@@ -143,10 +153,17 @@ function verifyTextReference(e, memory) {
       steps.push({timestamp: index + 1, actor: 1 + random(2), parents, wire: edit(text, splices)});
     }
     const all = new Set(steps.map((_, index) => index));
-    const expected = string(materialize(all));
+    const final = materialize(all), expected = string(final);
     const parents = new Set(steps.flatMap(step => step.parents));
     const heads = steps.map((_, index) => index).filter(index => !parents.has(index));
-    cases.push({name: `synthetic-${caseIndex}`, steps, heads, expected});
+    const anchorQueries = [];
+    for (let query = 0; query < 6; query++) {
+      const step = anchorRandom(steps.length), offset = anchorRandom(8);
+      const right = anchorRandom(2) === 1;
+      const expected = anchors(final, steps[step].timestamp, steps[step].actor, offset, right);
+      anchorQueries.push({step, offset, right, expected});
+    }
+    cases.push({name: `synthetic-${caseIndex}`, steps, heads, expected, anchors: anchorQueries});
   }
   return cases;
 }

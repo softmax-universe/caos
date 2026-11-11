@@ -30,6 +30,12 @@ func TestNativeTextReferenceCorpus(t *testing.T) {
 			}
 			Heads    []int
 			Expected string
+			Anchors  []struct {
+				Step     int
+				Offset   uint64
+				Right    bool
+				Expected *int
+			}
 		}
 	}
 	data, err := os.ReadFile(path)
@@ -70,8 +76,30 @@ func TestNativeTextReferenceCorpus(t *testing.T) {
 			random := rand.New(rand.NewSource(19))
 			for iteration := 0; iteration < 5; iteration++ {
 				random.Shuffle(len(batches), func(i, j int) { batches[i], batches[j] = batches[j], batches[i] })
-				if actual := replayTextAt(t, batches, heads...); actual != test.Expected {
+				state, err := replayHistory(batches, heads)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if actual := state.Buffers[fieldObject(0)].stringAt(state.basis); actual != test.Expected {
 					t.Fatalf("Go text %q differs from native text %q", actual, test.Expected)
+				}
+				for _, query := range test.Anchors {
+					if query.Step < 0 || query.Step >= len(test.Steps) {
+						t.Fatal("invalid native anchor step")
+					}
+					step := test.Steps[query.Step]
+					anchor := scratchAnchor{
+						Kind: 2, Buffer: fieldObject(0), Insertion: replayID(step.Timestamp, step.Actor),
+						Offset: query.Offset, RightBias: query.Right,
+					}
+					actual, err := state.resolveAnchor(anchor)
+					if query.Expected == nil {
+						if err == nil {
+							t.Fatal("Go resolved an anchor absent from the native snapshot")
+						}
+					} else if err != nil || actual != *query.Expected {
+						t.Fatalf("Go anchor %d %v differs from native %d", actual, err, *query.Expected)
+					}
 				}
 			}
 		})

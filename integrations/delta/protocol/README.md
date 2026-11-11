@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**8,839 checks pass**, covering:
+**9,627 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -40,13 +40,19 @@ implement the recovered messages itself, without shipping or loading Delta Web.
   offsets, scratch-buffer creation, and payload-ID allocation.
 - Observed-remove map behavior, including preservation of unseen concurrent
   values and removal that reveals a previously hidden value.
+- Scratch-buffer anchors, including both biases, deleted text, and byte positions
+  inside Unicode scalars, with 768 queries across the generated histories.
+- No-op and causal `UpdateHistory` envelopes, outgoing batches, timeline updates,
+  and decoding the acceptance response observed in the separate live write check.
 
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a
 turn, or accept history updates from a replacement implementation.
 The separate [standalone connector](../connector/README.md) has since passed
-live authentication, heartbeat, and registration checks from CAOS; history
-synchronization and agent-turn execution remain unfinished.
+live authentication, heartbeat, registration, and history reads from CAOS. A
+separately gated write added one unused map to the approved disposable fixture
+and verified it in a fresh readback. Turn ownership, ongoing synchronization,
+and agent-turn execution remain unfinished.
 
 ## Recovered wire facts
 
@@ -210,8 +216,8 @@ CAOS_DELTA_TEXT_REFERENCE_CASES="$cache/new-text-cases.json" \
   go test -race -run=TestNativeTextReferenceCorpus -count=1 .
 ```
 
-The cases include forks, multi-parent merges, Unicode, replacements, and
-deletions. The Go check also shuffles batch delivery. The native map checks
+The cases include forks, multi-parent merges, Unicode, replacements, deletions,
+and anchor-resolution queries. The Go check also shuffles batch delivery. The native map checks
 establish a separate rule: updates remove only values observed by their parent,
 and reading chooses the greatest surviving insertion ID. A deletion is not a
 last-writer-wins tombstone that can erase an unseen insertion.

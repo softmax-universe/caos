@@ -43,6 +43,10 @@ FUNCTIONS = {
     "ack_local_encode": codec("AcknowledgeLocalMachineTurn", ENCODE),
     "client_encode": codec("ClientMessage", ENCODE),
     "server_decode": codec("ServerMessage", DECODE),
+    "batch_decode": f"<deltadb::history::HistoryDeltaBatch as versioned::Versioned>::{DECODE}",
+    "batch_encode": f"<deltadb::history::HistoryDeltaBatch as versioned::Versioned>::{ENCODE}",
+    "origin_decode": f"<deltadb::history::TimelineOrigin as versioned::Versioned>::{DECODE}",
+    "origin_encode": f"<deltadb::history::TimelineOrigin as versioned::Versioned>::{ENCODE}",
     "history_path": "delta_remote_protocol::history_websocket_path",
     "thread_encode": f"<thread::ThreadDataStub as versioned::Versioned>::{ENCODE}",
     "thread_decode": f"<thread::ThreadDataStub as versioned::Versioned>::{DECODE}",
@@ -81,6 +85,9 @@ FUNCTIONS = {
         "<deltadb::fragment_index::FragmentIndex<deltadb::delta::DeltaId, "
         "delta_collections::allocator::ArcAllocator>>::offset_and_visibility_for_fragment_id"
     ),
+    "buffer_decode": f"<deltadb::history::BufferId as versioned::Versioned>::{DECODE}",
+    "anchor_decode": f"<deltadb::buffer_anchor::BufferAnchorStub as versioned::Versioned>::{DECODE}",
+    "anchor_resolve": "<deltadb::client::BufferSnapshot>::resolve_anchor",
     "snapshot_empty": f"<{SNAPSHOT_TYPE}>::new",
     "snapshot_clone": f"<{SNAPSHOT_TYPE} as core::clone::Clone>::clone",
     "map_insert": (

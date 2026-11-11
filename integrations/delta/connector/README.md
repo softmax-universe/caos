@@ -4,10 +4,10 @@ This is a Go implementation of selected Delta protocol operations. It does not
 launch, embed, or download the Delta application. The public reference Wasm is
 used only by the separate [protocol investigation](../protocol/README.md).
 
-**Current state: authentication, registration, history download, and conversation
-state replay work; agent-turn execution is not implemented yet.** The CAOS entry implements
-bounded checks, not a persistent runner. Do not select a diagnostic machine for
-real work.
+**Current state: authentication, registration, conversation replay, and initial
+workspace-tree reconstruction work; agent-turn execution is not implemented yet.**
+The CAOS entry implements bounded checks, not a persistent runner. Do not select
+a diagnostic machine for real work.
 
 ## Verified against the real service
 
@@ -47,8 +47,8 @@ passed the full salted CAOS suite (**79/79**), CAOS and native Nix builds,
 race-enabled Go tests, and live connection/history checks. The replay engine was
 added afterward and has separate compatibility checks.
 
-The offline reference runs 8,839 protocol and in-memory state checks, including
-128 generated text-CRDT histories. See the protocol README for exporting those
+The offline reference runs 9,627 protocol and in-memory state checks, including
+128 generated text-CRDT histories and 768 anchor queries. See the protocol README for exporting those
 cases and comparing the Go implementation against them. The production worker
 does not include or invoke that reference module.
 
@@ -101,10 +101,35 @@ into CAOS arguments or results. Output files are private and never overwritten.
 
 This reconstructs already accepted records; it does not authorize new edits.
 Seal enforcement for a writer, live ownership/epoch admission, native message
-translation, workspace-delta replay, and replication-pack retrieval remain
-unimplemented. Unsupported deltas and incomplete histories fail explicitly.
+translation, incremental workspace-delta replay, and replication-pack retrieval
+remain unimplemented. Unsupported deltas and incomplete histories fail explicitly.
 A stored generation-state tag is not a liveness check: the fixture retains a
 Streaming value even after its assistant response has completed.
+
+## Workspace identity and journal-write checks
+
+Workspace attachments identify their own history, timeline, pinned version, and
+worktree root. The connector follows those descriptors from an authorized thread
+and reconstructs their initial Git trees, preserving blob IDs, executable modes,
+symlinks, and Git's directory ordering. It does not use the operator's checkout
+as a substitute for the thread's files. Unsafe paths, unresolved attachments,
+missing causal parents, unfetched packs, and incremental edits fail explicitly.
+
+The approved fixture's 1,022 initial entries reconstruct Git tree
+`d997a9ffc38b9e37a31d57175036fb8fb086973d`, exactly matching its recorded base
+commit `75bd5aaa6a054150042c4ab3a6425a36d9697379`. This establishes the content
+identity needed to reuse CAOS's object store; it does not establish file-delta
+synchronization or prove that every blob is available on the execution server.
+
+The outgoing history encoder also matches the compiled native reference. A
+separately gated live test wrote one unused empty map into the disposable
+fixture, received acceptance, then found that exact batch in a fresh download.
+The conversation text and files were unchanged. The fixture now has 25 batches.
+No turn was acknowledged or executed by that test.
+
+The encoder is not an authorization layer or a turn controller. A writer must
+retain an allocated batch across an uncertain send and reconcile it by identity,
+not allocate another batch and assume the first one failed.
 
 ## Authentication
 
@@ -162,6 +187,10 @@ published to a CAOS result. `registration-name` is accepted only by `op=probe`.
 `op=replay-history` uses the same sealed allowlist, downloads the history, and
 reconstructs it in the worker. It returns only counts, not text, map values,
 model vouchers, or other private state. Neither history operation accepts turns.
+
+`op=inspect-workspaces` follows the authorized thread's resolved attachments and
+reconstructs their pinned initial trees. It returns only workspace and object
+counts. It does not write files or accept turns.
 
 The image contains the statically compiled connector and CA certificates, plus
 CAOS's normal additions. It contains no desktop, browser, Delta binary, native

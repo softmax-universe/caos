@@ -6,6 +6,8 @@ const path = require('node:path');
 const {recoverSchemas} = require('./schema_reference.cjs');
 const {verifyTextReference} = require('./text_reference.cjs');
 const {verifyValueReference} = require('./value_reference.cjs');
+const {anchorReference} = require('./anchor_reference.cjs');
+const {verifyHistoryWriteReference} = require('./history_write_reference.cjs');
 
 const directory = process.argv[2];
 const outputs = {};
@@ -43,9 +45,11 @@ async function main() {
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
       'server_decode', 'history_path', 'thread_encode', 'thread_decode', 'field_push',
+      'batch_decode', 'batch_encode', 'origin_decode', 'origin_encode',
       'text_empty', 'text_string', 'text_clone', 'text_apply', 'edit_decode',
       'edit_encode', 'batch_payload_id',
       'text_create', 'scratch_decode', 'fragment_decode', 'fragment_offset',
+      'buffer_decode', 'anchor_decode', 'anchor_resolve',
       'snapshot_empty', 'snapshot_clone', 'map_insert', 'map_remove', 'map_get',
       'map_values', 'map_winner', 'map_insert_decode', 'map_remove_decode',
       'schema_thread', 'schema_batch'].sort(),
@@ -343,8 +347,10 @@ async function main() {
     check('FieldId path', readHex(next + 1, i + 1), Buffer.from(fieldPath.slice(0, i + 1)).toString('hex'));
     fieldId = next;
   }
-  const textCases = verifyTextReference(e, {alloc, bytes, view, u32, u64, encode, decode, check});
+  const anchors = anchorReference(e, {alloc, bytes, view, u32, decode, check});
+  const textCases = verifyTextReference(e, {alloc, bytes, view, u32, u64, encode, decode, check, anchors});
   verifyValueReference(e, {alloc, bytes, view, u64, decode, check});
+  verifyHistoryWriteReference(e, {alloc, bytes, u32, copyHex, encode, decode, check});
   assert.deepEqual(hostCalls, []);
   console.log(`PASS: ${checks} protocol/text checks; 0 browser/network/storage calls`);
   console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);

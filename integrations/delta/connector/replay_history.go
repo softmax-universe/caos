@@ -150,6 +150,14 @@ func replaySnapshot(snapshot historySnapshot) (*replayState, error) {
 	if int(snapshot.Download.CoveredBatchCount) != len(snapshot.Download.Batches) {
 		return nil, errors.New("history download does not cover its declared batches")
 	}
+	heads, err := snapshot.frontier()
+	if err != nil {
+		return nil, err
+	}
+	return replayHistory(snapshot.Download.Batches, heads)
+}
+
+func (snapshot historySnapshot) frontier() ([]deltaID, error) {
 	var heads []deltaID
 	found := false
 	for _, raw := range snapshot.Timelines {
@@ -176,5 +184,5 @@ func replaySnapshot(snapshot historySnapshot) (*replayState, error) {
 	if !found {
 		return nil, errors.New("history index is missing the requested timeline")
 	}
-	return replayHistory(snapshot.Download.Batches, heads)
+	return heads, nil
 }

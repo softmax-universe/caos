@@ -36,7 +36,7 @@ func runWorker(ctx context.Context) (string, error) {
 	if w.Exists("/cas/args/op") {
 		op = w.Read("/cas/args/op")
 	}
-	if op != "probe" && op != "inspect-history" && op != "replay-history" {
+	if op != "probe" && op != "inspect-history" && op != "replay-history" && op != "inspect-workspaces" {
 		return "", errors.New("unsupported Delta worker operation")
 	}
 	var name *string
@@ -84,10 +84,26 @@ func runWorker(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if op == "replay-history" {
+		if op == "replay-history" || op == "inspect-workspaces" {
 			state, err := replaySnapshot(snapshot)
 			if err != nil {
 				return "", err
+			}
+			if op == "inspect-workspaces" {
+				references, err := threadWorkspaces(state)
+				if err != nil {
+					return "", err
+				}
+				objects := 0
+				for _, reference := range references {
+					workspace, err := fetchInitialWorkspace(ctx, defaultRemoteURL, token, actor, reference)
+					if err != nil {
+						return "", err
+					}
+					objects += len(workspace.Tree.Objects)
+				}
+				return fmt.Sprintf("Reconstructed %d authorized Delta workspace trees in CAOS (%d tree/symlink objects).\nNo files were changed and no turn was accepted or executed.\n",
+					len(references), objects), nil
 			}
 			summary, err := summarizeReplay(state)
 			if err != nil {
@@ -98,7 +114,7 @@ func runWorker(ctx context.Context) (string, error) {
 		}
 		// Thread content and pack metadata may be private. Do not publish them
 		// into a CAOS result merely to establish that the transport works.
-		return fmt.Sprintf("Read the authorized Delta test history from CAOS: %d inline batches, %d replication-pack references.\nHistory replay and agent-turn execution are not implemented.\n",
+		return fmt.Sprintf("Read the authorized Delta test history from CAOS: %d inline batches, %d replication-pack references.\nNo turn was accepted or executed.\n",
 			len(snapshot.Download.Batches), len(snapshot.Download.ReplicationPacks)), nil
 	}
 	result, err := probeRemote(ctx, defaultRemoteURL, token, actor, name)

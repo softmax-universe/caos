@@ -22,13 +22,12 @@ type replayText struct {
 	root textAtom
 }
 
-func (text *replayText) visible(basis historyBasis) []*textAtom {
+func (text *replayText) visit(basis historyBasis, visit func(*textAtom, bool) bool) {
 	type cursor struct {
 		node  *textAtom
 		child int
 	}
 	stack := []cursor{{node: &text.root}}
-	var visible []*textAtom
 	for len(stack) > 0 {
 		top := &stack[len(stack)-1]
 		if top.child == len(top.node.Children) {
@@ -40,19 +39,32 @@ func (text *replayText) visible(basis historyBasis) []*textAtom {
 		if !basis.contains(node.Birth) {
 			continue // A visible descendant cannot have an unseen insertion parent.
 		}
-		if !removedAt(node.DeletedBy, basis) {
-			visible = append(visible, node)
+		if !visit(node, !removedAt(node.DeletedBy, basis)) {
+			return
 		}
 		stack = append(stack, cursor{node: node})
 	}
+}
+
+func (text *replayText) visible(basis historyBasis) []*textAtom {
+	var visible []*textAtom
+	text.visit(basis, func(atom *textAtom, present bool) bool {
+		if present {
+			visible = append(visible, atom)
+		}
+		return true
+	})
 	return visible
 }
 
 func (text *replayText) stringAt(basis historyBasis) string {
 	var result strings.Builder
-	for _, atom := range text.visible(basis) {
-		result.WriteString(atom.Text)
-	}
+	text.visit(basis, func(atom *textAtom, present bool) bool {
+		if present {
+			result.WriteString(atom.Text)
+		}
+		return true
+	})
 	return result.String()
 }
 

@@ -272,10 +272,10 @@ A plain `caos-runnerd` (no `CAOS_RUNNER_REQUIRE`) is the general pool and
 mounts none of its host's persistent volumes into any worker, so it can run on
 any machine that reaches the server. Jobs that need the host's nix store (and
 the other volumes an image declares in `CAOS_GRANT_VOLUMES`) carry
-`--required-nix-store=true`; only a runnerd started with
-`CAOS_RUNNER_REQUIRE=required-nix-store=true` takes them, and it is the only one
+`--required-caosd=true`; only a runnerd started with
+`CAOS_RUNNER_REQUIRE=required-caosd=true` takes them, and it is the only one
 that grants volumes. `stack/serve` runs both on the main server
-(`CAOS_STACK_NIX_STORE_SLOTS` sizes the second).
+(`CAOS_STACK_CAOSD_SLOTS` sizes the second).
 
 ### Compute
 

@@ -85,10 +85,10 @@
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
 #   CAOS_RUNNER_SLOTS         the general pool's concurrency
-#   CAOS_STACK_NIX_STORE_SLOTS  the nix-store pool's concurrency (default:
+#   CAOS_STACK_CAOSD_SLOTS  the caosd pool's concurrency (default:
 #                             CAOS_RUNNER_SLOTS; 0 runs no such pool). It is a
 #                             second runnerd, started only when RUNNERD=yes,
-#                             requiring `required-nix-store=true`: it alone
+#                             requiring `required-caosd=true`: it alone
 #                             serves jobs that carry that arg and it alone
 #                             grants persistent volumes (the shared nix store
 #                             above all). The general pool grants none, which
@@ -347,13 +347,13 @@ start_runnerd() { # <log-name> <slots> <require>
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
-  # The nix-store pool: the jobs that need this host's persistent volumes
-  # (`--required-nix-store=true`, e.g. dev/test-stack) and only those. Without
+  # The caosd pool: the jobs that need this host's persistent volumes
+  # (`--required-caosd=true`, e.g. dev/test-stack) and only those. Without
   # it they match no runner and fail at their pending deadline, which is the
   # intended failure — so it is on by default wherever runnerd is.
-  nix_slots=${CAOS_STACK_NIX_STORE_SLOTS:-${CAOS_RUNNER_SLOTS:-8}}
-  if [ "$nix_slots" -gt 0 ]; then
-    start_runnerd runnerd-nix "$nix_slots" "required-nix-store=true"
+  caosd_slots=${CAOS_STACK_CAOSD_SLOTS:-${CAOS_RUNNER_SLOTS:-8}}
+  if [ "$caosd_slots" -gt 0 ]; then
+    start_runnerd runnerd-caosd "$caosd_slots" "required-caosd=true"
   fi
 fi
 

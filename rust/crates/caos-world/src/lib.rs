@@ -103,21 +103,21 @@ pub const SEEDED_POOL: &str = "seeded";
 /// The arg a job carries when it needs the HOST'S persistent storage: the
 /// shared nix store and the other named volumes an image declares in
 /// `CAOS_GRANT_VOLUMES` (`/mounted-nix`, `/caos-dev`, `/caos-images` for
-/// dev/devbox). Bound as `--required-nix-store=true`.
+/// dev/devbox). Bound as `--required-caosd=true`.
 ///
 /// It is a `required*` arg on purpose, so the rendezvous does the routing: the
 /// generic pool advertises no entry of this name and so never takes such a job,
-/// and only a runnerd started with `CAOS_RUNNER_REQUIRE=required-nix-store=true`
+/// and only a runnerd started with `CAOS_RUNNER_REQUIRE=required-caosd=true`
 /// — the main server's nix pool — can. That runnerd is also the ONLY one that
 /// grants volumes at all, so a runner on any other machine mounts nothing of the
 /// host's into anything, whatever an image asks for. Being `required*`, it is
 /// also inherited by a job's continuations (server `inherited_pool_entries`).
-pub const REQUIRED_NIX_STORE_ARG: &str = "required-nix-store";
+pub const REQUIRED_CAOSD_ARG: &str = "required-caosd";
 
-/// The value [`REQUIRED_NIX_STORE_ARG`] is bound to. One spelling, because the
+/// The value [`REQUIRED_CAOSD_ARG`] is bound to. One spelling, because the
 /// rendezvous compares blob oids: `yes` or `1` would be a different pool that
 /// no runner serves.
-pub const NIX_STORE_POOL: &str = "true";
+pub const CAOSD_POOL: &str = "true";
 
 /// The reserved ArgTree entry that names an INSTANCE (design/daemons.md). A job
 /// with one is keyed by `(base, affinity)`: the server gives that key a single

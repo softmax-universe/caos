@@ -7,9 +7,9 @@
 # It is not run by hand. `std/caos-test` and `dev/caos-stack` are the callers:
 # each forms the keyed message and tail-calls it.
 #
-# `--required-nix-store=true` because devbox's grants are persistent volumes —
+# `--required-caosd=true` because devbox's grants are persistent volumes —
 # the shared nix store (/mounted-nix), the stack's state (/caos-dev) and its
-# engine's images (/caos-images) — and only the nix-store pool grants those.
+# engine's images (/caos-images) — and only the caosd pool grants those.
 # The arg routes every message for the daemon to that pool, which runs on the
 # host the volumes live on; a general runner (on any machine) never takes it.
-curry --base:@=DEEP-DEPS/devbox --worker1:@=worker.sh --required-nix-store=true
+curry --base:@=DEEP-DEPS/devbox --worker1:@=worker.sh --required-caosd=true

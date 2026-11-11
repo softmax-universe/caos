@@ -35,8 +35,8 @@
   #
   #                             DECLARING IS NOT ENOUGH. Volumes are the host's
   #                             storage, so runnerd grants them only on the
-  #                             nix-store pool, and a job reaches that pool only
-  #                             by carrying `--required-nix-store=true`
+  #                             caosd pool, and a job reaches that pool only
+  #                             by carrying `--required-caosd=true`
   #                             (dev/test-stack does). Anywhere else this image
   #                             runs with none of the three, which ./worker
   #                             tolerates for /mounted-nix and dev/stack-up

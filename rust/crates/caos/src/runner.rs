@@ -1148,7 +1148,7 @@ fn next_job(
 /// The job's runner-selection args — every top-level entry of `args` named with
 /// `caos_world::REQUIRED_ARG_PREFIX` — as name → oid, read off the placeholders
 /// the way `base` is. These are the pool the job was routed to
-/// (`required-nix-store`, `required-pool`); an entry whose hash cannot be read is
+/// (`required-caosd`, `required-pool`); an entry whose hash cannot be read is
 /// left out, which only costs the follow-up poll its specificity.
 fn pool_entries(args: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     let mut pool = std::collections::BTreeMap::new();

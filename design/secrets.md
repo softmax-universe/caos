@@ -123,8 +123,13 @@ for three reasons.
   binaries the stack built, including a copy of the stack's own `caos`
   (AGENTS.md: "a rebuilt `caos` re-keys every worker image"). The same commit
   is a different image after a server deploy, so every user's grants would
-  lapse at each deploy. The directory is the repository's own files
-  rearranged by deep-deps, and depends on the commit alone.
+  lapse at each deploy. The directory is stable across builds only as far
+  as the expressions above it are: for caos they run deep-deps and nothing
+  else, which rearranges the repository's own files, so the directory is
+  the same on any build. That is a property of those expressions, not of
+  this design. A repository whose parent expression builds something into
+  the tool's directory gets a tree that changes with the server's build,
+  and its secrets lapse at a deploy, silently, until the next push.
 - **It depends on other grants.** A granted image is marked with
   `secret-hash`, and an image that binds another holds it by hash. If tool A
   binds tool B and B is granted, A's image differs per user (`tests/secrets`

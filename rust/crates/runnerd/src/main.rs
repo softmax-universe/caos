@@ -515,8 +515,7 @@ fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
 /// arg, and no other runner gets those jobs, so "this runner grants volumes"
 /// and "this job asked for them" are the same statement.
 fn grants_volumes(required: &std::collections::BTreeMap<String, String>) -> bool {
-    required.get(caos_world::REQUIRED_NIX_STORE_ARG)
-        == Some(&blob_oid(caos_world::NIX_STORE_POOL))
+    required.get(caos_world::REQUIRED_NIX_STORE_ARG) == Some(&blob_oid(caos_world::NIX_STORE_POOL))
 }
 
 /// One long-poll. `Some(job)` to run; `None` on idle/evicted.

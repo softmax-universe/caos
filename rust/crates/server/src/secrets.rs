@@ -163,8 +163,11 @@ impl Context {
     }
 }
 
+/// A set, and the directories to evaluate so its paths can be finished.
+type Approved = (Arc<Set>, Vec<String>);
+
 /// The approved set of a `reader:@@=` whose locator is pinned to a commit.
-fn approved_set(config: &Config, pinned: &str, since: Option<&str>) -> Result<Arc<Set>, String> {
+fn approved_set(config: &Config, pinned: &str, since: Option<&str>) -> Result<Approved, String> {
     let git_ref = git_locator::parse_git_ref(pinned)?;
     let roots = crate::grant_history::allowed_roots(config, &git_ref, since)?;
     let dir = git_ref.dir.as_deref().unwrap_or("");

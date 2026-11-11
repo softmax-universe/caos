@@ -113,9 +113,6 @@ pub(crate) fn put(config: &Config, tree: &str, variant: &str, value: &Value) {
         eprintln!("eval cache: recording {tree}: {e}");
     }
     remember(id, value.clone());
-    // After the write: a reader's approved set waiting on this tree follows
-    // its path again, and reads the value back from redis.
-    crate::approved::noted(config, tree);
 }
 
 /// Every value this server has recorded for `tree`, whatever the variant.

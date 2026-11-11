@@ -189,6 +189,8 @@ struct State {
     /// commit range, and a set keeps its own alive) and the path.
     sets: HashMap<(usize, String), Arc<Set>>,
     refreshed: Option<Instant>,
+    /// When each directory was last handed back to be evaluated.
+    tried: HashMap<String, Instant>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);

@@ -285,7 +285,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         if matches!(after, After::Done) {
             return Ok(());
         }
-        match next_job(&runner.t, &oid, &token)? {
+        match next_job(&runner.t, &oid, &runner.pool, &token)? {
             Some(next) => job = next,
             None => return Ok(()),
         }

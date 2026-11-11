@@ -77,6 +77,10 @@ pub struct Spec {
     pub entropy: Option<String>,
     pub value: Option<Value>,
     pub readers: Vec<Reader>,
+    /// `tree=<oid>`: a tree the secret is granted to (design/secrets.md).
+    /// `secrets-push` adds one for each tool a `reader:@@=` names, as the
+    /// server evaluates it; a line written by hand approves that exact tree.
+    pub trees: Vec<String>,
 }
 
 impl Spec {

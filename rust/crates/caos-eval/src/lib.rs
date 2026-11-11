@@ -276,14 +276,6 @@ fn eval_path_uncached(
         .collect();
     let mut node_kind = String::from("tree");
     let mut node_oid = start_tree.to_string();
-    let mut origins = with_known(
-        host,
-        vec![Origin {
-            root: start_tree.to_string(),
-            path: String::new(),
-        }],
-        start_tree,
-    );
     let mut i = 0usize;
     loop {
         // A gitlink stays a commit value unless the path enters its tree.

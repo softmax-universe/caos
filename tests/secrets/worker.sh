@@ -128,7 +128,7 @@ git push -q caos "HEAD:refs/heads/${test_run_id}-secrets-test" \
 
 # --- the store (outside the repo, never committed) ---------------------------
 # Readers grant by LOCATOR: this commit, and a path in it. The client ingests
-# the committed tree, so what it evaluates has exactly that origin. The URL is
+# the committed tree, so what it evaluates is exactly that commit's. The URL is
 # never fetched — the server already holds the commit — so any well-formed one
 # names it.
 STORE=/tmp/secrets-test-store

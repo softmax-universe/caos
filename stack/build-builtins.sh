@@ -33,14 +33,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT=$PWD
 
-# caos-cli: a prebuilt binary if the caller injected one (CAOS_CLI — how caosd
-# runs us from a store copy with no `nix` at runtime), else built from the flake.
-if [ -n "${CAOS_CLI:-}" ]; then
-  caos=$CAOS_CLI
-else
-  nix build .#caos-cli -o result-caos
-  caos=$PROJECT/result-caos/bin/caos-cli
-fi
 SERVER_URL=${CAOS_SERVER_URL:-http://localhost:9090}
 export CAOS_SERVER_URL=$SERVER_URL
 

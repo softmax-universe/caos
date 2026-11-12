@@ -176,7 +176,9 @@ impl Pass<'_> {
         let name = file_name(&entry);
         let meta =
             fs::symlink_metadata(&entry).map_err(|e| format!("stat {}: {e}", entry.display()))?;
-        if meta.is_dir() {
+        if self.mounts.contains(&join(rel, &name)) {
+            link(&entry, into.join(&name))?; // a mount: finished, carried by reference
+        } else if meta.is_dir() {
             subdirs.push((name, entry));
         } else if name == "DEPS" {
             deps_file = Some(entry); // replaced by DEEP-DEPS, never an own file

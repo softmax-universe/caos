@@ -38,6 +38,33 @@ use worker_common::{
     run_then, run_worker, scratch, Arg,
 };
 
+/// An image bound as an arg, in either form a curry can carry: a blob holding
+/// the image's hash (what `build-builtins.sh` binds, `--cargo=<hash>`), or the
+/// image tree itself (what the repo's root expression binds, `--cargo=$CARGO`).
+enum Image {
+    Hash(String),
+    Path(String),
+}
+
+fn read_image(name: &str) -> Result<Image, String> {
+    let at = arg(name);
+    caos(["get", &at])?;
+    if Path::new(&at).is_dir() {
+        Ok(Image::Path(at))
+    } else {
+        Ok(Image::Hash(read_arg(name)?))
+    }
+}
+
+impl Image {
+    fn as_arg(&self) -> Arg<'_> {
+        match self {
+            Image::Hash(hash) => Arg::Hash(hash),
+            Image::Path(path) => Arg::Path(path),
+        }
+    }
+}
+
 fn main() -> ExitCode {
     run_worker("rustc", run)
 }

@@ -1838,12 +1838,7 @@ fn launch_root_tool(
     }
 }
 
-fn dispatch_started(
-    state: &mut progress::State,
-    request: &Oid,
-    call: &Call,
-    record: &CallRecord,
-) -> Result<(), String> {
+fn dispatch_started(request: &Oid, call: &Call, record: &CallRecord) -> Result<(), String> {
     let commit = record
         .input_commit
         .as_ref()

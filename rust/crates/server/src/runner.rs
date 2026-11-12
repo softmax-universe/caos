@@ -359,7 +359,6 @@ pub(crate) fn dispatch(
     arg_tree: &str,
     arg_entries: ArgTree,
     image_ref: &str,
-    seeded: bool,
     secrets: Vec<(String, String)>,
     mut start_sub_run: impl FnMut(&str) -> Result<(), HttpError>,
     mut on_note: impl FnMut(Note),

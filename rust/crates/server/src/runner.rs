@@ -303,7 +303,7 @@ fn new_nonce(id: u64) -> String {
 /// requires nothing, so the first half alone matches it against everything,
 /// including work that wanted a specific pool; a `required*` arg excludes it,
 /// because it advertises no entry of that name. Nothing here knows what any
-/// particular pool is FOR — `required-pool=seeded` is just a name both sides
+/// particular pool is FOR — a pool is just a name both sides
 /// happen to agree on.
 ///
 /// A job whose pool is absent therefore matches nothing and fails at its
@@ -393,7 +393,6 @@ pub(crate) fn dispatch(
         offer_job(&mut st, id);
         id
     };
-
 
     loop {
         // Sleep until the job's current phase deadline (the result sender wakes

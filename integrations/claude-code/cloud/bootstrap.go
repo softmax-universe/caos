@@ -675,7 +675,8 @@ func main() {
 			"  Point this environment at one, or fork\n" +
 			"  Metta-AI/caos-session.")
 	}
-	p, err := readLock(filepath.Join(repoDir, "flake.lock"), "caos")
+	dir := pinDir(repoDir)
+	p, err := readLock(filepath.Join(dir, "flake.lock"), "caos")
 	if err != nil {
 		fatal("%v\n"+
 			"  (a 'follows' input carries no lock of its own, and is not one either)\n"+

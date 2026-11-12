@@ -917,11 +917,11 @@ their separate cache keys. Use it when intentionally exercising that wider
 path, such as push-path validation, rather than for the normal test benchmark.
 See [the performance section of SPEC.md](SPEC.md#principles-of-performance).
 
-nix builds only the *host* stack — the server, the runner daemon, the seeder,
-and the seeded core images. Everything the suite tests is compiled from the
-tree under test, inside caos, by `std/cargo` and `std/rustc`; no host binary
-is handed in. (After a Rust edit: `nix build && caosd up`, then test. After
-editing anything under `std/`, the same — a std tree is part of the seed keys.)
+nix builds only the *host* stack — the server, the runner daemon, and the nix
+primitive's image. Everything the suite tests, including the core, is compiled
+from the tree under test, inside caos, by the `nix=v1` primitive, `caos-core/cargo`
+and `caos-core/rustc`; no host binary is handed in. (After a Rust edit:
+`nix build && caosd up`, then test.)
 
 The test tool is `std/caos-test/` — a DIRECTORY whose `.caos-expr` names the
 image it runs on and carries its `help` (SPEC, "Tools"), with `worker.sh` as

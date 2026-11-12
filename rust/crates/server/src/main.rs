@@ -59,6 +59,7 @@
 //! and the request router.
 
 mod compute;
+mod eval_cache;
 mod git;
 mod grant_history;
 mod import;

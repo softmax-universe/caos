@@ -1273,6 +1273,14 @@ struct ServerEvalHost<'a> {
     dispatches: std::sync::atomic::AtomicUsize,
 }
 
+impl ServerEvalHost<'_> {
+    /// Which of a tree's cached values this walk reads and writes: everything
+    /// an expression's value depends on that its tree does not hold.
+    fn cache_variant(&self) -> String {
+        crate::eval_cache::variant(self.salt, self.secrets.walk_key().as_deref())
+    }
+}
+
 impl caos_eval::EvalHost for ServerEvalHost<'_> {
     fn concurrent(&self) -> Option<&(dyn caos_eval::EvalHost + Sync)> {
         Some(self)
@@ -1355,6 +1363,23 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
             gix::ObjectId::from_hex(hash.as_bytes())
                 .map_err(|_| format!("git ref {value:?}: {hash:?} is not an object id"))?,
         ))
+    }
+    /// The eval cache, for one expression (`MemoKind::Node`). A whole walk
+    /// (`MemoKind::Path`) is left to [`evaluate`], which already keeps the
+    /// top-level ones; with every expression on the way a hit, the rest of a
+    /// walk is tree lookups.
+    fn memo_get(&self, kind: caos_eval::MemoKind, key: &str) -> Option<(String, String)> {
+        match kind {
+            caos_eval::MemoKind::Node => {
+                crate::eval_cache::get(self.config, key, &self.cache_variant())
+            }
+            caos_eval::MemoKind::Path => None,
+        }
+    }
+    fn memo_put(&self, kind: caos_eval::MemoKind, key: &str, value: &(String, String)) {
+        if kind == caos_eval::MemoKind::Node {
+            crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
+        }
     }
     fn origins_of(&self, oid: &str) -> Vec<caos_eval::Origin> {
         // Origins are read in one place, `evaluated`, and it returns at once
@@ -2998,6 +3023,25 @@ pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
         .write_all(&resp_command(&["SMEMBERS", key]))
         .map_err(|e| format!("write: {e}"))?;
     read_array_reply(&mut BufReader::new(stream))
+}
+
+/// `HGET key field` — one field of a hash, or None when the key or the field
+/// is absent.
+pub(crate) fn hash_get(addr: &str, key: &str, field: &str) -> Result<Option<String>, String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HGET", key, field]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_bulk_reply(&mut BufReader::new(stream))
+}
+
+/// `HSET key field value` — set one field of a hash, creating the hash.
+pub(crate) fn hash_set(addr: &str, key: &str, field: &str, value: &str) -> Result<(), String> {
+    let mut stream = redis_connect(addr)?;
+    stream
+        .write_all(&resp_command(&["HSET", key, field, value]))
+        .map_err(|e| format!("write: {e}"))?;
+    read_integer_reply(&mut BufReader::new(stream)).map(|_| ())
 }
 
 /// `LRANGE key 0 -1` — the whole list, in insertion order.

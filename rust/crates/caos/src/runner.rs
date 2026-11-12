@@ -1214,7 +1214,7 @@ fn reset_after_job(cfg: &Config) {
 /// the scratch directories, and every process. That is the point of staying.
 fn narrow_reset() {
     let cas = crate::cas_dir();
-    for name in ["args", "out", "out-trace", NONCE_FILE] {
+    for name in ["args", "out", "out-trace", NONCE_FILE, REQ_FILE] {
         let path = cas.join(name);
         let _ = if path.is_dir() && !path.is_symlink() {
             std::fs::remove_dir_all(&path)

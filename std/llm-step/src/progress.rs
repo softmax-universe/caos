@@ -352,7 +352,7 @@ fn server_has_object(object: &Oid) -> Result<bool, String> {
 
 /// One object from the server's object API: what the store reads a missing
 /// object with, in place of a git fetch of that object's whole closure.
-fn fetch_single_object(oid: &Oid) -> Result<(ObjectKind, Vec<u8>), String> {
+fn fetch_single_object(oid: &Oid) -> Result<(String, Vec<u8>), String> {
     let url = format!("{}/object/{oid}", server_url()?);
     let response = minreq::get(&url)
         .with_timeout(30)

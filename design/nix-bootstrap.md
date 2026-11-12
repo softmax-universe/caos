@@ -117,8 +117,8 @@ RUSTCBIN=run --base:nix=v1 --in:@=. --attr=worker-rustc
 DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps
 RUSTC=curry --base=$RUNNER --worker1=$RUSTCBIN/bin/worker-rustc --cargo=$CARGO --runner=$RUNNER --worker-common:@=rust/crates/worker-common
 # Assemble the core and graft it into the tree, then deepen as today.
-CORE=graft runner=$RUNNER flake-builder=$FB cargo=$CARGO rustc=$RUSTC deep-deps=$DD
-T=graft --in:@=. caos-core=$CORE
+CORE=graft --runner=$RUNNER --flake-builder=$FB --cargo=$CARGO --rustc=$RUSTC --deep-deps=$DD
+T=mount --in:@=. --caos-core=$CORE
 run --base=$DD --in=$T
 ```
 

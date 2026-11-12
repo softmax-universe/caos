@@ -1003,6 +1003,11 @@ fn eval_expr_args(
                         "eval-path: :commit= is not supported in .caos-expr yet: {tok:?}"
                     ))
                 }
+                ArgType::Nix => {
+                    return Err(format!(
+                        "eval-path: :nix= names the nix primitive and is only a --base: {tok:?}"
+                    ))
+                }
             }
         };
         entries.push(Entry {

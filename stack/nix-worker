@@ -24,6 +24,27 @@ mkdir -p /var/tmp
 
 fail() { echo "NIX PRIMITIVE FAIL: $*" >&2; exit 1; }
 
+# THE PERSISTENT STORE (dev/devbox/worker has the long account of why each step
+# is what it is). The caosd runner backs /mounted-nix with the host's shared nix
+# store, but only for a job that carries `--required-caosd=true`; anywhere else
+# the directory is absent and this is a cold, throwaway store, which is correct
+# and just slow. The seeding is serialized across containers because `cp` writes
+# in place, and a concurrent nix could read a half-copied store path. -n: the
+# volume's copy wins, since it has whatever earlier jobs built and the image only
+# supplies what is missing. The db is loaded after the bind so the image's own
+# paths are registered in the volume's db, which is harmless when they already
+# are.
+if [ -d /mounted-nix ]; then
+  exec 9>/mounted-nix/.caos-seed.lock
+  flock -w 600 9 || fail "another container held the /mounted-nix seed lock for 600s"
+  cp -an /nix/. /mounted-nix/ 2>/dev/null || true
+  nix-store --dump-db > /tmp/image-db.dump 2>/dev/null || : > /tmp/image-db.dump
+  mount --bind /mounted-nix /nix \
+    || fail "cannot bind the persistent store over /nix (CAP_SYS_ADMIN?)"
+  nix-store --load-db < /tmp/image-db.dump 2>/dev/null || true
+  exec 9>&-
+fi
+
 # Single-user, unsandboxed nix: root in a container with no nixbld group and no
 # privilege to build a sandbox (the same settings std/flake-builder uses).
 nixf() {

@@ -559,8 +559,10 @@
           # then pushes it again.
           contents = cargoDef.contents;
           config = cargoDef.config;
-          fakeRootCommands = cargoBake.inflateWith pkgs;
+          fakeRootCommands = cargoBake.inflateWith pkgs + extraCommands;
         };
+        workerCargoImage = mkCargoImage "";
+        coreCargoImage = mkCargoImage (caosAdditions { worker = "${workspaceBins}/bin/worker-cargo"; });
 
         # ---- The stack root ----
         # Everything the host's stack image adds over its userland, which is

@@ -859,6 +859,9 @@ fn eval_expr_base(
         // cycles"). The formed arg-tree carries the ref as a blob, exactly what
         // the seeder registers.
         ArgType::Docker => Ok(format!("{DOCKER_SCHEME}{value}")),
+        // `:nix=v1` — the nix primitive: nothing to resolve here, the server
+        // runs it.
+        ArgType::Nix => nix_base(value),
         // `:hash=<oid>` — an object already in the store (a git image or a curry
         // node), referenced as-is. Location-independent.
         ArgType::Hash => {

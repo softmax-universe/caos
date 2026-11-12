@@ -444,6 +444,7 @@ fn form_bundle(
         }
         Some("hash") => base_value,
         Some("docker") => format!("docker://{base_value}"),
+        Some("nix") => caos_eval::nix_base(&base_value).map_err(bad)?,
         other => return Err(bad(format!("unknown base type {other:?}"))),
     };
 

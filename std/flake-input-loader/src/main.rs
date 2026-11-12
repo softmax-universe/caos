@@ -57,7 +57,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let input = read_arg("input")?;
-    let output_path = read_arg("output-path")?;
+    let output_path = read_arg_opt("output-path")?;
+    let mount_spec = read_arg_opt("mounts")?;
     let expr = read_arg("expr")?;
 
     let in_dir = PathBuf::from(arg("in"));

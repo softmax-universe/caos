@@ -740,19 +740,6 @@ fn run_dispatch_inner(
     let result = {
         let image_ref = resolve_image(config, image).map_err(fail)?;
         let arg_entries = args_entries(config, arg_tree).map_err(fail)?;
-        // Whether this job SAYS it is answered by a seeder, which it does by
-        // carrying `required-pool=seeded` — the same arg that keeps the generic
-        // pool away from it (`runner::matches`). It used to be sniffed from the
-        // image being a `docker://seeded…` sentinel, which named only three of
-        // the five seeded entries: `cargo`'s image is the flake-builder delta
-        // and `flake-builder`'s own is a plain sentinel, so a cargo job whose
-        // key had drifted looked like ordinary work. It was then handed to a
-        // generic runner, which really tried to `nix build` a flake that
-        // deliberately exposes no `caosImage` — a failure naming nix, three
-        // layers from the stale key that caused it.
-        let seeded = arg_entries
-            .get(caos_world::REQUIRED_POOL_ARG)
-            .is_some_and(|oid| *oid == crate::runner::pool_oid(caos_world::SEEDED_POOL));
         // Find the secrets this job's identity is entitled to (SPEC, "Secrets"):
         // those of every image evaluation granted that ours contains. They ride
         // out of band in the job payload — never in the ArgTree, so never in the

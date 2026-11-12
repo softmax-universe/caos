@@ -1221,7 +1221,7 @@ fn drive_call(
         }
         Target::Files => (None, state.head().clone(), cfg.clone()),
     };
-    let (ws, wc) = materialize_source_tree(state, &commit)?;
+    let (ws, wc) = materialize_source_tree(&commit)?;
     let mut scoped_call = call.clone();
     if path_is_scoped(&call.name) {
         scoped_call.input["path"] = json!(tool_path_in_scope(call, name.as_deref())?);

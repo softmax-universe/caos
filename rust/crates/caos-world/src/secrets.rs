@@ -77,6 +77,10 @@ pub struct Spec {
     pub entropy: Option<String>,
     pub value: Option<Value>,
     pub readers: Vec<Reader>,
+    /// `tree=<oid>`: a tree the secret is granted to (design/secrets.md).
+    /// `secrets-push` adds one for each tool a `reader:@@=` names, as the
+    /// server evaluates it; a line written by hand approves that exact tree.
+    pub trees: Vec<String>,
 }
 
 impl Spec {
@@ -91,6 +95,9 @@ impl Spec {
             out.push_str(&reader.render());
             out.push('\n');
         }
+        for tree in &self.trees {
+            out.push_str(&format!("tree={tree}\n"));
+        }
         out
     }
 }
@@ -102,6 +109,7 @@ pub fn parse_spec(file_name: &str, text: &str) -> Result<Spec, String> {
         entropy: None,
         value: None,
         readers: Vec::new(),
+        trees: Vec::new(),
     };
     for raw in text.lines() {
         let line = raw.trim();
@@ -118,6 +126,12 @@ pub fn parse_spec(file_name: &str, text: &str) -> Result<Spec, String> {
             "value:@" => spec.value = Some(Value::File(val.trim().to_string())),
             "reader:@@" => spec.readers.push(parse_locator_reader(file_name, val)?),
             "reader:@" => spec.readers.push(parse_session_reader(file_name, val)?),
+            "tree" if is_full_sha(val.trim()) => spec.trees.push(val.trim().to_string()),
+            "tree" => {
+                return Err(format!(
+                    "secret {file_name}: tree={val:?} is not a 40-hex tree"
+                ))
+            }
             other => return Err(format!("secret {file_name}: unknown key {other:?}")),
         }
     }
@@ -232,6 +246,15 @@ mod tests {
         assert!(spec
             .render_pushed()
             .contains("reader:@=imports/y/tool session=c1"));
+    }
+
+    #[test]
+    fn a_tree_line_survives_a_push() {
+        let spec = parse_spec("f", &format!("tree={SHA}\n")).unwrap();
+        assert_eq!(spec.trees, vec![SHA.to_string()]);
+        let pushed = parse_spec("f", &spec.render_pushed()).unwrap();
+        assert_eq!(pushed.trees, spec.trees);
+        assert!(parse_spec("f", "tree=main\n").is_err());
     }
 
     #[test]

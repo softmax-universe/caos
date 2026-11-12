@@ -58,6 +58,7 @@
 //! [`mod git`]; this file is the entry point, the shared [`Config`]/[`HttpError`],
 //! and the request router.
 
+mod approved;
 mod compute;
 mod eval_cache;
 mod git;
@@ -964,6 +965,11 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
         Method::Post if path == "/git/import" => import::endpoint(config, request),
         Method::Post if path == "/git/push" => push::endpoint(config, request),
         Method::Post if path == "/secrets/push" => secret_store::push_endpoint(config, request),
+        Method::Post if path == "/secrets/commits" => {
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body)?;
+            grant_history::commits_endpoint(config, &body)
+        }
         Method::Post if path == "/sub-run" => {
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;

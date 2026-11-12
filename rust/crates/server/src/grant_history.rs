@@ -1,59 +1,65 @@
-//! The roots a `reader:@@=` grant allows (SPEC.md, "Secrets"): the tree of
-//! the locator's `rev` and of each first-parent ancestor back to `since`.
+//! The commits a `reader:@@=` covers (SPEC.md, "Secrets"): the locator's
+//! `rev` and its first-parent ancestors, back to `since`, or the newest
+//! [`DEFAULT_COMMITS`] with no `since`.
 //!
-//! Only commits are needed — a commit names its tree — so a repository this
-//! server does not already hold is fetched with `--filter=tree:0` into a
-//! staging repo of its own, never into the object database, whose closure
-//! check refuses a partial history.
+//! Only commits are needed here, so a repository this server does not already
+//! hold is fetched with `--filter=tree:0` into a staging repo of its own,
+//! never into the object database, whose closure check refuses a partial
+//! history. Each commit's tree is fetched when it is evaluated
+//! ([`crate::approved`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use git_locator::GitRef;
 
-use crate::Config;
+use crate::{Config, HttpError};
 
-type Key = (String, String, Option<String>);
-static ALLOWED: Mutex<Option<HashMap<Key, Arc<HashSet<String>>>>> = Mutex::new(None);
+/// How many commits a reader with no `since=` covers. Each is evaluated when
+/// the secret is pushed, so this is what a push costs; a session pinned to an
+/// older commit than these needs a `since=` that reaches it.
+pub(crate) const DEFAULT_COMMITS: usize = 20;
 
-pub(crate) fn allowed_roots(
+/// The commits of `git_ref`'s range, newest first.
+pub(crate) fn commits(
     config: &Config,
     git_ref: &GitRef,
     since: Option<&str>,
-) -> Result<Arc<HashSet<String>>, String> {
+) -> Result<Vec<String>, String> {
     let rev = git_ref
         .rev
         .clone()
         .ok_or("a reader:@@= locator must pin rev=<sha>")?;
-    let key = (git_ref.fetch_url(), rev.clone(), since.map(str::to_string));
-    if let Some(hit) = ALLOWED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|m| m.get(&key).cloned())
-    {
-        return Ok(hit);
+    if let Ok(commits) = first_parent_commits(&config.git_dir, &rev, since) {
+        return Ok(commits);
     }
-    let roots = match first_parent_trees(&config.git_dir, &rev, since) {
-        Ok(roots) => roots,
-        Err(_) => {
-            let staging = staging_repo(config, &git_ref.fetch_url())?;
-            git(
-                &staging,
-                &["fetch", "-q", "--filter=tree:0", "origin", &rev],
-            )?;
-            first_parent_trees(&staging.to_string_lossy(), &rev, since)?
-        }
-    };
-    let roots = Arc::new(roots);
-    ALLOWED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(key, roots.clone());
-    Ok(roots)
+    let staging = staging_repo(config, &git_ref.fetch_url())?;
+    git(
+        &staging,
+        &["fetch", "-q", "--filter=tree:0", "origin", &rev],
+    )?;
+    first_parent_commits(&staging.to_string_lossy(), &rev, since)
+}
+
+/// `POST /secrets/commits`: the commits a `reader:@@=` covers, one per line,
+/// newest first. The body is `{"locator": "<locator>", "since": "<sha>"}`,
+/// `since` optional. `secrets-push` asks this, then asks `/eval` for the tool
+/// at each commit (design/secrets.md): resolving a branch and listing its
+/// history are the two things `/eval` cannot do for it.
+pub(crate) fn commits_endpoint(config: &Config, body: &[u8]) -> Result<Vec<u8>, HttpError> {
+    let bad = |e: String| HttpError::new(400, e);
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| bad(format!("body is not JSON: {e}")))?;
+    let locator = json["locator"]
+        .as_str()
+        .ok_or_else(|| bad("locator must be a string".to_string()))?;
+    let since = json["since"].as_str();
+    let pinned = pin(config, locator).map_err(|e| HttpError::new(502, e))?;
+    let git_ref = git_locator::parse_git_ref(&pinned).map_err(bad)?;
+    let found = commits(config, &git_ref, since).map_err(|e| HttpError::new(502, e))?;
+    Ok(format!("{}\n", found.join("\n")).into_bytes())
 }
 
 /// A grant's locator with any `ref=` replaced by the commit the branch names
@@ -128,29 +134,26 @@ fn resolve_branch(config: &Config, url: &str, name: &str) -> Result<String, Stri
     Ok(rev)
 }
 
-fn first_parent_trees(
-    dir: &str,
-    rev: &str,
-    since: Option<&str>,
-) -> Result<HashSet<String>, String> {
+/// `rev` and its first-parent ancestors, newest first: back to and including
+/// `since`, or [`DEFAULT_COMMITS`] of them. First-parent, so a branch forked
+/// before `since` and merged after it does not bring back the code `since`
+/// excluded.
+fn first_parent_commits(dir: &str, rev: &str, since: Option<&str>) -> Result<Vec<String>, String> {
     let dir = Path::new(dir);
-    let mut args = vec!["log", "--first-parent", "--format=%T", rev];
-    let exclude;
+    let range = match since {
+        Some(since) => {
+            git(dir, &["merge-base", "--is-ancestor", since, rev])
+                .map_err(|_| format!("since={since} is not an ancestor of {rev}"))?;
+            format!("^{since}")
+        }
+        None => format!("--max-count={DEFAULT_COMMITS}"),
+    };
+    let args = ["log", "--first-parent", "--format=%H", range.as_str(), rev];
+    let mut commits: Vec<String> = git(dir, &args)?.lines().map(str::to_string).collect();
     if let Some(since) = since {
-        git(dir, &["merge-base", "--is-ancestor", since, rev])
-            .map_err(|_| format!("since={since} is not an ancestor of {rev}"))?;
-        exclude = format!("^{since}");
-        args.push(&exclude);
+        commits.push(since.to_string());
     }
-    let mut roots: HashSet<String> = git(dir, &args)?.lines().map(str::to_string).collect();
-    if let Some(since) = since {
-        roots.insert(
-            git(dir, &["log", "-1", "--format=%T", since])?
-                .trim()
-                .to_string(),
-        );
-    }
-    Ok(roots)
+    Ok(commits)
 }
 
 /// A bare repo per URL, beside `secrets.git`, set up as a treeless partial
@@ -222,11 +225,6 @@ mod tests {
             ]);
             run(&["rev-parse", "HEAD"]).trim().to_string()
         };
-        let tree = |rev: &str| {
-            run(&["rev-parse", &format!("{rev}^{{tree}}")])
-                .trim()
-                .to_string()
-        };
         let a = commit("a");
         run(&["checkout", "-q", "-b", "side"]);
         let side = commit("side");
@@ -247,15 +245,12 @@ mod tests {
         let c = run(&["rev-parse", "HEAD"]).trim().to_string();
 
         let d = dir.to_str().unwrap();
-        let roots = first_parent_trees(d, &c, Some(&b)).unwrap();
-        assert!(roots.contains(&tree(&c)) && roots.contains(&tree(&b)));
-        assert!(!roots.contains(&tree(&a)), "before since");
-        assert!(
-            !roots.contains(&tree(&side)),
-            "a merged branch is not first-parent"
-        );
-        assert!(first_parent_trees(d, &c, None).unwrap().contains(&tree(&a)));
-        assert!(first_parent_trees(d, &b, Some(&side)).is_err());
+        let back_to_b = first_parent_commits(d, &c, Some(&b)).unwrap();
+        assert_eq!(back_to_b, [c.as_str(), b.as_str()]);
+        // With no `since`, the newest few; a merged branch is not first-parent.
+        let newest = first_parent_commits(d, &c, None).unwrap();
+        assert_eq!(newest, [c.as_str(), b.as_str(), a.as_str()]);
+        assert!(first_parent_commits(d, &b, Some(&side)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

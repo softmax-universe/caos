@@ -56,7 +56,7 @@
 //! token parses through [`parse_arg`], the one arg-type vocabulary this crate
 //! owns and the client shares.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gix::objs::tree::{Entry, EntryKind, EntryMode};
 
@@ -194,19 +194,14 @@ pub trait EvalHost {
     /// Record `value` as the answer for `key`. Paired with [`EvalHost::memo_get`];
     /// a host that keeps no memo ignores it.
     fn memo_put(&self, _kind: MemoKind, _key: &str, _value: &(String, String)) {}
-    /// Origins this host already knows for `oid` — the result of a `:@@=`
-    /// resolution keeps the one it had upstream (SPEC, "Secrets").
-    fn origins_of(&self, _oid: &str) -> Vec<Origin> {
-        Vec::new()
-    }
-    /// Called with each value a `.caos-expr` produced and every origin of the
-    /// node it was applied at. What it returns replaces the value; it may only
-    /// mark, never change what the value computes.
-    fn evaluated(
-        &self,
-        _origins: &[Origin],
-        value: (String, String),
-    ) -> Result<(String, String), String> {
+    /// Called with each value a `.caos-expr` produced and the tree it was
+    /// applied at: the directory as the walk had it in hand, every parent's
+    /// expression applied and its own not yet. That tree is what a secrets
+    /// reader approves (design/secrets.md), and it says everything about the
+    /// value, because an expression reads only its own tree. What this returns
+    /// replaces the value; it may only mark, never change what the value
+    /// computes.
+    fn evaluated(&self, _node: &str, value: (String, String)) -> Result<(String, String), String> {
         Ok(value)
     }
     /// This host, if it may be used from several threads at once: then a
@@ -220,43 +215,6 @@ pub trait EvalHost {
 /// Stack for a thread that evaluates an arg: evaluation recurses by the depth of
 /// the tree it walks (the server gives its own evaluating threads the same).
 const ARG_EVAL_STACK_BYTES: usize = 64 * 1024 * 1024;
-
-/// Where a node sits: a root tree and its path there (SPEC, "Secrets").
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Origin {
-    pub root: String,
-    pub path: String,
-}
-
-impl Origin {
-    fn child(&self, name: &str) -> Origin {
-        Origin {
-            root: self.root.clone(),
-            path: if self.path.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}/{name}", self.path)
-            },
-        }
-    }
-}
-
-/// A node's origins: the ones its parent's imply, plus any the host knows.
-fn with_known(host: &dyn EvalHost, mut origins: Vec<Origin>, oid: &str) -> Vec<Origin> {
-    let known = host.origins_of(oid);
-    if known.is_empty() {
-        return origins;
-    }
-    // A set, not `contains` per entry: a shared subtree accumulates tens of
-    // thousands of origins, and the scan was quadratic in them, once per node.
-    let mut seen: HashSet<Origin> = origins.iter().cloned().collect();
-    for origin in known {
-        if seen.insert(origin.clone()) {
-            origins.push(origin);
-        }
-    }
-    origins
-}
 
 /// Which question a memoized answer answers. The two are *different* questions
 /// and both pay, which is why the walk asks at both granularities:
@@ -318,27 +276,19 @@ fn eval_path_uncached(
         .collect();
     let mut node_kind = String::from("tree");
     let mut node_oid = start_tree.to_string();
-    let mut origins = with_known(
-        host,
-        vec![Origin {
-            root: start_tree.to_string(),
-            path: String::new(),
-        }],
-        start_tree,
-    );
     let mut i = 0usize;
     loop {
         // A gitlink stays a commit value unless the path enters its tree.
         if node_kind == "commit" && i < comps.len() {
             node_oid = commit_tree(host, &node_oid)?;
             node_kind = "tree".into();
-            origins = with_known(host, origins, &node_oid);
         }
         // A `.caos-expr` at the root of this tree node transforms the node — from
         // the node's contents WITHOUT the directive (see `strip_caos_expr`).
         if node_kind == "tree" {
             if let Some(value) = eval_node(host, &node_oid)? {
-                (node_kind, node_oid) = host.evaluated(&origins, value)?;
+                let marked = host.evaluated(&node_oid, value)?;
+                (node_kind, node_oid) = marked;
             }
         }
         if i == comps.len() {
@@ -376,11 +326,6 @@ fn eval_path_uncached(
         let (mode, oid) = (entry.mode, entry.oid);
         node_kind = kind_of_mode(mode).to_string();
         node_oid = oid.to_string();
-        origins = origins
-            .iter()
-            .map(|origin| origin.child(comps[i]))
-            .collect();
-        origins = with_known(host, origins, &node_oid);
         i += 1;
     }
     Ok((node_kind, node_oid))
@@ -1253,8 +1198,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod origin_tests {
-    use super::{eval_path, EvalHost, Origin};
+mod evaluated_tests {
+    use super::{eval_path, EvalHost};
     use gix::objs::tree::{Entry, EntryKind};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -1262,8 +1207,7 @@ mod origin_tests {
     #[derive(Default)]
     struct Memory {
         objects: RefCell<HashMap<String, (String, Vec<u8>)>>,
-        known: HashMap<String, Vec<Origin>>,
-        seen: RefCell<Vec<Vec<Origin>>>,
+        seen: RefCell<Vec<String>>,
     }
 
     impl Memory {
@@ -1321,22 +1265,19 @@ mod origin_tests {
         fn dispatch(&self, _: &str, _: Vec<Entry>) -> Result<(String, String), String> {
             Err("no runs here".into())
         }
-        fn origins_of(&self, oid: &str) -> Vec<Origin> {
-            self.known.get(oid).cloned().unwrap_or_default()
-        }
         fn evaluated(
             &self,
-            origins: &[Origin],
+            node: &str,
             value: (String, String),
         ) -> Result<(String, String), String> {
-            self.seen.borrow_mut().push(origins.to_vec());
+            self.seen.borrow_mut().push(node.to_string());
             Ok(value)
         }
     }
 
     #[test]
-    fn a_node_carries_its_path_and_every_origin_it_was_mounted_with() {
-        let mut host = Memory::default();
+    fn evaluated_is_given_the_directory_the_expression_was_applied_at() {
+        let host = Memory::default();
         let expr = host.put(
             gix::objs::Kind::Blob,
             b"curry --base:docker=img@sha256:00 --x=1\n".to_vec(),
@@ -1344,25 +1285,12 @@ mod origin_tests {
         let tool = host.tree(vec![(".caos-expr", false, expr)]);
         let mounted = host.tree(vec![("tool", true, tool)]);
         let root = host.tree(vec![("sub", true, mounted)]);
-        let upstream = Origin {
-            root: "upstream".into(),
-            path: "std".into(),
-        };
-        host.known.insert(mounted.to_string(), vec![upstream]);
 
+        // The same directory reached two ways is one question to the host:
+        // by path from a root, and as a walk's own start.
         eval_path(&host, &root.to_string(), "sub/tool").unwrap();
-        assert_eq!(
-            host.seen.borrow().as_slice(),
-            &[vec![
-                Origin {
-                    root: root.to_string(),
-                    path: "sub/tool".into()
-                },
-                Origin {
-                    root: "upstream".into(),
-                    path: "std/tool".into()
-                },
-            ]]
-        );
+        eval_path(&host, &tool.to_string(), "").unwrap();
+        let seen = host.seen.borrow();
+        assert_eq!(seen.as_slice(), &[tool.to_string(), tool.to_string()]);
     }
 }

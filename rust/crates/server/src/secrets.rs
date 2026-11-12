@@ -1,26 +1,27 @@
-//! Secrets during a run (SPEC.md, "Secrets"): what a request's
-//! SecretReaderKeys hold, which images evaluation granted them to, and
-//! injection at dispatch.
+//! Secrets during a run (SPEC.md, "Secrets"; design/secrets.md): what a
+//! request's SecretReaderKeys hold, which images evaluation granted them to,
+//! and injection at dispatch.
 //!
-//! A grant is decided where evaluation applies a node's `.caos-expr`, from the
-//! node's ORIGINS (`caos_eval::Origin`). A granted image is marked with
-//! `secret-hash` and recorded; dispatch injects only into a job whose ArgTree
-//! is a superset of a recorded image. The record is what proves the image came
-//! from this server's evaluation: `secret-hash` alone is visible to anyone who
-//! has seen a granted run.
+//! A grant is decided where evaluation applies a directory's `.caos-expr`. A
+//! pushed secret carries the trees it is granted to, so the decision is a
+//! lookup: is this directory, or the image it evaluated to, one of them. A
+//! granted image is marked with `secret-hash` and recorded; dispatch injects
+//! only into a job whose ArgTree is a superset of a recorded image. The record
+//! is what proves the image came from this server's evaluation: `secret-hash`
+//! alone is visible to anyone who has seen a granted run.
 //!
-//! Origins and records are kept in redis as well as here, so a restart forgets
-//! neither and a cached walk needs nothing replayed. Both are facts — about
-//! content, and about a scope that names every input to the grant — so no
-//! build's answer differs and they are not namespaced.
+//! Records are kept in redis as well as here, so a restart does not forget
+//! them and a cached walk needs nothing replayed. A record is a fact about a
+//! scope that names every input to the grant, so no build's answer differs
+//! and they are not namespaced.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use caos_eval::{EvalHost, Origin};
+use caos_eval::EvalHost;
 use caos_world::secrets::Reader;
 
-use crate::compute::{list_append_many, list_read, set_add_many, set_read};
+use crate::compute::{list_append_many, list_read};
 use crate::secret_store::Stored;
 use crate::{Config, HttpError};
 
@@ -28,12 +29,8 @@ use crate::{Config, HttpError};
 #[derive(Clone, Default)]
 pub(crate) struct Context {
     stored: Arc<Vec<Stored>>,
-    /// Each `reader:@@=` locator as matched: a `ref=` resolved to the commit
-    /// it named at admission, so one run sees one answer. `None` when it could
-    /// not be resolved, which grants nothing.
-    pins: Arc<HashMap<String, Option<String>>>,
-    /// Every input a grant depends on — the stores' trees, the session,
-    /// the pinned commits — so a push, a moved branch or another session
+    /// Every input a grant depends on: the stores' trees, which hold the
+    /// approved trees themselves, and the session. A push or another session
     /// sees none of this run's records.
     scope: String,
     session: Option<String>,
@@ -55,38 +52,23 @@ impl Context {
         let (stored, trees) =
             crate::secret_store::load(config, &keys).map_err(|e| HttpError::new(400, e))?;
         let session = session.filter(|c| !c.is_empty()).map(str::to_string);
-        let mut pins = HashMap::new();
         let mut head = None;
         for reader in stored.iter().flat_map(|s| &s.readers) {
-            match reader {
-                Reader::Locator { locator, .. } if !pins.contains_key(locator) => {
-                    let pinned = crate::grant_history::pin(config, locator).map_err(|e| {
-                        eprintln!("secrets: {locator}: {e}; it grants nothing");
-                    });
-                    pins.insert(locator.clone(), pinned.ok());
-                }
-                Reader::Session { session: id, .. }
-                    if Some(id) == session.as_ref() && head.is_none() =>
-                {
-                    head = session_head(config, id).unwrap_or_else(|e| {
-                        eprintln!("secrets: session {id}: {e}");
-                        None
-                    });
-                }
-                _ => {}
+            let Reader::Session { session: id, .. } = reader else {
+                continue;
+            };
+            if Some(id) == session.as_ref() && head.is_none() {
+                head = session_head(config, id).unwrap_or_else(|e| {
+                    eprintln!("secrets: session {id}: {e}");
+                    None
+                });
             }
         }
-        let mut pinned: Vec<&str> = pins.values().flatten().map(String::as_str).collect();
-        pinned.sort();
+        let named = session.as_deref().unwrap_or("");
+        let scope = format!("{}|{named}", trees.join(","));
         Ok(Context {
-            scope: format!(
-                "{}|{}|{}",
-                trees.join(","),
-                session.as_deref().unwrap_or(""),
-                pinned.join(",")
-            ),
+            scope,
             stored: Arc::new(stored),
-            pins: Arc::new(pins),
             session,
             head,
         })
@@ -101,242 +83,38 @@ impl Context {
     pub(crate) fn walk_key(&self) -> Option<String> {
         (!self.is_empty()).then(|| format!("{}|{}", self.scope, self.head.as_deref().unwrap_or("")))
     }
-}
 
-// ---- origins ----------------------------------------------------------------
-
-/// Every `(root, path)` a tree has been reached at, by tree oid: a start tree,
-/// a `:@@=` result, a value a `.caos-expr` produced, and every subtree of each.
-/// Equal oids are equal content, so a copy — a `DEEP-DEPS/<name>` mount is one —
-/// carries the origin of what it was copied from. In front of redis, and an
-/// entry here is everything redis holds for that oid.
-///
-/// A set: [`record_origins`] and `caos_eval::with_known` test membership per
-/// fact, and against a list of tens of thousands that scan was the server's
-/// CPU. Iteration order is arbitrary, as `SMEMBERS` order already was; nothing
-/// may depend on it (see the marker in [`index_subtrees`]).
-static KNOWN_ORIGINS: Mutex<Option<HashMap<String, HashSet<Origin>>>> = Mutex::new(None);
-
-/// Facts already sent to redis for an oid that memory does not hold, by a
-/// 64-bit hash of `(oid, origin)`, so a re-index of a tree whose origins grew
-/// does not send every old fact again (141M `SADD`s in four hours on
-/// caosd-prod, nearly all repeats). A collision skips one `SADD` and so
-/// withholds one origin, which can only deny a grant, never extend one.
-static SENT: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
-
-fn fact_hash(oid: &str, origin: &Origin) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    oid.hash(&mut hasher);
-    origin.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Bounds the in-memory maps; forgetting only means a later redis read.
-const MEMORY_CAP: usize = 1_000_000;
-
-// A redis SET, with a `v2` prefix. The first version was a list that took a
-// line per re-record and grew to tens of millions of entries per key, whose
-// load then dominated the server's CPU. Its keys are not read; the `indexed`
-// markers moved with it, since a marker over an empty set would claim work that
-// was never done.
-fn origins_key(oid: &str) -> String {
-    format!("caos:secrets:origins2:{oid}")
-}
-
-fn encode_origin(origin: &Origin) -> String {
-    format!("{}\t{}", origin.root, origin.path)
-}
-
-fn decode_origin(text: &str) -> Option<Origin> {
-    let (root, path) = text.split_once('\t')?;
-    Some(Origin {
-        root: root.to_string(),
-        path: path.to_string(),
-    })
-}
-
-/// The known origins of `oid`, from memory or else redis.
-pub(crate) fn origins_of(config: &Config, oid: &str) -> Vec<Origin> {
-    if let Some(hit) = KNOWN_ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|map| map.get(oid))
-    {
-        return hit.iter().cloned().collect();
-    }
-    let loaded: Vec<Origin> = set_read(&config.redis_addr, &origins_key(oid))
-        .unwrap_or_else(|e| {
-            eprintln!("secrets: reading the origins of {oid}: {e}");
-            Vec::new()
+    /// Whether `secret` is granted to the directory `node`, which evaluated to
+    /// `value` (both tree oids).
+    ///
+    /// A pushed tree may name either. `secrets-push` sends the directory. The
+    /// image a tool builds always depends on the build of caos that built it,
+    /// and on what its own dependencies were granted; the directory depends on
+    /// the build only where a parent expression builds something into it,
+    /// which caos's do not (design/secrets.md has the comparison). An image
+    /// written by hand is honored all the same.
+    fn grants(&self, config: &Config, secret: &Stored, node: &str, value: &str) -> bool {
+        let mut trees = secret.trees.iter();
+        if trees.any(|tree| tree == node || tree == value) {
+            return true;
+        }
+        let Some(head) = self.head.as_deref() else {
+            return false;
+        };
+        secret.readers.iter().any(|reader| match reader {
+            Reader::Session { path, session } => {
+                self.session.as_deref() == Some(session.as_str())
+                    && crate::approved::session_approves(config, head, path, node)
+            }
+            Reader::Locator { .. } => false,
         })
-        .iter()
-        .filter_map(|text| decode_origin(text))
-        .collect();
-    let mut guard = KNOWN_ORIGINS.lock().unwrap_or_else(|e| e.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    if map.len() >= MEMORY_CAP {
-        map.clear();
-    }
-    let entry = map.entry(oid.to_string()).or_default();
-    entry.extend(loaded);
-    entry.iter().cloned().collect()
-}
-
-/// Record each `(oid, origin)`, in redis and in memory where memory already
-/// holds that oid. An oid it does not hold is left for [`origins_of`] to load
-/// whole, so a repeat in redis is a no-op (it is a set); [`SENT`] keeps most
-/// repeats from being sent at all.
-fn record_origins(config: &Config, facts: Vec<(String, Origin)>) {
-    let mut new = Vec::new();
-    {
-        let mut guard = KNOWN_ORIGINS.lock().unwrap_or_else(|e| e.into_inner());
-        let map = guard.get_or_insert_with(HashMap::new);
-        let mut sent_guard = SENT.lock().unwrap_or_else(|e| e.into_inner());
-        let sent = sent_guard.get_or_insert_with(HashSet::new);
-        if sent.len() >= MEMORY_CAP {
-            sent.clear();
-        }
-        for (oid, origin) in facts {
-            let fresh = match map.get_mut(&oid) {
-                Some(known) => known.insert(origin.clone()),
-                None => sent.insert(fact_hash(&oid, &origin)),
-            };
-            if fresh {
-                new.push((origins_key(&oid), encode_origin(&origin)));
-            }
-        }
-    }
-    if let Err(e) = set_add_many(&config.redis_addr, &new) {
-        eprintln!("secrets: recording {} origin(s): {e}", new.len());
-    }
-}
-
-/// The `(tree, origin)` pairs whose subtrees are recorded, by a 64-bit hash of
-/// the pair. In front of the redis set `caos:secrets:indexed3:<tree>`, which
-/// holds the encoded origins already propagated down that tree. A collision
-/// skips one propagation, which withholds an origin and so can only deny a
-/// grant, never extend one.
-static INDEXED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
-
-fn indexed_key(tree: &str) -> String {
-    format!("caos:secrets:indexed3:{tree}")
-}
-
-/// Record `(T, P/q)` for every subtree at `q` under `tree`, for each origin
-/// `(T, P)` of `tree` itself.
-///
-/// Per `(tree, origin)`, not per tree and its whole origin set: a shared subtree
-/// gains an origin with every root that contains it, and a marker over the set
-/// missed each time, so the whole subtree was walked again for all of its
-/// (tens of thousands of) origins. Now only the origins not yet propagated are
-/// walked.
-fn index_subtrees(config: &Config, tree: &str, origins: &[Origin]) -> Result<(), String> {
-    let unknown: Vec<&Origin> = {
-        let mut guard = INDEXED.lock().unwrap_or_else(|e| e.into_inner());
-        let indexed = guard.get_or_insert_with(HashSet::new);
-        if indexed.len() >= MEMORY_CAP {
-            indexed.clear();
-        }
-        origins
-            .iter()
-            .filter(|origin| indexed.insert(fact_hash(tree, origin)))
-            .collect()
-    };
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    // One read of what redis holds for this tree, only when memory could not
-    // answer for some origin.
-    let done: HashSet<String> = set_read(&config.redis_addr, &indexed_key(tree))
-        .unwrap_or_else(|e| {
-            eprintln!("secrets: reading what is indexed under {tree}: {e}");
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
-    let origins: Vec<&Origin> = unknown
-        .into_iter()
-        .filter(|origin| !done.contains(&encode_origin(origin)))
-        .collect();
-    if origins.is_empty() {
-        return Ok(());
-    }
-    let repo = config.repo.to_thread_local();
-    let root = gix::ObjectId::from_hex(tree.as_bytes()).map_err(|e| format!("{tree}: {e}"))?;
-    if repo
-        .find_header(root)
-        .map_err(|e| format!("{tree}: {e}"))?
-        .kind()
-        != gix::object::Kind::Tree
-    {
-        return Ok(());
-    }
-    let mut facts = Vec::new();
-    let mut pending = vec![(root, String::new())];
-    while let Some((oid, rel)) = pending.pop() {
-        let object = repo.find_object(oid).map_err(|e| format!("{oid}: {e}"))?;
-        let decoded = object.try_into_tree().map_err(|e| format!("{oid}: {e}"))?;
-        for entry in decoded.decode().map_err(|e| format!("{oid}: {e}"))?.entries {
-            if !entry.mode.is_tree() {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                entry.filename.to_string()
-            } else {
-                format!("{rel}/{}", entry.filename)
-            };
-            for origin in &origins {
-                facts.push((
-                    entry.oid.to_string(),
-                    Origin {
-                        root: origin.root.clone(),
-                        path: if origin.path.is_empty() {
-                            path.clone()
-                        } else {
-                            format!("{}/{path}", origin.path)
-                        },
-                    },
-                ));
-            }
-            pending.push((entry.oid.to_owned(), path));
-        }
-    }
-    record_origins(config, facts);
-    let marks: Vec<(String, String)> = origins
-        .iter()
-        .map(|origin| (indexed_key(tree), encode_origin(origin)))
-        .collect();
-    if let Err(e) = set_add_many(&config.redis_addr, &marks) {
-        eprintln!("secrets: marking {tree} indexed: {e}");
-    }
-    Ok(())
-}
-
-/// A walk's start tree, which is its own origin: every subtree is at its path.
-pub(crate) fn index_root(config: &Config, context: &Context, tree: &str) {
-    if context.is_empty() {
-        return;
-    }
-    let origin = Origin {
-        root: tree.to_string(),
-        path: String::new(),
-    };
-    if let Err(e) = index_subtrees(config, tree, &[origin]) {
-        eprintln!("secrets: cannot index {tree}: {e}");
-    }
-}
-
-/// What a `:@@=` resolution produced, at its locator's `(rev^{tree}, dir)`.
-pub(crate) fn record_mount(config: &Config, oid: &str, origin: Origin) {
-    record_origins(config, vec![(oid.to_string(), origin.clone())]);
-    if let Err(e) = index_subtrees(config, oid, &[origin]) {
-        eprintln!("secrets: cannot index {oid}: {e}");
     }
 }
 
 // ---- records ----------------------------------------------------------------
+
+/// Bounds the in-memory map; forgetting only means a later redis read.
+const MEMORY_CAP: usize = 1_000_000;
 
 /// A granted image's entries and the names granted, by scope. In front of a
 /// redis list per scope; a scope present here holds everything redis does.
@@ -392,30 +170,23 @@ fn record_grant(config: &Config, scope: &str, record: Record) {
 
 // ---- granting ---------------------------------------------------------------
 
-/// [`EvalHost::evaluated`] for the server: mark and record `value` when one of
-/// the node's origins matches a reader of the run's secrets.
+/// [`EvalHost::evaluated`] for the server: mark and record `value` when it, or
+/// the directory `node` it was evaluated from, is a tree one of the run's
+/// secrets is granted to.
 pub(crate) fn evaluated(
     config: &Config,
     host: &dyn EvalHost,
     context: &Context,
-    origins: &[Origin],
+    node: &str,
     value: (String, String),
 ) -> Result<(String, String), String> {
     if context.is_empty() {
         return Ok(value);
     }
-    if value.0 == "tree" {
-        index_subtrees(config, &value.1, origins)?;
-    }
     let granted: Vec<&Stored> = context
         .stored
         .iter()
-        .filter(|secret| {
-            secret.readers.iter().any(|reader| {
-                let matcher = Matcher::new(config, context, reader);
-                origins.iter().any(|origin| matcher.matches(origin))
-            })
-        })
+        .filter(|secret| context.grants(config, secret, node, &value.1))
         .collect();
     if granted.is_empty() {
         return Ok(value);
@@ -505,87 +276,6 @@ pub(crate) fn granted_names(
     names
 }
 
-/// A reader, resolved once for a node's origins. A shared subtree has tens of
-/// thousands of them, and the per-origin work this used to do (parse the
-/// locator, split both paths into owned `Vec`s, rebuild the roots-cache key)
-/// was most of the server's CPU once the membership scans were gone.
-enum Matcher<'a> {
-    /// Nothing can match: no pin, another session, no head yet, or a
-    /// locator that could not be resolved (reported once, here).
-    Never,
-    Locator {
-        dir: Vec<String>,
-        roots: Arc<HashSet<String>>,
-    },
-    Session {
-        config: &'a Config,
-        head: &'a str,
-        path: &'a str,
-    },
-}
-
-impl<'a> Matcher<'a> {
-    fn new(config: &'a Config, context: &'a Context, reader: &'a Reader) -> Self {
-        match reader {
-            Reader::Locator { locator, since } => match context.pins.get(locator) {
-                Some(Some(pinned)) => {
-                    let resolved = git_locator::parse_git_ref(pinned).and_then(|git_ref| {
-                        let roots = crate::grant_history::allowed_roots(
-                            config,
-                            &git_ref,
-                            since.as_deref(),
-                        )?;
-                        let dir: Vec<String> = components(git_ref.dir.as_deref().unwrap_or(""))
-                            .map(str::to_string)
-                            .collect();
-                        Ok((dir, roots))
-                    });
-                    match resolved {
-                        Ok((dir, roots)) => Matcher::Locator { dir, roots },
-                        Err(e) => {
-                            eprintln!(
-                                "secrets: a reader could not be checked, so it grants nothing: {e}"
-                            );
-                            Matcher::Never
-                        }
-                    }
-                }
-                _ => Matcher::Never,
-            },
-            Reader::Session { path, session } => {
-                if context.session.as_deref() != Some(session.as_str()) {
-                    return Matcher::Never;
-                }
-                match &context.head {
-                    Some(head) => Matcher::Session { config, head, path },
-                    None => Matcher::Never,
-                }
-            }
-        }
-    }
-
-    fn matches(&self, origin: &Origin) -> bool {
-        match self {
-            Matcher::Never => false,
-            Matcher::Locator { dir, roots } => {
-                components(&origin.path).eq(dir.iter().map(String::as_str))
-                    && roots.contains(&origin.root)
-            }
-            Matcher::Session { config, head, path } => match_session(config, head, path, origin)
-                .unwrap_or_else(|e| {
-                    eprintln!("secrets: a reader could not be checked, so it grants nothing: {e}");
-                    false
-                }),
-        }
-    }
-}
-
-/// The path's components, as a borrowing iterator so a comparison allocates
-/// nothing.
-fn components(path: &str) -> impl Iterator<Item = &str> {
-    path.split('/').filter(|c| !c.is_empty() && *c != ".")
-}
-
 /// The tree of the session's head commit, or `None` with no head yet.
 fn session_head(config: &Config, session: &str) -> Result<Option<String>, String> {
     let repo = config.repo.to_thread_local();
@@ -605,48 +295,6 @@ fn session_head(config: &Config, session: &str) -> Result<Option<String>, String
         .map_err(|e| format!("{refname}: {e}"))?
         .to_string();
     Ok(Some(tree))
-}
-
-/// `path` in the session's head tree, evaluated the way the session
-/// evaluates it: from the root of whichever tree along the path the walk
-/// started at, a source tree's gitlink included.
-fn match_session(config: &Config, head: &str, path: &str, origin: &Origin) -> Result<bool, String> {
-    let parts: Vec<&str> = components(path).collect();
-    let rest: Vec<&str> = components(&origin.path).collect();
-    if rest.len() > parts.len() || parts[parts.len() - rest.len()..] != rest[..] {
-        return Ok(false);
-    }
-    let prefix = &parts[..parts.len() - rest.len()];
-    let repo = config.repo.to_thread_local();
-    let mut tree = gix::ObjectId::from_hex(head.as_bytes()).map_err(|e| format!("{head}: {e}"))?;
-    for name in prefix {
-        let object = repo.find_object(tree).map_err(|e| format!("{tree}: {e}"))?;
-        let Ok(decoded) = object.try_into_tree() else {
-            return Ok(false);
-        };
-        let Some(entry) = decoded
-            .decode()
-            .map_err(|e| format!("{tree}: {e}"))?
-            .entries
-            .iter()
-            .find(|e| e.filename == name.as_bytes())
-            .map(|e| (e.mode, e.oid.to_owned()))
-        else {
-            return Ok(false);
-        };
-        tree = if entry.0.is_commit() {
-            repo.find_object(entry.1)
-                .map_err(|e| format!("{}: {e}", entry.1))?
-                .try_into_commit()
-                .map_err(|e| format!("{}: {e}", entry.1))?
-                .tree_id()
-                .map_err(|e| format!("{}: {e}", entry.1))?
-                .detach()
-        } else {
-            entry.1
-        };
-    }
-    Ok(tree.to_string() == origin.root)
 }
 
 fn blob_oid(bytes: &[u8]) -> String {

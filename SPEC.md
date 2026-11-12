@@ -509,46 +509,59 @@ reader:@=imports/caos/std/llm-step session=<id>
 
 ## Readers
 
-- **`reader:@@=<locator> [since=<sha>]`** grants the image at `dir=` in the
+- **`reader:@@=<locator> [since=<sha>]`** grants the tool at `dir=` in the
   locator's `rev` and in each of its first-parent ancestors, back to and
-  including `since` (or to the root without `since`). First-parent, so a branch forked
+  including `since`, or in the newest 20 commits without `since`.
+  First-parent, so a branch forked
   before `since` and merged after it does not bring back the code `since`
   excluded. The range is content; the URL only says where to fetch it. A
-  `ref=` in place of `rev=` names a branch, resolved when a request is admitted
-  (`git+caos://` is this server's own; any other URL is asked), so the range
-  moves with it — and trusts whoever can move that branch.
+  `ref=` in place of `rev=` names a branch, resolved when the secret is
+  pushed (`git+caos://` is this server's own; any other URL is asked).
 - **`reader:@=<path> session=<id>`** grants whatever is at `path` in that
   session's tree, and only in that session. The agent can edit that
   code, so this exposes the secret to the agent. Secret files written
   before caos called a conversation a session say `conversation=<id>`,
   which still reads the same.
 
-Matching happens where evaluation applies a node's `.caos-expr`. Every node
-has an origin `(T, P)`: a root tree and the node's path in it. A walk's start
-tree is its own origin at `P = ""`, descending by name extends `P`, and a
-`:@@=` result's origin is `(C^{tree}, dir)` — so what a consumer mounts keeps
-the identity it had upstream. Every subtree of a start tree, a `:@@=` result,
-or a value a `.caos-expr` produced is recorded at its path below that origin;
-equal oids are equal content, so a copy (a `DEEP-DEPS/<name>` mount is one)
-carries the origins of what it was copied from. A node's value is a function
-of its origin (a parent `.caos-expr` can reshape everything below it, so nothing
-less than the whole root identifies it). An origin is the server's bookkeeping
-during the
-walk, never written into a tree: an ungranted node evaluates exactly as it
-would with no secrets, and a granted one differs only by `secret-hash`. Origins
-and grant records are kept, so a walk is memoized on its tree, its path and
-what a grant depends on (the stores, the session and its head, the
-resolved branches).
-- `reader:@@=` matches when `P` is `dir=` and `T` is `C^{tree}` for a commit `C`
-  in its range. The allowed set is `git log --first-parent --format=%T`,
-  computed once per pushed tree, and needs no evaluation. A root that differs
-  from every commit in the range, anywhere, matches nothing; modified code is
-  what `reader:@=` is for.
-- `reader:@=` matches when the origin is `path` in the tree of session
-  `id`'s current head, for a request of that session (named out of band,
-  like the keys).
+**A `reader:@@=` is turned into trees when the secret is pushed**
+(design/secrets.md has the reasoning). For each of its commits,
+`secrets-push` asks the server for the directory a walk from the commit's
+root has in hand at `dir=` when it is about to apply the tool's own
+expression: every parent's `.caos-expr` applied, the tool's not yet. A parent
+can reshape everything below it (caos's root expression mounts each tool's
+`DEEP-DEPS`), so that tree, and not the directory as committed, is the whole
+program. Each becomes a `tree=<oid>` line of the pushed secret, covered by
+the push's signature. A `tree=` line may also be written by hand, naming a
+tool's directory or the image it evaluates to.
 
-This check runs on every evaluation, including one that is a memo hit.
+Matching happens where evaluation applies a directory's `.caos-expr`, and it
+is a lookup: the secret is granted when that directory's tree, or the image
+it evaluated to, is one of the secret's trees. An expression reads only its
+own tree, so equal trees are equal programs, by whatever path the run
+reached them. A `:@@=` mount and a `DEEP-DEPS/<name>` copy are the same tree
+as the tool at its own path, so they are granted; a directory anything was
+changed in is a different tree, and is not. Nothing is written into a tree:
+an ungranted tool evaluates exactly as it would with no secrets, and a
+granted one differs only by `secret-hash`.
+
+What follows from evaluating at push:
+- **A grant does not follow a branch.** Code that lands after a push is
+  approved by the next one. The approved tree includes the tool's mounted
+  dependencies, so after moving a session to a newer caos, push again.
+- **`secrets-push` says what it approved**: per reader, how many commits had
+  the tool, a warning for a reader that approves nothing, and one for a
+  commit that failed to evaluate. A commit without the path is skipped.
+- A store pushed before trees existed holds none: its `reader:@@=` lines
+  grant nothing until it is pushed again.
+
+`reader:@=` is decided when asked, since a session's head moves with every
+edit: it approves the directory at `path` in the tree of session `id`'s
+current head, by the same rule, for a request of that session (named out of
+band, like the keys).
+
+A walk is memoized on its tree, its path and what a grant depends on (the
+stores, which hold the trees, and the session and its head); grant records
+are kept, so a memo hit needs nothing replayed.
 
 ## Using secrets
 

@@ -43,7 +43,18 @@ pub fn cli_secrets_push(args: &[String]) -> Result<(), String> {
     let (dir, server) = parse_flags(args)?;
     let key = read_writer_key(&dir)?;
     let reader_key = hex(&key.verifying_key().to_bytes());
-    let secrets = load_dir(&dir)?;
+    let mut secrets = load_dir(&dir)?;
+    let server = match server {
+        Some(server) => server,
+        None => caos::GitTransport::from_cwd()
+            .and_then(|t| caos::Transport::server_url(&t))
+            .map_err(|e| format!("no --server, and no caos remote here: {e}"))?,
+    };
+    // Before signing: what is signed is the trees themselves, so the server
+    // holds exactly what this user approved and decides nothing later.
+    for (spec, _) in &mut secrets {
+        approve(&server, spec)?;
+    }
 
     let tree = tree_oid(&secrets)?;
     let sequence = std::time::SystemTime::now()
@@ -60,12 +71,6 @@ pub fn cli_secrets_push(args: &[String]) -> Result<(), String> {
         );
     }
     let body = serde_json::Value::Object(body).to_string();
-    let server = match server {
-        Some(server) => server,
-        None => caos::GitTransport::from_cwd()
-            .and_then(|t| caos::Transport::server_url(&t))
-            .map_err(|e| format!("no --server, and no caos remote here: {e}"))?,
-    };
     let headers = [
         (fmt::PUSH_KEY_HEADER, reader_key.clone()),
         (fmt::PUSH_SEQUENCE_HEADER, sequence.to_string()),
@@ -96,6 +101,169 @@ pub fn cli_secrets_push(args: &[String]) -> Result<(), String> {
         names.join(" ")
     );
     Ok(())
+}
+
+/// How long one question to the server may take. Evaluating a commit nobody
+/// has evaluated runs its expressions, which are jobs.
+const ASK_TIMEOUT_SECS: u64 = 600;
+
+/// Add to `spec.trees` the tree of each tool its `reader:@@=` lines name, at
+/// every commit they cover, as the server evaluates it (design/secrets.md).
+///
+/// A commit where the path does not exist approves nothing, quietly: the
+/// newest of a branch's commits routinely include ones older than the tool.
+/// One that fails to evaluate is reported and approves nothing either. Neither
+/// fails the push.
+fn approve(server: &str, spec: &mut Spec) -> Result<(), String> {
+    let name = spec.name.clone();
+    let mut trees = std::mem::take(&mut spec.trees);
+    for reader in &spec.readers {
+        let fmt::Reader::Locator { locator, since } = reader else {
+            continue;
+        };
+        let commits = commits_of(server, locator, since.as_deref())
+            .map_err(|e| format!("secret {name}: {locator}: {e}"))?;
+        let mut found = 0;
+        for commit in &commits {
+            match tool_tree(server, locator, commit) {
+                Ok(Some(tree)) => {
+                    found += 1;
+                    if !trees.contains(&tree) {
+                        trees.push(tree);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("{name}: warning: {locator} at {commit}: {e}"),
+            }
+        }
+        let total = commits.len();
+        if found == 0 {
+            eprintln!("{name}: warning: {locator} approves nothing ({total} commit(s) tried)");
+        } else {
+            eprintln!("{name}: {locator}: the tool at {found} of {total} commit(s)");
+        }
+    }
+    trees.sort();
+    spec.trees = trees;
+    Ok(())
+}
+
+/// The commits `locator` covers, newest first. The server answers, because it
+/// can resolve a `ref=` and read the history wherever the repository is.
+fn commits_of(server: &str, locator: &str, since: Option<&str>) -> Result<Vec<String>, String> {
+    let body = serde_json::json!({ "locator": locator, "since": since }).to_string();
+    let answer = request(server, "/secrets/commits", Some(body.as_bytes()))?;
+    let text = String::from_utf8_lossy(&answer);
+    Ok(text.split_whitespace().map(str::to_string).collect())
+}
+
+/// The tree `locator` approves at `commit`: the tool's directory as a walk
+/// from the commit's root holds it when it is about to apply the tool's own
+/// `.caos-expr`. `None` when the commit has no such directory.
+///
+/// The directory, and not the image the tool builds. The image always depends
+/// on the build of caos that built it, and on what the tool's own dependencies
+/// were granted, so one computed here would not be the one a run forms. The
+/// directory depends on the build only where a parent expression builds
+/// something into it, which caos's do not. design/secrets.md sets out what
+/// pushing the image would take and cost.
+fn tool_tree(server: &str, locator: &str, commit: &str) -> Result<Option<String>, String> {
+    let (url, query) = locator.split_once('?').unwrap_or((locator, ""));
+    let mut dir = "";
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("dir=") {
+            dir = value;
+        }
+    }
+    let parts: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
+    let Some((name, parents)) = parts.split_last() else {
+        // The repository's root is the tool: its tree as committed.
+        let (_, root) = eval(server, &format!("{url}?rev={commit}&raw=1"))?;
+        return Ok(Some(root));
+    };
+    let mut at = format!("{url}?rev={commit}");
+    if !parents.is_empty() {
+        at.push_str(&format!("&dir={}", parents.join("/")));
+    }
+    let (kind, holder) = match eval(server, &at) {
+        Ok(answer) => answer,
+        Err(e) if e.contains("no such path") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if kind != "tree" {
+        return Ok(None);
+    }
+    let object = request(server, &format!("/object/{holder}"), None)?;
+    child_tree(&object, name)
+}
+
+/// Ask the server to evaluate a pinned locator: `GET /eval?root:@@=`, the
+/// question `caos-cli run` asks for a `:@@=` argument.
+fn eval(server: &str, locator: &str) -> Result<(String, String), String> {
+    let path = format!("/eval?root:@@={}", percent_encode(locator));
+    let answer = request(server, &path, None)?;
+    let text = String::from_utf8_lossy(&answer).trim().to_string();
+    let Some((kind, hash)) = text.split_once(' ') else {
+        return Err(format!("unexpected answer {text:?}"));
+    };
+    Ok((kind.to_string(), hash.to_string()))
+}
+
+/// One request to the server, a POST when it has a body. It carries no
+/// SecretReaderKey: what a reader approves is the same whoever asks.
+fn request(server: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    let response = caos::server_request(
+        server,
+        &caos::ServerRequest {
+            method: if body.is_some() { "POST" } else { "GET" },
+            path,
+            headers: &[],
+            body,
+            timeout_secs: Some(ASK_TIMEOUT_SECS),
+        },
+    )?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "{} {}: {}",
+            response.status,
+            response.reason,
+            String::from_utf8_lossy(&response.body).trim()
+        ));
+    }
+    Ok(response.body)
+}
+
+/// The tree named `name` in a serialized tree object (`tree <size>\0…`), or
+/// `None` when it has no such entry or the entry is not a directory.
+fn child_tree(object: &[u8], name: &str) -> Result<Option<String>, String> {
+    let start = object.iter().position(|byte| *byte == 0);
+    let start = start.ok_or("the server sent a malformed object")?;
+    let tree = gix::objs::TreeRef::from_bytes(&object[start + 1..], gix::hash::Kind::Sha1)
+        .map_err(|e| format!("the server sent a malformed tree: {e}"))?;
+    let mut entries = tree.entries.iter();
+    let entry = entries.find(|entry| entry.filename == name.as_bytes());
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    if !entry.mode.is_tree() {
+        return Ok(None);
+    }
+    Ok(Some(entry.oid.to_string()))
+}
+
+/// Percent-encode a URL component: everything but the unreserved set, as the
+/// server decodes it (`compute::percent_decode`).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn parse_flags(args: &[String]) -> Result<(PathBuf, Option<String>), String> {
@@ -363,6 +531,33 @@ mod tests {
         assert_eq!(expand_home("~").unwrap(), home);
         assert_eq!(expand_home("/a/~b").unwrap(), PathBuf::from("/a/~b"));
         assert_eq!(expand_home("~other/x").unwrap(), PathBuf::from("~other/x"));
+    }
+
+    #[test]
+    fn a_tool_is_a_directory_of_the_tree_that_holds_it() {
+        use gix::objs::tree::{Entry, EntryKind};
+        use gix::objs::WriteTo;
+        let oid = gix::ObjectId::from_hex(b"4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap();
+        let entries = vec![
+            Entry {
+                mode: EntryKind::Blob.into(),
+                filename: "file".into(),
+                oid,
+            },
+            Entry {
+                mode: EntryKind::Tree.into(),
+                filename: "tool".into(),
+                oid,
+            },
+        ];
+        let mut object = b"tree 0\0".to_vec();
+        gix::objs::Tree { entries }.write_to(&mut object).unwrap();
+        let tool = child_tree(&object, "tool").unwrap();
+        assert_eq!(tool, Some(oid.to_string()));
+        assert_eq!(child_tree(&object, "file").unwrap(), None);
+        assert_eq!(child_tree(&object, "absent").unwrap(), None);
+        assert!(child_tree(b"no header", "tool").is_err());
+        assert_eq!(percent_encode("a?b=c&d"), "a%3Fb%3Dc%26d");
     }
 
     #[test]

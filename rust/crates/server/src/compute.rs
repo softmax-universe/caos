@@ -194,23 +194,9 @@ pub(crate) fn eval_endpoint(
                 return raw_root(config, &locator, &git_ref, &root).map(String::into_bytes);
             }
             let dir = git_ref.dir.as_deref().unwrap_or("");
-            let result = eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
+            eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
                 HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message()))
-            })?;
-            if let Some((_, hash)) = std::str::from_utf8(&result)
-                .ok()
-                .and_then(|r| r.split_once(' '))
-            {
-                crate::secrets::record_mount(
-                    config,
-                    hash.trim(),
-                    caos_eval::Origin {
-                        root: root.to_string(),
-                        path: dir.to_string(),
-                    },
-                );
-            }
-            Ok(result)
+            })
         }
     }
 }
@@ -368,19 +354,8 @@ fn evaluate_locator(
         return raw_root(config, locator, &git_ref, &root);
     }
     let dir = git_ref.dir.as_deref().unwrap_or("");
-    let result = evaluate(config, &root.to_string(), dir, secrets, parent)
-        .map_err(|e| HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message())))?;
-    if let Some((_, hash)) = result.split_once(' ') {
-        crate::secrets::record_mount(
-            config,
-            hash,
-            caos_eval::Origin {
-                root: root.to_string(),
-                path: dir.to_string(),
-            },
-        );
-    }
-    Ok(result)
+    evaluate(config, &root.to_string(), dir, secrets, parent)
+        .map_err(|e| HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message())))
 }
 
 /// `POST /submit` — form a request (SPEC, "Submitting work") and return
@@ -1252,8 +1227,8 @@ fn broadcast(waiters: Vec<mpsc::Sender<Outcome>>, outcome: &Outcome) {
 /// — which blocks THIS request thread (never a worker slot), exactly as
 /// [`resolve_promise`]'s own `run` step does. This is what lets a worker request
 /// evaluation server-side, via an `eval` continuation, and get the byte-identical
-/// object a client `eval-path` would build, marked where a node's origin
-/// matches a grant ([`crate::secrets::evaluated`]).
+/// object a client `eval-path` would build, marked where a directory is one a
+/// secrets reader approves ([`crate::secrets::evaluated`]).
 struct ServerEvalHost<'a> {
     config: &'a Config,
     salt: &'a str,
@@ -1350,14 +1325,6 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
         let dir = git_ref.dir.as_deref().unwrap_or("");
         let (kind, hash) = caos_eval::eval_path(self, &root.to_string(), dir)
             .map_err(|e| format!("git ref {value:?}: {e}"))?;
-        crate::secrets::record_mount(
-            self.config,
-            &hash,
-            caos_eval::Origin {
-                root: root.to_string(),
-                path: dir.to_string(),
-            },
-        );
         Ok((
             caos_eval::mode_of_kind(&kind),
             gix::ObjectId::from_hex(hash.as_bytes())
@@ -1381,22 +1348,8 @@ impl caos_eval::EvalHost for ServerEvalHost<'_> {
             crate::eval_cache::put(self.config, key, &self.cache_variant(), value);
         }
     }
-    fn origins_of(&self, oid: &str) -> Vec<caos_eval::Origin> {
-        // Origins are read in one place, `evaluated`, and it returns at once
-        // for a run with no secrets. Loading them for such a run was most of
-        // its evaluation time: a shared tree has hundreds of thousands, and
-        // each is cloned and hashed at every node (design/secrets.md).
-        if self.secrets.is_empty() {
-            return Vec::new();
-        }
-        crate::secrets::origins_of(self.config, oid)
-    }
-    fn evaluated(
-        &self,
-        origins: &[caos_eval::Origin],
-        value: (String, String),
-    ) -> Result<(String, String), String> {
-        crate::secrets::evaluated(self.config, self, self.secrets, origins, value)
+    fn evaluated(&self, node: &str, value: (String, String)) -> Result<(String, String), String> {
+        crate::secrets::evaluated(self.config, self, self.secrets, node, value)
     }
     fn dispatch(
         &self,
@@ -1698,7 +1651,6 @@ fn resolve_promise(
             eval_path: path,
             dispatches: std::sync::atomic::AtomicUsize::new(0),
         };
-        crate::secrets::index_root(config, secrets, &input.oid.to_string());
         let evaluated = caos_eval::eval_path(&host, &input.oid.to_string(), path)
             .map(|(kind, hash)| format!("{kind} {hash}"))
             .map_err(|e| {
@@ -2996,31 +2948,11 @@ pub(crate) fn list_append_many(addr: &str, pairs: &[(String, String)]) -> Result
     Ok(())
 }
 
-/// `SADD key member` for every pair, over one connection. A set, not a list,
-/// where a repeat must be free: the secrets origin index re-records the same
-/// fact on every re-index, and as list lines they grew to 25M entries per key.
-pub(crate) fn set_add_many(addr: &str, pairs: &[(String, String)]) -> Result<(), String> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let mut stream = redis_connect(addr)?;
-    let mut buf = Vec::new();
-    for (key, member) in pairs {
-        buf.extend_from_slice(&resp_command(&["SADD", key, member]));
-    }
-    stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
-    let mut reader = BufReader::new(stream);
-    for _ in pairs {
-        read_integer_reply(&mut reader)?;
-    }
-    Ok(())
-}
-
-/// `SMEMBERS key` — every member of the set, in no particular order.
-pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
+/// `HVALS key` — every value of a hash, in no particular order.
+pub(crate) fn hash_values(addr: &str, key: &str) -> Result<Vec<String>, String> {
     let mut stream = redis_connect(addr)?;
     stream
-        .write_all(&resp_command(&["SMEMBERS", key]))
+        .write_all(&resp_command(&["HVALS", key]))
         .map_err(|e| format!("write: {e}"))?;
     read_array_reply(&mut BufReader::new(stream))
 }

@@ -487,7 +487,7 @@ func main() {
 		pinRepo = fixtureNestedRepo("/tmp/pin-repo-nested")
 		hookOut, marked = hook("/tmp/share-nested-current", "softmax-universe/caos@"+pinRev, "")
 		w.True(!marked, "the hook marked an install that matches a caos-std/ pin stale:\n%s", hookOut)
-		hookOut, marked = hook("/tmp/share-nested-moved", "Metta-AI/caos@"+otherRev, "")
+		hookOut, marked = hook("/tmp/share-nested-moved", "softmax-universe/caos@"+otherRev, "")
 		w.True(marked, "the hook did not read the pin from caos-std/:\n%s", hookOut)
 
 		// The session base setup computed is a commit; a checkout now at another

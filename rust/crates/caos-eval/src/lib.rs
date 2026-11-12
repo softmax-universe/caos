@@ -1613,6 +1613,24 @@ mod evaluated_tests {
     }
 
     #[test]
+    fn nix_is_only_a_base() {
+        let host = Memory::default();
+        let err = eval_in(&host, &[], "graft --x:nix=v1\n").unwrap_err();
+        assert!(err.contains("only a --base"), "{err}");
+        let err = eval_in(&host, &[], "curry --base:nix=v9 --x=1\n").unwrap_err();
+        assert!(err.contains("use --base:nix=v1"), "{err}");
+        // A curry over the primitive keeps the `nix:v1` blob as its base, which
+        // is what the server dispatches on.
+        let out = eval_in(&host, &[], "curry --base:nix=v1 --attr=hello\n").unwrap();
+        let base = listing(&host, &out)
+            .into_iter()
+            .find(|(n, _)| n == "base")
+            .unwrap()
+            .1;
+        assert_eq!(base, "nix:v1");
+    }
+
+    #[test]
     fn graft_refuses_what_it_cannot_mean() {
         let host = Memory::default();
         for (expr, why) in [

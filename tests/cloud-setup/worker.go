@@ -406,6 +406,7 @@ func main() {
 		w.Step("a pin kept in caos-std/ is read from there, and the seed repoints it there")
 		// The loader mounts at `.` in this layout, so std is at the directory that
 		// holds the expression, and the seed has to rewrite THAT expression and lock.
+		w.Must(os.MkdirAll("/tmp/home4", 0o755))
 		nested := fixtureNestedRepo("/tmp/repo-nested")
 		nestedHead := git(nested, "rev-parse", "HEAD")
 		nestedBootstrap := exec.Command("go", "run", filepath.Join(cloud, "bootstrap.go"),

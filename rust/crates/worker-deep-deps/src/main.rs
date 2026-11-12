@@ -19,6 +19,11 @@
 //! directories it needs, instead of forcing every such thing into a directory
 //! of its own.
 //!
+//! A path the tree's root `.caos-mounts` lists is a MOUNT: a finished tree that
+//! was deepened where it came from (a consumer's `caos-std/`, the repo's
+//! `caos-core/`). It is carried across by reference, never walked or fetched,
+//! and a dependency that lies inside one is mounted as-is (see `fetch`).
+//!
 //! ONE RUN, one pass — do not split it back into per-directory jobs. Recursing
 //! through `map_then` (a job to enumerate each directory, another to rebuild it)
 //! costs ~2N containers for N directories, and buys nothing: the enumerating

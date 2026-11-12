@@ -133,7 +133,7 @@ No Rust toolchain is needed system-wide; the flake pins it.
 | `rust/crates/caos-cli/` | Session protocol plus the user-facing `caos-cli` line client and TUI |
 | `rust/crates/server/` | The `server` crate → `caos-server` |
 | `rust/crates/worker-*/` | The worker crates |
-| `stack/` | The one bring-up: `bootstrap` (store + `nix build`), `serve` (daemons, publish, seeder), `build-builtins.sh` (the seeded core) |
+| `stack/` | The one bring-up: `bootstrap` (store + `nix build`), `serve` (daemons, the nix primitive's image), `build-builtins.sh` (streams that image) |
 | `tests/` | The integration suites (the `caos-build`/`caos-test`/`caos-test-result` tools now live under `std/`, offered by the agent harness) |
 
 ## Development

@@ -1517,6 +1517,59 @@ mod evaluated_tests {
     }
 
     #[test]
+    fn a_path_inside_a_variable_descends_through_evaluation() {
+        let host = Memory::default();
+        let tool_expr = host.put(
+            gix::objs::Kind::Blob,
+            b"curry --base:docker=img@sha256:00 --x=1\n".to_vec(),
+        );
+        let tool = host.tree(vec![(".caos-expr", false, tool_expr)]);
+        let f = host.put(gix::objs::Kind::Blob, b"F".to_vec());
+        let sub = host.tree(vec![("f", false, f)]);
+        let expr = host.put(
+            gix::objs::Kind::Blob,
+            b"T=graft --in:@=. --z=1\ngraft --file=$T/sub/f --got=$T/tool --want:@=tool\n"
+                .to_vec(),
+        );
+        let root = host.tree(vec![
+            (".caos-expr", false, expr),
+            ("sub", true, sub),
+            ("tool", true, tool),
+        ]);
+        let (_, out) = eval_path(&host, &root.to_string(), "").unwrap();
+        let got = listing(&host, &out);
+        let by_name = |n: &str| got.iter().find(|(name, _)| name == n).unwrap().1.clone();
+        assert_eq!(by_name("file"), "F");
+        let oid_of = |n: &str| {
+            host.fetch_tree_entries(&out)
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.filename == n.as_bytes())
+                .unwrap()
+                .oid
+        };
+        // `$T/tool` was EVALUATED on the way down, like `:@=tool`: both are the
+        // curry node, not the source directory.
+        assert_eq!(oid_of("got"), oid_of("want"));
+        assert_ne!(oid_of("got"), tool);
+    }
+
+    #[test]
+    fn a_path_inside_a_variable_refuses_what_it_cannot_mean() {
+        let host = Memory::default();
+        for (expr, why) in [
+            ("T=graft --x=1\ngraft --y=$T/../a\n", "`..`"),
+            ("B=<<END\nhi\nEND\ngraft --y=$B/x\n", "not a tree"),
+            ("T=graft --x=1\ngraft --y=$T/nope\n", "no such path"),
+            ("graft --y=$NOPE/x\n", "undefined variable $NOPE"),
+        ] {
+            let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();
+            assert!(err.contains(why), "{expr:?}: {err}");
+        }
+    }
+
+    #[test]
     fn graft_refuses_what_it_cannot_mean() {
         let host = Memory::default();
         for (expr, why) in [

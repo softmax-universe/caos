@@ -276,9 +276,15 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   COLD CORE.** The core (runner, flake-builder, cargo, rustc, deep-deps) is built
   by the `nix=v1` primitive when the root expression is first evaluated, from
   the tree's own flake, so the first evaluation after an edit that reaches the
-  flake builds the whole Rust workspace and the 3.4 GB cargo image inside the
-  primitive's container: 30 to 50 minutes with nothing in the run log but a
-  pending ticket. That is not a hang. What re-keys it: anything under `rust/`,
+  flake builds the Rust workspace and the 3.4 GB cargo image inside the
+  primitive's container. Measured (root trace, time before the suite starts):
+  about 39 minutes when every job started with an empty `/nix`, 11.6 minutes on
+  the first run with the persistent store (`/mounted-nix`, granted to jobs that
+  carry `--required-caosd=true`, which the root expression's `nix=v1` lines do),
+  and 4.3 minutes for a Rust edit on a warm store, because the dependency builds
+  are store hits. The dispatches run one after another, and the build's output
+  goes to the caosd runner's log, not the plain runnerd's. That is not a hang.
+  The store only grows; nothing collects it yet. What re-keys it: anything under `rust/`,
   `std/cargo`, `std/flake-builder`, the flake and its lock. What does NOT: edits
   to `tests/`, `dev/`, `design/`, `examples/`, `spec/`, `.github/` and the top-level
   docs (`README.md`, `AGENTS.md`, `CLAUDE.md`, `SPEC.md`), which the

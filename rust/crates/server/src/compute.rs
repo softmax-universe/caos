@@ -2338,8 +2338,8 @@ fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
         .map_err(|e| HttpError::new(500, format!("converting git image {image}: {e}")))
 }
 
-/// The image that runs the nix primitive `base` (`nix:v1`): THIS STACK'S own
-/// flake-builder, whose /worker has a `nix` stage that builds a flake
+/// The image that runs the nix primitive `base` (`nix:v1`): THIS STACK'S
+/// `caos-worker-nix`, whose /worker (`stack/nix-worker`) builds a flake
 /// attribute and adds nothing (design/nix-bootstrap.md).
 ///
 /// Which stack ran it is deliberately not part of the job's key — that is the

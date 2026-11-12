@@ -317,12 +317,15 @@ op_run_tests() {
     echo "==> granting llm-call, llm-step, dev/worker-test and std/go a mock key" >&2
   fi
 
-  # THE SUITE'S REQUEST, NAMED BEFORE IT RUNS, so the two stacks' traces join up.
-  # The dev stack writes its trace records to the SAME redis as the host — a trace
-  # key carries no cache namespace — so both sets already sit side by side; what
-  # was missing was an edge from this job to the suite's, and `caos trace-child`
-  # records exactly that. `prepare-request` forms and pushes the very ArgTree the
-  # `run` below will form, so the hash is known before any work starts.
+  # THE SUITE'S REQUEST, NAMED BEFORE IT RUNS, so the suite hangs under THIS job
+  # in the one trace a caller already has: the `trace:` hash every tool result
+  # ends with. The dev stack writes its trace records to the SAME redis as the
+  # host — a trace key carries no cache namespace — so both sets already sit side
+  # by side; what links them is an edge from this job to the suite's, and `caos
+  # trace-child` records exactly that. `prepare-request` forms and pushes the very
+  # ArgTree the `run` below will form, so the hash is known before any work
+  # starts. The suite's own hash is deliberately NOT printed or put in the
+  # report: there is one root trace, and it already contains the suite.
   #
   # CAOS_SALT IS SET HERE, for the inner client, from this message's file. The
   # (A worker has no CAOS_SALT of its own; see the header.)

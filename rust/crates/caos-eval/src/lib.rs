@@ -668,9 +668,9 @@ fn eval_command_args(
     host.dispatch(&image_ref, entries)
 }
 
-/// `graft [--in:<t>=<tree>] --<name>[:<t>]=<value> …` — the tree `--in` (the
-/// empty tree when absent) with each `<name>` entry set to `<value>`, replacing
-/// an entry of that name. PURE TREE ASSEMBLY, like `curry`: it dispatches
+/// `graft|mount [--in:<t>=<tree>] --<name>[:<t>]=<value> …` — the tree `--in`
+/// (the empty tree when absent) with each `<name>` entry set to `<value>`,
+/// replacing an entry of that name. PURE TREE ASSEMBLY, like `curry`: it dispatches
 /// nothing of its own, so it is available before any worker exists. That is
 /// what the repo root needs to put a freshly built core into its own tree before
 /// anything can be built WITH that core (design/nix-bootstrap.md); a worker such

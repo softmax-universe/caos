@@ -121,13 +121,8 @@ func fixtureRepoAt(dir string, nested bool) string {
 	expr := "# the consumer root (design/flake-inputs.md)\n" +
 		"run --base:@@=github:softmax-universe/caos?rev=" + pinRev + "&dir=std/flake-input-loader" +
 		" --in:@=. --expr=$CAOS_EXPR --input=caos" +
-<<<<<<< 82c4b9246ebce7a27832ca9e63c522420932b84c
-		" --input-tree:@@=github:Metta-AI/caos?rev=" + pinRev + "&dir=std" +
-		" --output-path=" + outputPath + "\n"
-=======
 		" --input-tree:@@=github:softmax-universe/caos?rev=" + pinRev + "&dir=std" +
-		" --output-path=caos-std\n"
->>>>>>> 842c66539d1cee6b938181bcaf641d9978038300
+		" --output-path=" + outputPath + "\n"
 	lock := `{
   "nodes": {
     "root": { "inputs": { "caos": "caos", "nixpkgs": "nixpkgs" } },

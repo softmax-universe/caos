@@ -397,7 +397,7 @@
         # as a content-keyed layer next to the additions (build-builtins),
         # so this derivation depends on nothing from the workspace and a
         # Rust edit never re-keys it.
-        workerRunnerImage = pkgs.dockerTools.buildLayeredImage {
+        mkRunnerImage = extra: pkgs.dockerTools.buildLayeredImage ({
           name = "caos-worker-runner";
           tag = "latest";
           # bash provides /bin/sh too. The userland is what compiled workers

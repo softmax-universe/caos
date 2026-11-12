@@ -175,7 +175,7 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
         let name = file_name(&entry);
         let meta =
             fs::symlink_metadata(&entry).map_err(|e| format!("stat {}: {e}", entry.display()))?;
-        if self.mounts.contains(&join(rel, &name)) {
+        if pass.mounts.contains(&join(rel, &name)) {
             link(&entry, into.join(&name))?; // a mount: finished, carried by reference
         } else if meta.is_dir() {
             subdirs.push((name, entry));

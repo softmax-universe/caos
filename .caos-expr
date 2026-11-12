@@ -13,9 +13,9 @@
 # This is the seed half of `stack/build-builtins.sh`, written as an expression.
 # `--in:@=.` is the whole repo; nix keeps the repeated builds cheap, and each key
 # is cached per rev.
-RUNNER=run --base:nix=v1 --in:@=. --attr=caos-worker-runner-docker
-FB=run --base:nix=v1 --in:@=. --attr=caos-worker-flake-builder-docker
-CARGO=run --base:nix=v1 --in:@=. --attr=caos-worker-cargo-docker
+RUNNER=run --base:nix=v1 --in:@=. --attr=caos-core-runner-docker
+FB=run --base:nix=v1 --in:@=. --attr=caos-core-flake-builder-docker
+CARGO=run --base:nix=v1 --in:@=. --attr=caos-core-cargo-docker
 DDBIN=run --base:nix=v1 --in:@=. --attr=worker-deep-deps
 RUSTCBIN=run --base:nix=v1 --in:@=. --attr=worker-rustc
 DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps

@@ -44,6 +44,16 @@ fixture() { # <variant> -> a /cas path
       echo "root manifest" > "$r/Manifest.toml"
       printf '../lib/foo foo\n../lib/bar bar\n../Manifest.toml Manifest.toml\n' > "$r/app/DEPS" ;;
     cycle)   printf '../../app loop\n' > "$r/lib/bar/DEPS" ;;
+    mounted)
+      # `vendor/core` is a MOUNT: a finished tree, listed in `.caos-mounts`.
+      # Its own DEPS names a path that does not exist HERE (as a mounted std's
+      # `../../rust/crates/...` does in a consumer), so walking it would fail.
+      # `app` depends on something INSIDE it, which must arrive as-is.
+      mkdir -p "$r/vendor/core/tool"
+      echo "built tool" > "$r/vendor/core/tool/bin"
+      printf '../../../nowhere x\n' > "$r/vendor/core/tool/DEPS"
+      printf 'vendor/core\n' > "$r/.caos-mounts"
+      printf '../lib/foo foo\n../vendor/core/tool tool\n' > "$r/app/DEPS" ;;
     evtree)
       # A `.caos-expr` at the tree root deepens the whole tree; evaluating a
       # path then descends into the deepened result. The worker is named by a

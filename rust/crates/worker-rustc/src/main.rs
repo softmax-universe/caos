@@ -163,7 +163,7 @@ fn start() -> Result<(), String> {
     // (musl, dev) precompiled the dependency graph at — so the tool's deps are
     // reused from the seeded target/ rather than recompiled. musl still links
     // static regardless of profile, so the binary runs on any base.
-    let build = caos_curry(Arg::Hash(&cargo), &[("cmd", Arg::Lit("build"))])?;
+    let build = caos_curry(cargo.as_arg(), &[("cmd", Arg::Lit("build"))])?;
     // Ourselves, in the `finish` position: rebuild our own curry (the runner
     // image with our bin re-bound) plus what finish needs. `cargo` and
     // `worker-common` deliberately don't ride — finish's cache key is just

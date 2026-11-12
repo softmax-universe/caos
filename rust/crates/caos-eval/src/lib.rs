@@ -38,7 +38,9 @@
 //! lowercase, so a line is an assignment iff it starts `NAME=<verb>`.
 //! A `run` value evaluates to the run's result; a `curry` value to the curried
 //! ArgTree; a `graft` value to `--in` with the named entries set (and recorded
-//! in `.caos-mounts`). `--base=$NAME` names the object a prior line produced.
+//! in `.caos-mounts`). `--base=$NAME` names the object a prior line produced,
+//! and `$NAME/<path>` (anywhere `$NAME` may appear) the object at `<path>`
+//! inside it, reached through evaluation like any other descent.
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from

@@ -760,7 +760,9 @@ fn eval_graft(
         toks.push(tok);
     }
     if toks.is_empty() {
-        return Err(format!("eval-path: `{verb}` needs at least one --<name>=<value> entry"));
+        return Err(format!(
+            "eval-path: `{verb}` needs at least one --<name>=<value> entry"
+        ));
     }
     let mut entries = match base {
         None => Vec::new(),

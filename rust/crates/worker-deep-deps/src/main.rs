@@ -260,10 +260,9 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
         fs::create_dir_all(&at).map_err(|e| format!("creating {}: {e}", at.display()))?;
         self.deepen(&target, &at)?;
         self.visiting.pop();
-        self.memo.insert(target, at);
+        pass.memo.insert(target, at);
     }
     Ok(())
-}
 }
 
 /// The `/cas` path of `target`, which lies at or under `mount`: fetches the

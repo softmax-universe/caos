@@ -260,8 +260,8 @@ deep-deps over a tree CONTAINING the mounts:
 
 - **deep-deps does not descend into a mount.** It treats `caos-std/` and
   `caos-core/` as opaque objects, referenced by oid. The mount step records
-  what it mounted (for example a `.caos-mounts` list at the root, written by
-  `graft` and by the loader) so deep-deps knows where to stop.
+  what it mounted (a `.caos-mounts` list at the root, written by `mount` and by
+  the loader) so deep-deps knows where to stop.
 - The same rule keeps deep-deps from materializing `caos-core/`'s image deltas,
   which are hundreds of MB and have no `DEPS` to find.
 

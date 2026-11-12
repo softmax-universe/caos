@@ -546,7 +546,10 @@ pub(crate) fn trace_child(config: &crate::Config, body: &str) -> Result<Vec<u8>,
 /// with that job.
 pub(crate) fn inflight_arg_tree(nonce: &str) -> Result<String, HttpError> {
     if !valid_hex(nonce, 32) {
-        return Err(HttpError::new(400, "a job nonce is 32 lowercase hex digits"));
+        return Err(HttpError::new(
+            400,
+            "a job nonce is 32 lowercase hex digits",
+        ));
     }
     let st = lock();
     let Some(id) = st.by_nonce.get(nonce) else {

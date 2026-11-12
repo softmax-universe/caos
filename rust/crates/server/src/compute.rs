@@ -176,7 +176,7 @@ pub(crate) fn eval_endpoint(
             let path = path.ok_or_else(|| {
                 HttpError::new(400, "root:hash=<oid> needs &path=<p> to evaluate within it")
             })?;
-            eval_in_tree(config, &root, &path, secrets)
+            eval_in_tree(config, &root, &path, secrets, parent)
         }
         (None, Some(locator)) => {
             // A locator IS a path: `dir=` says which. Taking `&path=` as well

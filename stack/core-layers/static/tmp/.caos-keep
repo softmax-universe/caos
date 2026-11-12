@@ -1,0 +1,6 @@
+This file exists so that /tmp is a NON-EMPTY directory.
+
+An empty directory is not representable in a git worktree and does not survive
+a materialize -> read -> re-put round trip, so a worker that rebuilds a tree
+from the filesystem (deep-deps) drops it. /tmp must exist in the image, so it
+carries this file. Its 1777 mode rides in the tmp.caosmeta sidecar.

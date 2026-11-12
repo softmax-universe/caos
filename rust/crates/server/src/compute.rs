@@ -2284,10 +2284,8 @@ fn validate_docker_reference(reference: &str) -> Result<(), String> {
 
 /// Resolve the `image` parameter to a reference the host docker daemon can run.
 ///
-/// `docker://<ref>` is a digest-pinned docker reference, used as-is. The only
-/// non-digest exceptions are the internal `seeded*` rendezvous sentinels, which
-/// are answered by seed runners and never pulled. Anything else is one of our
-/// git images (the default): convert it to a real image, push it to the registry,
+/// `docker://<ref>` is a digest-pinned docker reference, used as-is. Anything
+/// else is one of our git images (the default): convert it to a real image, push it to the registry,
 /// and return a digest reference into the registry.
 fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
     if image.starts_with(caos_eval::NIX_SCHEME) {

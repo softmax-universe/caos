@@ -366,14 +366,15 @@ runner_delta=${hash_of[runner]:-}
 cargo_delta=${hash_of[cargo]:-}
 fb_delta=${hash_of[flake-builder]:-}
 
-# The nix primitive's image (design/nix-bootstrap.md): this stack's own
-# flake-builder, whose `nix` stage builds a flake attribute and adds nothing.
-# The server reads it per `nix:v1` job from the file `stack/serve` names; it is
-# never part of a key. Written whole and renamed, so a reader never sees half.
-if [ -n "${CAOS_NIX_IMAGE_FILE:-}" ] && [ -n "$fb_delta" ]; then
-  printf '%s\n' "$fb_delta" > "$CAOS_NIX_IMAGE_FILE.tmp"
+# The nix primitive's image (design/nix-bootstrap.md): `caos-worker-nix`, whose
+# /worker builds a flake attribute and adds nothing. The server reads it per
+# `nix:v1` job from the file `stack/serve` names; it is never part of a key.
+# Written whole and renamed, so a reader never sees half.
+nix_delta=${hash_of[nix]:-}
+if [ -n "${CAOS_NIX_IMAGE_FILE:-}" ] && [ -n "$nix_delta" ]; then
+  printf '%s\n' "$nix_delta" > "$CAOS_NIX_IMAGE_FILE.tmp"
   mv "$CAOS_NIX_IMAGE_FILE.tmp" "$CAOS_NIX_IMAGE_FILE"
-  echo "nix primitive: $fb_delta" >&2
+  echo "nix primitive: $nix_delta" >&2
 fi
 
 # Map each worker binary to the store path that CONTAINS it (bin/worker-<b>) —

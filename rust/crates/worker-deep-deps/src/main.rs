@@ -65,7 +65,7 @@ fn run() -> Result<(), String> {
         memo: &mut memo,
         visiting: Vec::new(),
     };
-    pass.deepen("", &staged)?;
+    deepen(&mut pass, "", &staged)?;
     caos(["put", path(&staged), "/cas/out"])
 }
 

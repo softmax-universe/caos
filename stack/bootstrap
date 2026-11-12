@@ -91,7 +91,7 @@ fi
 echo "stack/bootstrap: building $attr from $tree" >&2
 inputs=$(nix build "path:$tree#$attr" --no-link --print-out-paths) \
   || fail "building $attr"
-for b in server runnerd core-seeder-runner caos-cli caos; do
+for b in server runnerd caos-cli caos; do
   [ -x "$inputs/bin/$b" ] || fail "no $b in $inputs/bin"
 done
 echo "stack/bootstrap: inputs $inputs" >&2

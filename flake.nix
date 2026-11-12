@@ -1575,7 +1575,6 @@ sandbox = false''
                 -e CAOS_STACK_REGISTRY=yes \
                 -e CAOS_STACK_REDIS=yes \
                 -e CAOS_STACK_RUNNERD=yes \
-                -e CAOS_STACK_SEEDER=yes \
                 -e CAOS_STACK_IROH="$IROH" \
                 -e CAOS_STACK_IROH_ADVERTISE="$IROH_ADVERTISE" \
                 -e CAOS_STACK_RUNNER_TICKETS="$RUNNER_TICKETS" \

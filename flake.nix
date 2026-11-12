@@ -464,6 +464,9 @@
                   linuxPkgs.gnutar
                   linuxPkgs.skopeo
                   linuxPkgs.jq
+                  # flock (the seed lock) and mount (the bind over /nix), for
+                  # the persistent store below.
+                  linuxPkgs.util-linux
                 ];
               })
             ];

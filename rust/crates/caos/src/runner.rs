@@ -596,6 +596,7 @@ impl Runner {
             }
         }
         write_root_file(&cas.join(NONCE_FILE), &job.nonce)?;
+        write_root_file(&cas.join(REQ_FILE), &job.arg_tree)?;
         Ok(cas)
     }
 

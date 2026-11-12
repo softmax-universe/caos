@@ -101,7 +101,7 @@ fn start() -> Result<(), String> {
     // The cargo worker's image ref rides as a literal (a hash string, read as
     // content): rustc is a SEEDED core item, so bootstrap hand-builds its curry
     // binding `--cargo=<cargo image hash>` (design/caos-expr.md, Phase 3).
-    let cargo = read_arg("cargo")?;
+    let cargo = read_image("cargo")?;
     // The default runner arrives the SAME way and is not normally a caller's
     // argument: rustc DEPENDS on it and curries onto it itself. A tool that
     // needs extra runtime capabilities can pass the distinct `output-runner`

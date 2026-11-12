@@ -285,4 +285,23 @@ fi
 [ -L get-dangling ] || fail "get replaced a dangling symlink"
 echo "  ok: existing dir, '.', file and dangling symlink all refused, contents intact" >&2
 
+echo "== an evaluation made for a job is traced under that job ==" >&2
+# This test is a job on this stack, and `caos job-req` is its own request hash.
+# Handing it to the client as CAOS_TRACE_PARENT is how a worker whose evaluation
+# runs on a DIFFERENT server than its own (the test daemon evaluating
+# `dev/run-tests`, which builds the core) says whose evaluation it is; the dev
+# stack allows it (CAOS_TRACE_PARENTS). The evaluation BUILDS pkg-traced, and that
+# dispatch must be a child of this job's node. Without a parent it was recorded
+# under the walk's own continuation, which no one reads, so a long evaluation
+# showed up as an unexplained gap.
+self=$(caos job-req) || fail "caos job-req failed"
+[ "${#self}" -eq 40 ] || fail "expected a 40-character request hash, got: $self"
+CAOS_TRACE_PARENT="$self" "$CAOS_CLI" eval-path pkg-traced > traced.out 2> traced.err \
+  || fail "eval-path pkg-traced failed: $(cat traced.err)"
+"$CAOS_CLI" status --all "$self" > self.json 2> self.err \
+  || fail "status on this job failed: $(cat self.err)"
+jq -e '[.. | .name? // empty | strings] | any(startswith("pkg-traced#"))' self.json > /dev/null \
+  || fail "no pkg-traced evaluation under this job's trace: $(head -c 3000 self.json)"
+echo "  ok: pkg-traced's build is a child of this job, named for the path evaluated" >&2
+
 echo "eval-path: ALL PASS" >&2

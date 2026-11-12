@@ -57,9 +57,10 @@ pub struct GitStore {
     command_count: Cell<usize>,
 }
 
-/// Reads one object from wherever the store's remote keeps them: its kind and
-/// its content, without the `<kind> <size>\0` header.
-pub type ObjectFetcher = Box<dyn Fn(&Oid) -> Result<(ObjectKind, Vec<u8>), String>>;
+/// Reads one object from wherever the store's remote keeps them: its kind
+/// (`blob`, `tree` or `commit`) and its content, without the
+/// `<kind> <size>\0` header.
+pub type ObjectFetcher = Box<dyn Fn(&Oid) -> Result<(String, Vec<u8>), String>>;
 
 static NEXT_OBJECT_TEMP: AtomicU64 = AtomicU64::new(1);
 

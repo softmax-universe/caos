@@ -417,11 +417,63 @@ impl GitStore {
         }
     }
 
+    /// Make `oid` and everything git walks from it local: what a command that
+    /// follows history needs, as opposed to a read of one object.
+    ///
+    /// An object that is present is whole, unless it came singly from the
+    /// object fetcher (then its closure is fetched now) or is a commit written
+    /// here (then it is whole when its parents are). A commit written here
+    /// may name a tree that was never read: see `ensure_whole_tree`.
     pub fn ensure_local(&self, oid: &Oid) -> Result<(), String> {
-        if !self.has_local(oid)? {
-            self.fetch_object(oid)?;
+        let mut pending = vec![oid.clone()];
+        let mut seen = HashSet::new();
+        while let Some(oid) = pending.pop() {
+            if !seen.insert(oid.clone()) {
+                continue;
+            }
+            let single = self.single_objects.borrow().contains(&oid);
+            if single || !self.has_local(&oid)? {
+                self.fetch_object(&oid)?;
+                self.single_objects.borrow_mut().remove(&oid);
+            } else if self.written_commits.borrow().contains(&oid) {
+                let commit = self.read_commit(&oid).map_err(String::from)?;
+                pending.extend(commit.parents);
+            }
         }
         Ok(())
+    }
+
+    /// Read missing objects one at a time with `fetcher` instead of fetching
+    /// each one's closure with git.
+    pub fn set_object_fetcher(&self, fetcher: ObjectFetcher) {
+        *self.object_fetcher.borrow_mut() = Some(fetcher);
+    }
+
+    /// Bring one missing object in for a read: singly when the store has an
+    /// object fetcher, with its closure otherwise.
+    fn fetch_missing(&self, oid: &Oid) -> Result<(), String> {
+        let fetched = match self.object_fetcher.borrow().as_ref() {
+            Some(fetcher) => fetcher(oid)?,
+            None => return self.fetch_object(oid),
+        };
+        let (kind, bytes) = fetched;
+        let written = self.write_object(kind, &bytes).map_err(String::from)?;
+        if written != *oid {
+            return Err(format!("the object fetched as {oid} hashes to {written}"));
+        }
+        self.single_objects.borrow_mut().insert(oid.clone());
+        Ok(())
+    }
+
+    /// Make every object under `tree` local, for a command that reads files.
+    /// With an object fetcher a tree can be present without what it names, so
+    /// presence proves nothing and the closure is fetched.
+    fn ensure_whole_tree(&self, tree: &Oid) -> Result<(), String> {
+        if self.object_fetcher.borrow().is_some() {
+            self.fetch_object(tree)
+        } else {
+            self.ensure_local(tree)
+        }
     }
 
     pub fn ensure_local_with_tip(&self, oid: &Oid, tip: &Oid) -> Result<(), String> {

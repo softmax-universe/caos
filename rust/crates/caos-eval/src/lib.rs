@@ -731,32 +731,33 @@ fn eval_graft(
                 .ok_or("eval-path: `graft` --in is not a tree")?
         }
     };
-    let mut mounts = std::collections::BTreeSet::new();
-    if let Some(existing) = entries
-        .iter()
-        .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
-    {
-        for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                mounts.insert(line.to_string());
+    let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;
+    entries.retain(|e| !grafted.iter().any(|g| g.filename == e.filename));
+    if verb == "mount" {
+        let mut mounts = std::collections::BTreeSet::new();
+        if let Some(existing) = entries
+            .iter()
+            .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
+        {
+            for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    mounts.insert(line.to_string());
+                }
             }
         }
+        for g in &grafted {
+            mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
+        }
+        let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
+        entries.retain(|e| entry_name(e) != MOUNTS_FILE.as_bytes());
+        entries.push(Entry {
+            mode: EntryKind::Blob.into(),
+            filename: MOUNTS_FILE.as_bytes().to_vec().into(),
+            oid: host.post_object("blob", list.as_bytes())?,
+        });
     }
-    let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;
-    for g in &grafted {
-        mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
-    }
-    entries.retain(|e| {
-        entry_name(e) != MOUNTS_FILE.as_bytes() && !grafted.iter().any(|g| g.filename == e.filename)
-    });
     entries.extend(grafted);
-    let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
-    entries.push(Entry {
-        mode: EntryKind::Blob.into(),
-        filename: MOUNTS_FILE.as_bytes().to_vec().into(),
-        oid: host.post_object("blob", list.as_bytes())?,
-    });
     Ok(("tree".to_string(), host.post_tree(entries)?.to_string()))
 }
 

@@ -819,6 +819,43 @@ fn secret_context(config: &Config, request: &Request) -> Result<secrets::Context
     )
 }
 
+/// The trace node an evaluation's dispatches are recorded under, if the request
+/// says. Without one they are recorded under the walk's own continuation, which
+/// no one reads, so a worker that evaluates a tree (the test daemon evaluating
+/// `dev/run-tests`, which builds the core) shows an unexplained gap in its trace.
+///
+/// Two ways to say, both headers (a query string is logged): the calling job's
+/// nonce, which this server resolves to the job's ArgTree, or, on a server that
+/// allows it, the trace node itself.
+fn eval_parent(config: &Config, request: &Request) -> Result<Option<String>, HttpError> {
+    let header = |name: &'static str| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().to_string())
+    };
+    if let Some(nonce) = header(caos_world::TRACE_NONCE_HEADER) {
+        return runner::inflight_arg_tree(&nonce).map(Some);
+    }
+    let Some(parent) = header(caos_world::TRACE_PARENT_HEADER) else {
+        return Ok(None);
+    };
+    if !config.trace_parents {
+        return Err(HttpError::new(
+            403,
+            "this server does not take an explicit trace parent (CAOS_TRACE_PARENTS)",
+        ));
+    }
+    if !runner::valid_hex(&parent, 40) {
+        return Err(HttpError::new(
+            400,
+            "a trace parent is a 40-character lowercase ArgTree hash",
+        ));
+    }
+    Ok(Some(parent))
+}
+
 /// An expression's parameters: the query string, plus a form-style body when
 /// the request has one.
 fn expression_params(request: &mut Request, query: &str) -> Result<String, HttpError> {

@@ -4210,6 +4210,19 @@ pub fn caos_trace_child(t: &dyn Transport, name: &str, arg_tree: &str) -> Result
     Ok(())
 }
 
+/// `job-req` — print the request hash of the job this worker is running.
+///
+/// For handing to a client on ANOTHER STACK as `CAOS_TRACE_PARENT`, so that what
+/// the client evaluates is recorded under this job's trace (the test daemon
+/// evaluating `dev/run-tests`, which builds the core). A client on the same
+/// server needs nothing: the worker-side `caos` already presents its job nonce.
+pub fn caos_job_req() -> Result<(), String> {
+    let req = runner::job_req()
+        .ok_or_else(|| "job-req is available only inside a running worker".to_string())?;
+    println!("{req}");
+    Ok(())
+}
+
 enum ContinuationSubject<'a> {
     Input(&'a str),
     Request(&'a str),

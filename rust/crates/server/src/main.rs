@@ -918,7 +918,13 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
             let secrets = secret_context(config, request)?;
             let token = git_token(request)?;
             let parent = eval_parent(config, request)?;
-            compute::eval_endpoint(config, &query, &secrets, token.as_deref(), parent.as_deref())
+            compute::eval_endpoint(
+                config,
+                &query,
+                &secrets,
+                token.as_deref(),
+                parent.as_deref(),
+            )
         }
         // One `.caos-expr` line over HTTP: `/eval/run`, `/eval/curry`, and the
         // same for `/start/…`. The args ride in the query and, for a value too

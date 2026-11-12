@@ -408,9 +408,6 @@ concurrency.
     and `run_work_request` consults only that namespaced key.
   - not `refs/caos/res/`, which is written for clients to fetch and never read
     back as a cache.
-  - not the rustc seed. `build-builtins.sh` does `rm -rf` + `cp -RL` +
-    `git add`, and the staged blob, the worktree blob and
-    `rust/crates/worker-common/src/lib.rs` all hashed the same.
   - not `git_ingest` reading `HEAD`: the client repo has NO commits, so
     `is_clean` is false and the content path is taken.
   What it points at instead is the CARGO IMAGE. `std/cargo`'s bake builds the

@@ -129,7 +129,9 @@ fn fetch_except(base: &str, rel: &str, mounts: &[String]) -> Result<(), String> 
 
 /// The mount `p` is at or below, if any.
 fn mount_of<'m>(mounts: &'m [String], p: &str) -> Option<&'m String> {
-    mounts.iter().find(|m| p == m.as_str() || strictly_under(p, m))
+    mounts
+        .iter()
+        .find(|m| p == m.as_str() || strictly_under(p, m))
 }
 
 /// Whether `p` lies strictly below the directory `dir` (`""` is the root).

@@ -680,13 +680,16 @@ fn eval_command_args(
 /// it is an expression —, `:@@=`, `:hash=`, a literal blob), and `--in` like
 /// one too, so `--in:@=.` is the expression's own tree.
 ///
-/// A grafted entry is a FINISHED value, already evaluated where it came from.
-/// The result records that: each name grafted is added to [`MOUNTS_FILE`] at
-/// the result's root, which is how a later tree transform (deep-deps) knows not
-/// to descend into it.
+/// `mount` is `graft` that also RECORDS what it set: each name is added to
+/// [`MOUNTS_FILE`] at the result's root, saying the entry is a FINISHED value,
+/// already evaluated where it came from, so a later tree transform (deep-deps)
+/// must not descend into it. The two are separate verbs because assembling a
+/// tree (an image layer, the core itself) must not leave a `.caos-mounts` file
+/// in what it assembles.
 fn eval_graft(
     host: &dyn EvalHost,
     input_tree: &str,
+    verb: &str,
     tokens: &[&str],
     env: &HashMap<String, (String, String)>,
     vars: bool,

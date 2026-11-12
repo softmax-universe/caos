@@ -304,7 +304,7 @@ func findCheckout() string {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err != nil {
+		if _, err := os.Stat(filepath.Join(pinDir(dir), "flake.lock")); err != nil {
 			continue
 		}
 		abs, err := filepath.Abs(dir)

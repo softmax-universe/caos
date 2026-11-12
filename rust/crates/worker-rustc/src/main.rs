@@ -171,7 +171,7 @@ fn start() -> Result<(), String> {
     let bin = arg("worker1");
     let output_runner = arg("output-runner");
     let mut kvs: Vec<(&str, Arg)> =
-        vec![("stage", Arg::Lit("finish")), ("runner", Arg::Lit(&runner))];
+        vec![("stage", Arg::Lit("finish")), ("runner", runner.as_arg())];
     if Path::new(&output_runner).exists() {
         kvs.push(("output-runner", Arg::Path(&output_runner)));
     }

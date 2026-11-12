@@ -41,9 +41,24 @@ pub struct GitStore {
     legacy_reads: RefCell<std::collections::HashMap<String, Oid>>,
     batch: RefCell<Option<BatchReader>>,
     batch_dirty: Cell<bool>,
+    /// How a missing object is read when set: ONE object, by hash. Without it
+    /// a missing object is a `git fetch` of that hash, which brings its whole
+    /// closure -- for a commit its history, for a tree every file under it --
+    /// to answer a read of one object.
+    object_fetcher: RefCell<Option<ObjectFetcher>>,
+    /// Objects `object_fetcher` supplied: present, their closure not.
+    /// `ensure_local` fetches the closure of one of these before git walks it.
+    single_objects: RefCell<HashSet<Oid>>,
+    /// Commits written through this store. Each is whole when its parents are,
+    /// and the remote may not hold it yet, so it is never fetched.
+    written_commits: RefCell<HashSet<Oid>>,
     #[cfg(test)]
     command_count: Cell<usize>,
 }
+
+/// Reads one object from wherever the store's remote keeps them: its kind and
+/// its content, without the `<kind> <size>\0` header.
+pub type ObjectFetcher = Box<dyn Fn(&Oid) -> Result<(ObjectKind, Vec<u8>), String>>;
 
 static NEXT_OBJECT_TEMP: AtomicU64 = AtomicU64::new(1);
 

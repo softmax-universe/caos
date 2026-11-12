@@ -354,8 +354,8 @@ sketch, in the order they were found.
   holding the image's hash. It accepts either now.
 - **The nix builds see a narrowed repo.** The primitive's key includes its `--in`,
   so with the whole repo as input every edit anywhere re-keyed the core. The root
-  expression blanks `tests/`, `dev/`, `design/`, `examples/`, `spec/` and
-  `.github/` before the builds see it.
+  expression blanks `tests/`, `dev/`, `design/`, `examples/`, `spec/`,
+  `.github/` and the top-level docs before the builds see it.
 - **`std/cargo` and `std/flake-builder` keep their directories** (their flakes
   are what the root flake builds the images from) but lose their sentinel
   `.caos-expr` and `DEPS`. `std/runner`, `std/rustc` and `std/deep-deps` held only

@@ -1390,4 +1390,105 @@ mod evaluated_tests {
         let seen = host.seen.borrow();
         assert_eq!(seen.as_slice(), &[tool.to_string(), tool.to_string()]);
     }
+
+    /// Evaluate `expr` as the `.caos-expr` of a tree holding `files` (blobs).
+    fn eval_in(host: &Memory, files: &[(&str, &str)], expr: &str) -> Result<String, String> {
+        let mut entries = vec![(
+            ".caos-expr",
+            false,
+            host.put(gix::objs::Kind::Blob, expr.as_bytes().to_vec()),
+        )];
+        for (name, body) in files {
+            entries.push((name, false, host.put(gix::objs::Kind::Blob, body.as_bytes().to_vec())));
+        }
+        let root = host.tree(entries);
+        let (kind, oid) = eval_path(host, &root.to_string(), "")?;
+        assert_eq!(kind, "tree");
+        Ok(oid)
+    }
+
+    /// `name -> blob text` (or `"<tree>"`) for each entry of `tree`.
+    fn listing(host: &Memory, tree: &str) -> Vec<(String, String)> {
+        host.fetch_tree_entries(tree)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let name = String::from_utf8_lossy(e.filename.as_ref()).into_owned();
+                let body = if e.mode.is_tree() {
+                    "<tree>".to_string()
+                } else {
+                    String::from_utf8(host.get_object(&e.oid.to_string()).unwrap().1).unwrap()
+                };
+                (name, body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn graft_adds_entries_to_the_expressions_own_tree_and_records_them() {
+        let host = Memory::default();
+        let out = eval_in(
+            &host,
+            &[("a", "A")],
+            "C=curry --base:docker=img@sha256:00 --x=1\ngraft --in:@=. --core=$C --note=hi\n",
+        )
+        .unwrap();
+        let got = listing(&host, &out);
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, [".caos-mounts", "a", "core", "note"]);
+        assert_eq!(got[0].1, "core\nnote\n");
+        assert_eq!(got[1].1, "A");
+        assert_eq!(got[2].1, "<tree>");
+        assert_eq!(got[3].1, "hi");
+    }
+
+    #[test]
+    fn graft_without_in_starts_from_the_empty_tree() {
+        let host = Memory::default();
+        let out = eval_in(&host, &[("a", "A")], "graft --y=2 --x=1\n").unwrap();
+        let got = listing(&host, &out);
+        assert_eq!(
+            got,
+            [
+                (".caos-mounts".to_string(), "x\ny\n".to_string()),
+                ("x".to_string(), "1".to_string()),
+                ("y".to_string(), "2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn graft_replaces_an_entry_and_keeps_earlier_mounts() {
+        let host = Memory::default();
+        let out = eval_in(
+            &host,
+            &[("a", "old"), (".caos-mounts", "m\n")],
+            "graft --in:@=. --a=new\n",
+        )
+        .unwrap();
+        let got = listing(&host, &out);
+        assert_eq!(
+            got,
+            [
+                (".caos-mounts".to_string(), "a\nm\n".to_string()),
+                ("a".to_string(), "new".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn graft_refuses_what_it_cannot_mean() {
+        let host = Memory::default();
+        for (expr, why) in [
+            ("graft --in:@=.\n", "at least one"),
+            ("graft --x=1 --x=2\n", "twice"),
+            ("graft --in:@=. --in:@=. --x=1\n", "twice"),
+            ("graft --.caos-mounts=x\n", "cannot set"),
+            ("graft --in:@=a --x=1\n", "must name a tree"),
+        ] {
+            let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();
+            assert!(err.contains(why), "{expr:?}: {err}");
+        }
+    }
 }

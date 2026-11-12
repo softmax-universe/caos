@@ -1,6 +1,6 @@
 # caos: owning the object store, and collecting garbage in it
 
-Status: proposal for discussion. Written against `Metta-AI/caos` at
+Status: proposal for discussion. Written against `softmax-universe/caos` at
 `ca150247b2982fd7bf119371aea215def5a433bb`, with PR #351 (`0f41904`,
 2026-10-27) read separately.
 

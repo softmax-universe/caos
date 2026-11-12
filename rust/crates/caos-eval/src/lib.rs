@@ -1536,8 +1536,7 @@ mod evaluated_tests {
         let sub = host.tree(vec![("f", false, f)]);
         let expr = host.put(
             gix::objs::Kind::Blob,
-            b"T=graft --in:@=. --z=1\ngraft --file=$T/sub/f --got=$T/tool --want:@=tool\n"
-                .to_vec(),
+            b"T=graft --in:@=. --z=1\ngraft --file=$T/sub/f --got=$T/tool --want:@=tool\n".to_vec(),
         );
         let root = host.tree(vec![
             (".caos-expr", false, expr),

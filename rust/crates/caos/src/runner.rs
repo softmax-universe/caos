@@ -860,6 +860,7 @@ impl Heartbeat {
 
 /// The root-owned files holding a resident worker's current job context.
 const NONCE_FILE: &str = "nonce";
+const REQ_FILE: &str = "req";
 
 /// Write `contents` root-owned and readable by root only: it is `caos`, which is
 /// setuid-root, that reads these, never the worker.

@@ -750,7 +750,6 @@ fn run_dispatch_inner(
             arg_tree,
             arg_entries,
             &image_ref,
-            seeded,
             granted,
             |sub_request| start_sub_run(config, sub_request, &child_stack, secrets),
             |note| match note {

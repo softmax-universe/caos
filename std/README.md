@@ -135,7 +135,7 @@ property of the container. A tool that has to fetch something can.
 |---|---|
 | `bash` | The script worker: shell plus coreutils, `/worker` runs the `worker1` script curried onto it. Not the default for a new worker: that is `go`, below. Bash remains for the interpreters' own `/worker` scripts and for glue that only sequences other programs. |
 | `go` | The Go script worker: `/worker` `go run`s `worker1` against a primed build cache. A script imports `caos/w`: an error policy (`Main`, `Check`, `Must`, `True`) and the worker CLI (`Caos`, `Get`, `Read`, `Put`, `Hash`, `Exists`), so a script does not define its own. |
-| `cargo` | The cargo worker: pinned toolchain, baked dependencies, vendored registry. It builds `--offline` by choice, so a missing dep fails instead of being fetched; the container has the network. |
+| `cargo` | The flake that defines the cargo worker: pinned toolchain, baked dependencies, vendored registry. It builds `--offline` by choice, so a missing dep fails instead of being fetched; the container has the network. Built by the root expression and reached as `caos-core/cargo`. |
 | `flake-builder` | The flake that defines the flake-builder image (builds a flake directory into a runnable image). Only its flake lives here: the image itself is built from it by the repo's root expression and reached as `caos-core/flake-builder`. |
 | `flake-input-loader` | Splices a flake input's tree into the consumer's own, so a repo reaches caos' `std/` by path; with `--output-path=.` it replaces the consumer's tree, for an expression kept in a directory of its own. |
 | `git-runner` | An opt-in git runtime for compiled workers, for the one thing caos has no verb for. |

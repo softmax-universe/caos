@@ -38,6 +38,13 @@ fail() { echo "FLAKE BUILDER FAIL: $*" >&2; exit 1; }
 # invocation carries no --stage, so the fetch fails and we default to it.
 stage=orchestrate
 if caos get /cas/args/stage 2>/dev/null; then stage=$(cat /cas/args/stage); fi
+# The `nix=v1` PRIMITIVE (design/nix-bootstrap.md): a job whose base is the
+# blob `nix:v1` is run by the server in the STACK'S flake-builder image, with
+# `--attr` naming what to build. That is its own stage, chosen by the job's
+# shape rather than by a curried `--stage`, because the job is formed by the
+# evaluator from `run --base:nix=v1 --in:@=<flake> --attr=<attr>` and carries
+# nothing else.
+if [ "$stage" = orchestrate ] && caos get /cas/args/attr 2>/dev/null; then stage=nix; fi
 
 case "$stage" in
 

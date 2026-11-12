@@ -290,28 +290,6 @@ fn new_nonce(id: u64) -> String {
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The git blob oid of a pool NAME — what a `required-pool` arg's entry is, and
-/// so what the rendezvous compares. Memoized per name: the names are a fixed
-/// tiny set and this is read under the dispatch path.
-pub(crate) fn pool_oid(name: &str) -> String {
-    static MEMO: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(known) = memo.lock().expect("pool oid memo").get(name) {
-        return known.clone();
-    }
-    let oid = gix::objs::compute_hash(
-        gix::hash::Kind::Sha1,
-        gix::objs::Kind::Blob,
-        name.as_bytes(),
-    )
-    .expect("hashing a pool name")
-    .to_string();
-    memo.lock()
-        .expect("pool oid memo")
-        .insert(name.to_string(), oid.clone());
-    oid
-}
-
 /// Does `required` match a job with `arg_entries`? The rendezvous is SYMMETRIC,
 /// and both halves are pure oid equality:
 ///
@@ -339,78 +317,6 @@ fn matches(required: &ArgTree, arg_entries: &ArgTree) -> bool {
             .iter()
             .filter(|(name, _)| name.starts_with(caos_world::REQUIRED_ARG_PREFIX))
             .all(|(name, oid)| required.get(name) == Some(oid))
-}
-
-/// Why a seeded job is unanswerable, if that is PROVABLE right now.
-///
-/// A `docker://seeded…` job's `image` arg is the blob of the sentinel string
-/// itself, and the seed record `build-builtins.sh` publishes for that sentinel
-/// carries the same blob in its `required` — so a parked poll whose
-/// `required["base"]` equals the job's `base` IS this sentinel's seeder, and
-/// nobody else's. If that poll is parked and does not match the job, the two
-/// sides disagree about the rest of the key and no amount of waiting fixes it:
-/// the seeder answers one arg tree and the caller formed another.
-///
-/// That is the whole failure this exists for. It is not hypothetical — merging
-/// main changed the seeded-core contract (`strip_caos_expr`) while two
-/// hand-rolled `run-then` call sites still passed the directory whole, so
-/// build.sh's `docker://seeded` job asked for `in=1fa8ec14` against a seeder
-/// offering `in=229fc9ba`. The symptom was a TEN MINUTE hang on an idle
-/// machine and then `no runner for arg_tree …`, which points at capacity —
-/// the one thing that was not wrong. The information to say so exactly was in
-/// this table the entire time.
-///
-/// `None` means "not provable": no seeder for this sentinel is parked (it may
-/// not have registered yet, or its poll is between TTLs), so keep waiting.
-fn seeded_verdict(st: &State, id: u64) -> Option<String> {
-    let now = Instant::now();
-    let entries = &st.jobs.get(&id)?.arg_entries;
-    let live = st
-        .parked
-        .iter()
-        .filter(|p| now < p.matchable_until)
-        .map(|p| &p.required);
-    disagreeing_seeder(entries, live)
-}
-
-/// [`seeded_verdict`] over plain values: the job's arg entries, and the
-/// required set of every currently-matchable poll. The closest disagreement
-/// wins, so the message names the one that shares the most of the key.
-fn disagreeing_seeder<'a>(
-    entries: &ArgTree,
-    polls: impl Iterator<Item = &'a ArgTree>,
-) -> Option<String> {
-    let image = entries.get("base")?;
-    let mut closest: Option<Vec<String>> = None;
-    for required in polls {
-        if required.get("base") != Some(image) {
-            continue;
-        }
-        // A matching poll would have been claimed by `offer_job`; if one is
-        // somehow here the job is about to run, so diagnose nothing.
-        if matches(required, entries) {
-            return None;
-        }
-        let diffs: Vec<String> = required
-            .iter()
-            .filter(|(name, oid)| entries.get(*name) != Some(*oid))
-            .map(|(name, oid)| match entries.get(name) {
-                Some(got) => format!("{name}: seeder answers {oid}, the job asks {got}"),
-                None => format!("{name}: seeder answers {oid}, the job has no such arg"),
-            })
-            .collect();
-        if closest.as_ref().is_none_or(|best| diffs.len() < best.len()) {
-            closest = Some(diffs);
-        }
-    }
-    closest.map(|diffs| {
-        format!(
-            "its seeder IS registered and requires a different arg tree ({}). \
-             The seed record and the caller disagree about the key: one of them \
-             is stale, so republish the seed (caosd up) or fix the caller.",
-            diffs.join("; ")
-        )
-    })
 }
 
 /// The job payload a matched poll is answered with.
@@ -1277,51 +1183,6 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
-    }
-
-    /// The merge failure, in miniature: the seeder for `docker://seeded` (image
-    /// blob `sent`) answers `in=aaa`, and the caller formed `in=bbb`.
-    #[test]
-    fn a_parked_seeder_that_disagrees_is_a_verdict() {
-        let job = args(&[("base", "sent"), ("in", "bbb"), ("std", "s")]);
-        let seeder = args(&[("base", "sent"), ("in", "aaa")]);
-        let why = disagreeing_seeder(&job, [&seeder].into_iter()).expect("a verdict");
-        assert!(
-            why.contains("in: seeder answers aaa, the job asks bbb"),
-            "{why}"
-        );
-    }
-
-    /// No seeder for THIS sentinel is parked — another sentinel's seeder and a
-    /// generic runnerd poll are not evidence about this key, so keep waiting.
-    #[test]
-    fn only_the_same_sentinel_counts() {
-        let job = args(&[("base", "sent"), ("in", "bbb")]);
-        let other = args(&[("base", "other-sent"), ("in", "aaa")]);
-        let generic = args(&[]);
-        assert!(disagreeing_seeder(&job, [&other, &generic].into_iter()).is_none());
-        // …and with nothing parked at all.
-        assert!(disagreeing_seeder(&job, [].into_iter()).is_none());
-    }
-
-    /// `matches` is a SUBSET match, so a seeder pinning only what it cares
-    /// about (no `std`, no `salt` — build-builtins.sh omits them) matches, and
-    /// a matching poll is never a verdict.
-    #[test]
-    fn a_matching_seeder_is_not_a_verdict() {
-        let job = args(&[("base", "sent"), ("in", "aaa"), ("std", "s"), ("salt", "x")]);
-        let seeder = args(&[("base", "sent"), ("in", "aaa")]);
-        assert!(disagreeing_seeder(&job, [&seeder].into_iter()).is_none());
-    }
-
-    /// Two seeders disagree; the message names the one sharing more of the key.
-    #[test]
-    fn the_closest_disagreement_is_reported() {
-        let job = args(&[("base", "sent"), ("in", "bbb"), ("worker1", "w")]);
-        let far = args(&[("base", "sent"), ("in", "aaa"), ("worker1", "zzz")]);
-        let near = args(&[("base", "sent"), ("in", "aaa"), ("worker1", "w")]);
-        let why = disagreeing_seeder(&job, [&far, &near].into_iter()).expect("a verdict");
-        assert!(!why.contains("worker1"), "{why}");
     }
 
     /// A job that names a pool is invisible to the generic runner, which is the

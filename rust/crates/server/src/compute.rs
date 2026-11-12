@@ -2902,30 +2902,26 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// `GET key` from Redis, returning the value or None if the key is absent.
 fn cache_get(addr: &str, key: &str) -> Result<Option<String>, String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["GET", key]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_bulk_reply(&mut BufReader::new(stream))
+    redis_exchange(addr, &resp_command(&["GET", key]), |reader| {
+        read_bulk_reply(reader)
+    })
 }
 
 /// `SET key value` in Redis.
 fn cache_set(addr: &str, key: &str, value: &str) -> Result<(), String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["SET", key, value]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_status_reply(&mut BufReader::new(stream))
+    redis_exchange(addr, &resp_command(&["SET", key, value]), |reader| {
+        read_status_reply(reader)
+    })
 }
 
 /// `SET key value EX secs` in Redis: a value that expires unless set again.
 fn cache_set_ex(addr: &str, key: &str, value: &str, secs: u64) -> Result<(), String> {
-    let mut stream = redis_connect(addr)?;
     let secs = secs.to_string();
-    stream
-        .write_all(&resp_command(&["SET", key, value, "EX", &secs]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_status_reply(&mut BufReader::new(stream))
+    redis_exchange(
+        addr,
+        &resp_command(&["SET", key, value, "EX", &secs]),
+        |reader| read_status_reply(reader),
+    )
 }
 
 /// `RPUSH key value` — append one element to a Redis list.
@@ -2937,11 +2933,9 @@ fn cache_set_ex(addr: &str, key: &str, value: &str, secs: u64) -> Result<(), Str
 /// pushes to one key itself, so the map's threads need no coordination — and
 /// since every event carries its own timestamp, list order is not load-bearing.
 pub(crate) fn list_append(addr: &str, key: &str, value: &str) -> Result<(), String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["RPUSH", key, value]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_integer_reply(&mut BufReader::new(stream)).map(|_| ())
+    redis_exchange(addr, &resp_command(&["RPUSH", key, value]), |reader| {
+        read_integer_reply(reader).map(|_| ())
+    })
 }
 
 /// `RPUSH key value` for every pair, over one connection: one write, then
@@ -2951,17 +2945,16 @@ pub(crate) fn list_append_many(addr: &str, pairs: &[(String, String)]) -> Result
     if pairs.is_empty() {
         return Ok(());
     }
-    let mut stream = redis_connect(addr)?;
     let mut buf = Vec::new();
     for (key, value) in pairs {
         buf.extend_from_slice(&resp_command(&["RPUSH", key, value]));
     }
-    stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
-    let mut reader = BufReader::new(stream);
-    for _ in pairs {
-        read_integer_reply(&mut reader)?;
-    }
-    Ok(())
+    redis_exchange(addr, &buf, |reader| {
+        for _ in pairs {
+            read_integer_reply(reader)?;
+        }
+        Ok(())
+    })
 }
 
 /// `SADD key member` for every pair, over one connection. A set, not a list,
@@ -2971,35 +2964,30 @@ pub(crate) fn set_add_many(addr: &str, pairs: &[(String, String)]) -> Result<(),
     if pairs.is_empty() {
         return Ok(());
     }
-    let mut stream = redis_connect(addr)?;
     let mut buf = Vec::new();
     for (key, member) in pairs {
         buf.extend_from_slice(&resp_command(&["SADD", key, member]));
     }
-    stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
-    let mut reader = BufReader::new(stream);
-    for _ in pairs {
-        read_integer_reply(&mut reader)?;
-    }
-    Ok(())
+    redis_exchange(addr, &buf, |reader| {
+        for _ in pairs {
+            read_integer_reply(reader)?;
+        }
+        Ok(())
+    })
 }
 
 /// `SMEMBERS key` — every member of the set, in no particular order.
 pub(crate) fn set_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["SMEMBERS", key]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_array_reply(&mut BufReader::new(stream))
+    redis_exchange(addr, &resp_command(&["SMEMBERS", key]), |reader| {
+        read_array_reply(reader)
+    })
 }
 
 /// `LRANGE key 0 -1` — the whole list, in insertion order.
 pub(crate) fn list_read(addr: &str, key: &str) -> Result<Vec<String>, String> {
-    let mut stream = redis_connect(addr)?;
-    stream
-        .write_all(&resp_command(&["LRANGE", key, "0", "-1"]))
-        .map_err(|e| format!("write: {e}"))?;
-    read_array_reply(&mut BufReader::new(stream))
+    redis_exchange(addr, &resp_command(&["LRANGE", key, "0", "-1"]), |reader| {
+        read_array_reply(reader)
+    })
 }
 
 /// Connect to Redis with read/write timeouts so a stuck server can't hang us.
@@ -3008,6 +2996,62 @@ fn redis_connect(addr: &str) -> Result<TcpStream, String> {
     let _ = stream.set_read_timeout(Some(REDIS_TIMEOUT));
     let _ = stream.set_write_timeout(Some(REDIS_TIMEOUT));
     Ok(stream)
+}
+
+/// Idle connections to redis, per address, for [`redis_exchange`] to reuse.
+///
+/// Every exchange used to dial a fresh TCP connection. One is cheap; a map's
+/// fan-out is not one — each child appends several trace events, so a
+/// thousand-child map was thousands of handshakes to a daemon in the same
+/// container, and each paid the connect inside [`REDIS_TIMEOUT`]'s budget. A
+/// connection that completed an exchange cleanly is at a command boundary and
+/// goes back here; one that failed in any way is dropped, since nothing says
+/// where in a reply it stopped.
+fn redis_pool() -> &'static Mutex<HashMap<String, Vec<TcpStream>>> {
+    static POOL: OnceLock<Mutex<HashMap<String, Vec<TcpStream>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Idle connections kept per address. Beyond this the surplus is closed: a
+/// burst's worth of parallelism, not a burst's worth of sockets forever.
+const REDIS_POOL_IDLE: usize = 32;
+
+/// Send `command` (one RESP command, or several pipelined) over a pooled
+/// connection to `addr` and read the reply with `read`. A pooled connection
+/// may have been closed by redis while idle (its `timeout`, a restart), which
+/// shows up as the first read or write failing: that attempt is retried ONCE
+/// on a fresh connection, so an idle pool never turns into spurious errors. A
+/// fresh connection's failure is the answer.
+fn redis_exchange<T>(
+    addr: &str,
+    command: &[u8],
+    read: impl Fn(&mut BufReader<&TcpStream>) -> Result<T, String>,
+) -> Result<T, String> {
+    let pooled = redis_pool()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(addr)
+        .and_then(Vec::pop);
+    let (stream, fresh) = match pooled {
+        Some(stream) => (stream, false),
+        None => (redis_connect(addr)?, true),
+    };
+    let attempt = |mut stream: TcpStream| -> Result<T, String> {
+        stream
+            .write_all(command)
+            .map_err(|e| format!("write: {e}"))?;
+        let answer = read(&mut BufReader::new(&stream))?;
+        let mut pool = redis_pool().lock().unwrap_or_else(|e| e.into_inner());
+        let idle = pool.entry(addr.to_string()).or_default();
+        if idle.len() < REDIS_POOL_IDLE {
+            idle.push(stream);
+        }
+        Ok(answer)
+    };
+    match attempt(stream) {
+        Err(_) if !fresh => attempt(redis_connect(addr)?),
+        answer => answer,
+    }
 }
 
 /// Encode a Redis command as a RESP array of bulk strings (binary-safe, so the
@@ -3610,8 +3654,9 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
     if ticket.len() != 40 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(HttpError::new(400, format!("invalid ticket: {ticket:?}")));
     }
+    let key = ticket_key(config, ticket);
     let read = || {
-        cache_get(&config.redis_addr, &ticket_key(config, ticket))
+        cache_get(&config.redis_addr, &key)
             .map_err(|e| HttpError::new(500, format!("cannot read ticket {ticket}: {e}")))?
             .ok_or_else(|| HttpError::new(404, format!("unknown ticket {ticket}")))
     };
@@ -3624,18 +3669,34 @@ pub(crate) fn expression_result(config: &Config, ticket: &str) -> Result<Vec<u8>
             let here = live_tickets().lock().unwrap().contains(ticket);
             if here || peer_alive(config, owner) {
                 "pending".to_string()
+            } else if owner == server_instance() {
+                // Pending by THIS process, and not live here. The ticket's
+                // thread records its answer BEFORE it leaves `live_tickets`
+                // (`TicketGuard::drop`), so it finished between the read above
+                // and the lock, and a second read sees the answer. An instant
+                // refusal (a `:@=` base, say) lands here on most calls: it is
+                // done before its own waiter's first read returns. No earlier
+                // life of this server can have written the owner, because an
+                // instance name is minted per process; only a failed record
+                // leaves the ticket pending, and that is what the message says.
+                let again = read()?;
+                if pending_owner(&again).is_some() {
+                    "failed 503 this server could not record the ticket's answer; start it again"
+                        .to_string()
+                } else {
+                    again
+                }
             } else {
-                // READ AGAIN before calling it dead: a ticket of this server's
-                // that finished between the read above and the look at
-                // `live_tickets` has left the set, and TicketGuard records the
-                // outcome before it leaves, so the second read has it. One read
-                // answered a call that had just succeeded as a restart (seen
-                // failing tests/mcp-serve in a loaded suite run).
+                // READ AGAIN before calling it dead: a ticket that finished
+                // between the read above and the look at `live_tickets` has
+                // left the set, and TicketGuard records the outcome before it
+                // leaves, so the second read has it (#459). 503, not 500: the
+                // client re-attaches on a 503 (`caos::wait_for_ticket`).
                 let again = read()?;
                 if pending_owner(&again).is_none() {
                     again
                 } else {
-                    "failed 500 the server restarted before this finished; start it again"
+                    "failed 503 the server restarted before this finished; start it again"
                         .to_string()
                 }
             }

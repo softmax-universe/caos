@@ -338,17 +338,77 @@ fn main() {
     // in flight at once. Threads are cheap here: each mostly blocks (compute
     // fans out its own threads for parallel promise maps — see
     // compute::resolve_promise).
+    //
+    // BOUNDED, but generously, and by refusing rather than by waiting. Past the
+    // cap a request is answered 503 on the accept thread and never gets a
+    // thread of its own: a runner's poll just polls again, a client's `/wait`
+    // re-attaches (caos: `wait_for_ticket`), and a worker's fetch fails its
+    // job, which under a real flood is the right one to lose. Blocking accept
+    // instead would be a deadlock in waiting: the parked polls and the
+    // `/object` fetches a running job needs are themselves requests.
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cap = max_in_flight();
+    let mut refused_at = std::time::Instant::now() - Duration::from_secs(60);
     for request in server.incoming_requests() {
+        if in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= cap {
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // One line a second at most: the flood is the news, not each drop.
+            if refused_at.elapsed() >= Duration::from_secs(1) {
+                refused_at = std::time::Instant::now();
+                eprintln!(
+                    "refusing {} {}: {cap} requests in flight (CAOS_MAX_INFLIGHT_REQUESTS)",
+                    request.method(),
+                    request.url()
+                );
+            }
+            let _ = request.respond(
+                Response::from_string("too many requests in flight; retry shortly\n")
+                    .with_status_code(StatusCode(503))
+                    .with_header(
+                        tiny_http::Header::from_bytes("Retry-After", "1")
+                            .expect("a constant header"),
+                    ),
+            );
+            continue;
+        }
         let config = Arc::clone(&config);
+        let in_flight = Arc::clone(&in_flight);
         std::thread::Builder::new()
             .stack_size(compute::EVAL_STACK_BYTES)
             .spawn(move || {
+                // Decremented however the handler ends, a panic included.
+                struct Done(Arc<std::sync::atomic::AtomicUsize>);
+                impl Drop for Done {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _done = Done(in_flight);
                 if let Err(err) = handle(config, request) {
                     // Only reachable if writing the response itself fails.
                     eprintln!("failed to send response: {err}");
                 }
             })
             .expect("spawning a request thread");
+    }
+}
+
+/// How many requests may be in flight before new ones are refused 503.
+///
+/// Every request is a thread with a 64 MiB (virtual) stack, and nothing else
+/// bounds how many the accept loop starts. The default is far above what one
+/// stack needs — a dev stack parks ~50 runner polls and a suite's workers add
+/// a few hundred fetches — and far below what turns a flood into the OOM
+/// killer taking redis and the git repo down with the server.
+/// `CAOS_MAX_INFLIGHT_REQUESTS` overrides it; `0` lifts it.
+fn max_in_flight() -> usize {
+    match std::env::var("CAOS_MAX_INFLIGHT_REQUESTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(0) => usize::MAX,
+        Some(n) => n,
+        None => 4096,
     }
 }
 

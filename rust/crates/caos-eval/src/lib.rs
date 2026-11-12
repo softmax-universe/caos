@@ -1439,12 +1439,25 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_adds_entries_to_the_expressions_own_tree_and_records_them() {
+    fn graft_assembles_and_records_nothing() {
+        let host = Memory::default();
+        let out = eval_in(&host, &[("a", "A")], "graft --in:@=. --b=B\n").unwrap();
+        assert_eq!(
+            listing(&host, &out),
+            [
+                ("a".to_string(), "A".to_string()),
+                ("b".to_string(), "B".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn mount_adds_entries_to_the_expressions_own_tree_and_records_them() {
         let host = Memory::default();
         let out = eval_in(
             &host,
             &[("a", "A")],
-            "C=curry --base:docker=img@sha256:00 --x=1\ngraft --in:@=. --core=$C --note=hi\n",
+            "C=curry --base:docker=img@sha256:00 --x=1\nmount --in:@=. --core=$C --note=hi\n",
         )
         .unwrap();
         let got = listing(&host, &out);

@@ -93,9 +93,14 @@ available before any core exists.
   a line cannot reach into a variable, so a consumer would have to repeat its
   pin to name something inside what it just mounted.
 - **`graft`** replaces or adds entries in a tree:
-  `T=graft --in:@=. caos-core=$CORE` is the input tree with `caos-core/` set to
-  `$CORE`. (`std/flake-input-loader` does the same thing as a worker; it cannot
-  be used here, because it is rustc-built and so needs the core.)
+  `T=graft --in:@=. --caos-core=$CORE` is the input tree with `caos-core/` set
+  to `$CORE`; without `--in` it starts from the empty tree. **`mount`** is the
+  same, and also records each name in the result's `.caos-mounts`, saying that
+  entry is a finished tree (section 4). They are two verbs because assembling
+  a tree that is not a mount point (an image layer, the core itself) must not
+  leave a `.caos-mounts` file in it. (`std/flake-input-loader` mounts as a
+  worker; it cannot be used here, because it is rustc-built and so needs the
+  core.)
 
 ## 3. The caos repo
 
@@ -112,8 +117,8 @@ RUSTCBIN=run --base:nix=v1 --in:@=. --attr=worker-rustc
 DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps
 RUSTC=curry --base=$RUNNER --worker1=$RUSTCBIN/bin/worker-rustc --cargo=$CARGO --runner=$RUNNER --worker-common:@=rust/crates/worker-common
 # Assemble the core and graft it into the tree, then deepen as today.
-CORE=graft runner=$RUNNER flake-builder=$FB cargo=$CARGO rustc=$RUSTC deep-deps=$DD
-T=graft --in:@=. caos-core=$CORE
+CORE=graft --runner=$RUNNER --flake-builder=$FB --cargo=$CARGO --rustc=$RUSTC --deep-deps=$DD
+T=mount --in:@=. --caos-core=$CORE
 run --base=$DD --in=$T
 ```
 
@@ -255,8 +260,8 @@ deep-deps over a tree CONTAINING the mounts:
 
 - **deep-deps does not descend into a mount.** It treats `caos-std/` and
   `caos-core/` as opaque objects, referenced by oid. The mount step records
-  what it mounted (for example a `.caos-mounts` list at the root, written by
-  `graft` and by the loader) so deep-deps knows where to stop.
+  what it mounted (a `.caos-mounts` list at the root, written by `mount` and by
+  the loader) so deep-deps knows where to stop.
 - The same rule keeps deep-deps from materializing `caos-core/`'s image deltas,
   which are hundreds of MB and have no `DEPS` to find.
 

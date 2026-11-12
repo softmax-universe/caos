@@ -278,7 +278,8 @@ nix)
   #
   #   a docker-archive tarball (an image attr) -> a CLEAN git-docker delta
   #     {base: docker://<pushed>, config.json}, config verbatim;
-  #   anything else (a package)               -> its store path as a tree.
+  #   a directory (a package)                 -> its store path as a tree;
+  #   any other single file                   -> that file, as a blob.
   caos get -r /cas/args/in
   attr=$(cat /cas/args/attr)
   case "$attr" in

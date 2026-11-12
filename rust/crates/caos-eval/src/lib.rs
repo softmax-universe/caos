@@ -40,9 +40,13 @@
 //! `NAME=<verb>`. A `run` value evaluates to the run's result; a `curry` value
 //! to the curried ArgTree; a `graft` value to `--in` with the named entries set;
 //! a `mount` value to the same, with the names also recorded in `.caos-mounts`.
+<<<<<<< 63fa105683f6572f95723fbd4e6f92a88eba8718
 //! `--base=$NAME` names the object a prior line produced, and `$NAME/<path>`
 //! (anywhere `$NAME` may appear) the object at `<path>` inside it, reached
 //! through evaluation like any other descent.
+=======
+//! `--base=$NAME` names the object a prior line produced.
+>>>>>>> 7eda3bc81effa1cb66d8620656b8877ef5073e24
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from

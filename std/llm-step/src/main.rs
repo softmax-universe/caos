@@ -2111,7 +2111,9 @@ fn root_callback(
             (Mode::Tree, Some((Mode::Commit, parent))) => {
                 let parent = parent.clone();
                 let minted = mint_source_tree_commit(state, &entry.oid, &parent, &message)?;
-                state.push_code(&minted)?;
+                // The object API, not a git push: a push packs from the local
+                // graph, which no longer holds the parent's history.
+                state.publish_commit(&minted)?;
                 Some((Mode::Commit, minted))
             }
             _ => Some((mode, entry.oid)),

@@ -10,6 +10,11 @@
 #   - a single-file store path comes back as that file, byte for byte;
 #   - a directory store path comes back as that tree, nothing added;
 #   - the same flake and attr is the same key, so asking twice is one answer.
+#
+# It also covers the stack's side: the server can run `nix:v1` only if the
+# publish (build-builtins.sh) both named the `caos-worker-nix` image in
+# CAOS_NIX_IMAGE_FILE and pushed its objects. A name without the push fails
+# here as "converting git image <hash>: object not found".
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

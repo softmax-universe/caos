@@ -81,8 +81,8 @@ fi
 
 # ---- the stack's inputs -----------------------------------------------------
 # ONE nix build for everything the stack needs: `bin/` (server, runnerd,
-# core-seeder-runner, caos-cli, caos) and `images/` (the clean worker images
-# build-builtins streams to the registry). One evaluation produces the lot —
+# caos-cli, caos) and `images/` (the nix primitive's image, which build-builtins
+# streams to the registry; the core images are built by the primitive itself). One evaluation produces the lot —
 # this used to be four, which was 12 seconds of a 16-second bring-up.
 #
 # `path:` rather than a bare path, so nix reads the DIRECTORY as it is rather

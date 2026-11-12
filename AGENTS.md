@@ -272,19 +272,27 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   (`timeout 1 bash -c "exec 3<>/dev/tcp/$host/$port"`), and do not re-probe an
   address already proven dead — wait for it to CHANGE.
 
-- **An idle machine mid-run means a job is waiting, and a `docker://seeded…`
-  job is the one that waits in silence.** A seeded sentinel defers generic
-  runners for its whole pending window (900s in a stack), so when its key
-  doesn't match the seed record NOTHING happens — no container, no log line —
-  and the eventual `no runner for arg_tree …` blames capacity, the one thing
-  that isn't wrong. The server now proves this instead: a parked poll whose
-  `required["base"]` equals the job's `base` IS that sentinel's seeder, so a
-  disagreement is permanent, and after `CAOS_SEEDED_GRACE_SECS` (45s) the 503
-  names the differing args. **Read that message rather than re-deriving it** —
-  it prints both oids, and the fix is always one of the two sides being stale.
-  Anything you hand-roll that forms a seeded key (a `caos run-then` against a
-  sentinel, in `caos-tools/*/worker.sh`) must match `build-builtins.sh`'s record
-  exactly, `strip_caos_expr` included; nothing else checks that agreement.
+- **An idle machine mid-run is usually a job waiting, and the longest wait is a
+  COLD CORE.** The core (runner, flake-builder, cargo, rustc, deep-deps) is built
+  by the `nix=v1` primitive when the root expression is first evaluated, from
+  the tree's own flake, so the first evaluation after an edit that reaches the
+  flake builds the whole Rust workspace and the 3.4 GB cargo image inside the
+  primitive's container: 30 to 50 minutes with nothing in the run log but a
+  pending ticket. That is not a hang. What re-keys it: anything under `rust/`,
+  `std/cargo`, `std/flake-builder`, the flake and its lock. What does NOT: edits
+  to `tests/`, `dev/`, `design/`, `examples/`, `spec/` and `.github/`, which the
+  root expression blanks before the nix builds see the repo (`NIXIN` in
+  `.caos-expr`). Once built, the core is cached by key, so the next stack or
+  tree that reaches it is a hit.
+- **A fresh dev stack's first run can lose its mock API key to a cold core.**
+  `dev/test-stack/worker.sh` grants the mock key by evaluating `std/llm-call`,
+  `llm-step`, `dev/worker-test` and `std/go` at the tree's commit, and records
+  the grant as done even when that evaluation timed out behind the build above.
+  Every test that needs the key then fails the same way (`the stub received no
+  request at all`, or a turn that never finishes), and nothing retries. If a
+  run shows that pattern after a Rust edit, run `--only=hello` first to warm the
+  core, change something under `tests/` so the next run gets a new stack, and
+  run the suite again.
 
 # Several dev stacks at once
 

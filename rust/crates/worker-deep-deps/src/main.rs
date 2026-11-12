@@ -247,23 +247,38 @@ impl Pass<'_> {
         // subtree belongs. Copying the staged structure (all symlinks, so no
         // content moves) yields the identical tree, and identical trees are one
         // object.
-        if let Some(done) = memo.get(&target) {
-            copy_staged(&done.clone(), &at)?;
+        if let Some(done) = self.memo.get(&target).cloned() {
+            copy_staged(&done, &at)?;
             continue;
         }
-        if visiting.contains(&target) {
+        if self.visiting.contains(&target) {
             return Err(format!(
                 "dependency cycle: {} -> {target:?}",
-                visiting.join(" -> ")
+                self.visiting.join(" -> ")
             ));
         }
-        visiting.push(target.clone());
+        self.visiting.push(target.clone());
         fs::create_dir_all(&at).map_err(|e| format!("creating {}: {e}", at.display()))?;
-        deepen(base, &target, &at, memo, visiting)?;
-        visiting.pop();
-        memo.insert(target, at);
+        self.deepen(&target, &at)?;
+        self.visiting.pop();
+        self.memo.insert(target, at);
     }
     Ok(())
+}
+}
+
+/// The `/cas` path of `target`, which lies at or under `mount`: fetches the
+/// levels between them (one directory each) and nothing else.
+fn reach_into_mount(base: &str, mount: &str, target: &str) -> Result<String, String> {
+    let mut at = mount.to_string();
+    for comp in target[mount.len()..].split('/').filter(|c| !c.is_empty()) {
+        caos(["get", &full(base, &at)])?;
+        at = join(&at, comp);
+    }
+    let p = full(base, target);
+    fs::symlink_metadata(&p)
+        .map_err(|e| format!("dependency {target:?}, inside the mount {mount:?}: {e}"))?;
+    Ok(p)
 }
 
 // ---- helpers -------------------------------------------------------------------

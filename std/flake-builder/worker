@@ -318,7 +318,12 @@ nix)
     case "$built" in
       *.tar.gz) gunzip -c "$built" > /tmp/img.tar ;;
       *.tar) cp "$built" /tmp/img.tar ;;
-      *) fail "$attr built a file that is not a docker archive: $built" ;;
+      *)
+        # A single-file store path that is not an image: the file, as a blob.
+        cp -L "$built" /tmp/res
+        caos put /tmp/res /cas/out
+        exit 0
+        ;;
     esac
     sk copy --dest-tls-verify=false "docker-archive:/tmp/img.tar" "docker://$tag" >&2 \
       || fail "pushing $tag"

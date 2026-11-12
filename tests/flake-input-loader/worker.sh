@@ -102,6 +102,34 @@ spliced)
     || fail "the mount is not the input tree that was passed in"
   echo "  ok: the mount is the input tree's own oid" >&2
 
+  echo "== '.' replaces the consumer's tree with the input ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load "$SHA" .)" \
+    --then:hash="$(next replaced --input:@=/cas/args/input)"
+  ;;
+
+replaced)
+  # The pin is still checked: a consumer that mounts at `.` loses its tree to
+  # the input, so this is the only thing standing between it and a stale pin.
+  R=/cas/args/result; caos get -r "$R" || fail "reading the replaced tree"
+  caos get /cas/args/input
+  [ "$(caos hash "$R")" = "$(caos hash /cas/args/input)" ] \
+    || fail "'.' did not return the input tree itself"
+  [ ! -e "$R/sibling.txt" ] || fail "'.' kept a sibling of the consumer's tree"
+  [ "$(cat "$R/thing/file")" = "from the input" ] || fail "'.' lost the input's content"
+  echo "  ok: '.' returned the input tree's own oid and nothing of the consumer" >&2
+
+  echo "== a drifted pin is refused at '.' too ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load "$OLD" .)" \
+    --then:hash="$(next dotdrifted)" --catch
+  ;;
+
+dotdrifted)
+  [ -e /cas/args/error ] || fail "a drifted pin was accepted at '.'"
+  caos get /cas/args/error
+  grep -q "is locked at $SHA in flake.lock" /cas/args/error \
+    || fail "wrong error for a drifted pin at '.': $(cat /cas/args/error)"
+  echo "  ok: the pin is checked before '.' replaces anything" >&2
+
   echo "== a pin that drifts from flake.lock is refused ==" >&2
   # `--catch` because the refusal IS the assertion.
   caos run-then "$(consumer)" --run:hash="$(load "$OLD")" \

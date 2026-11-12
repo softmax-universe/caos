@@ -207,10 +207,8 @@ op_build() {
 # from (`--dev-commit=<sha> --server=<ticket>`), so a session against this stack
 # runs the client built from the tree under test.
 #
-# THE CLIENT IS THE STACK'S OWN, from the inputs the stack was built from: they
-# are the TEST world, which is the only world this stack's server accepts. A
-# client from the host build is refused with "caos world mismatch", and a session
-# whose setup installed one stalls in its first hook (design/test-stack-image.md).
+# THE CLIENT IS THE STACK'S OWN, from the inputs the stack was built from, so a
+# session against this stack runs the client of the tree under test.
 #
 # Over plain HTTP to the local server: no ticket and no git-remote-caos needed
 # from in here. The commit's parent is the workspace's HEAD, as `caosd up`'s is.

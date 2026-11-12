@@ -725,7 +725,7 @@ While the cli is running something with `run` or `run-tool`, it uses `/status` t
 Caos can be built and tested on a host with just what's defined in flake.nix with ordinary commands like:
 - `nix build`
 - `result/bin/caosd up`
-- `result/bin/caos-cli run dev/run-tests` (`dev/run-tests` is a caos expr that depends on /tests and runs them all on the current stack. If you run this on the host, you use the host stack. But the world test might fail. The normal usage inside the test container.)
+- `result/bin/caos-cli run dev/run-tests` (`dev/run-tests` is a caos expr that depends on /tests and runs them all on the current stack. If you run this on the host, you use the host stack. The normal usage inside the test container.)
 
 The build and test tools (`std/caos-build`, `std/caos-test`, `dev/caos-stack`) drive `dev/test-stack`, a worker script that builds, tests and runs a stack from a tree. The goal is isolation from the host stack, with enough caching to make this fast. It runs on the `dev/devbox` image, a container with nix, podman and git that:
 - Mounts a persistent volume at /mounted-nix, copies anything missing in /mounted-nix/store from /nix/store and then mounts /mounted-nix at /nix

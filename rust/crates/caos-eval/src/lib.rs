@@ -1510,7 +1510,7 @@ mod evaluated_tests {
             ("graft --in:@=.\n", "at least one"),
             ("graft --x=1 --x=2\n", "twice"),
             ("graft --in:@=. --in:@=. --x=1\n", "twice"),
-            ("graft --.caos-mounts=x\n", "cannot set"),
+            ("mount --.caos-mounts=x\n", "cannot set"),
             ("graft --in:@=a --x=1\n", "must name a tree"),
         ] {
             let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();

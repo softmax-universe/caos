@@ -940,10 +940,9 @@ fn eval_expr_args(
         let (mode, oid) = if let Some(var) = value.strip_prefix('$').filter(|_| vars) {
             // `$VAR` names an object a prior assignment produced (or a
             // here-string's blob), whatever the declared type — matched first.
-            let (kind, oid) = env
-                .get(var)
-                .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
-            (mode_of_kind(kind), parse_oid(oid)?)
+            // `$VAR/<path>` names one inside it.
+            let (kind, oid) = lookup_var(host, env, var)?;
+            (mode_of_kind(&kind), parse_oid(&oid)?)
         } else {
             match ty {
                 ArgType::Literal => (

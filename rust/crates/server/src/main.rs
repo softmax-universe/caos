@@ -133,6 +133,11 @@ struct Config {
     /// Empty (the default) means no prefix at all, so a deployment that sets
     /// nothing keeps exactly the keys it has today.
     cache_namespace: String,
+    /// Whether a request may name its own trace parent (`X-Caos-Trace-Parent`),
+    /// from `CAOS_TRACE_PARENTS=yes`. Off by default: it lets a caller hang an
+    /// evaluation's dispatches under ANY trace node, which only a dev stack,
+    /// whose evaluations belong to a job on another server, has a reason to allow.
+    trace_parents: bool,
     /// Filesystem path to the git object database, passed to `git http-backend`
     /// as `GIT_PROJECT_ROOT` for the smart-HTTP transport (see [`mod git`]).
     git_dir: String,

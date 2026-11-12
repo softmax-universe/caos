@@ -508,6 +508,24 @@ things about that line are load-bearing:
   into `/cas` that `caos put` resolves by recorded hash), so an untouched
   subtree is never read or copied however large. Overwriting an existing entry
   is refused — the mount point is meant to be gitignored and absent.
+- **`--output-path=.` replaces the consumer's tree with the input.** The result
+  is the input tree itself (its own oid), and nothing of `--in` survives but the
+  check: `flake.nix` and `flake.lock` are still read from `--in`, the pin is
+  still compared, and a drift is still refused before anything is returned.
+  Only a bare `.` means this; other spellings that name no component stay
+  refused.
+
+  **Why it exists.** The loader's job is keyed on `--in`, and an expression is
+  cached on the tree it sits in. At a session's root that tree changes with
+  every call (each one is recorded into it), so the loader re-ran, as a worker
+  job, before every tool lookup. Put the expression, `flake.nix` and
+  `flake.lock` in a directory of their own — `caos-std/` — and mount at `.`:
+  the loader's input is then three files that do not change while the session
+  does, its request is identical on every call, and both the expression cache
+  and the job cache hit. The pin is checked exactly as before; it just lives
+  beside the expression it must agree with. A client repo that builds with a
+  flake of its own keeps everything at its root and loses nothing but that
+  caching; the two layouts are both supported.
 
 What it checks: the `:@@=` locators in the expression must name the same repo
 and revision that `flake.lock` locks for `--input` — the `nix flake update`

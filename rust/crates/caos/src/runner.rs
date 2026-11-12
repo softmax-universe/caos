@@ -877,6 +877,14 @@ pub fn job_nonce() -> Option<String> {
     read_context_file(NONCE_FILE)
 }
 
+/// The request hash (ArgTree) of the job a worker is running, from the file its
+/// runner writes beside the nonce. Not a secret, but read the same way, so only
+/// the worker-side `caos` has it; a worker that hands it to a client on another
+/// stack (`caos job-req`) is choosing to.
+pub fn job_req() -> Option<String> {
+    read_context_file(REQ_FILE)
+}
+
 /// The salt of the job a worker is running. In the worker-side `caos` it is the
 /// job's own `salt` arg, which a runner materializes at `/cas/args/salt` for every
 /// job, so it is right for a resident worker's tenth job as for its first; a

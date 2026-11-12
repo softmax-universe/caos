@@ -399,7 +399,7 @@
           };
         };
 
-        # The core's FAST-MOVING parts, one tiny derivation each
+        # The core's FAST-MOVING parts, as one small derivation
         # (design/nix-bootstrap.md, "The core images carry caos"). The core
         # images above are CLEAN: they depend on nothing in the workspace and
         # change only with nixpkgs, the toolchain or the baked deps. What a Rust

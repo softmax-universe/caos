@@ -280,7 +280,8 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   primitive's container: 30 to 50 minutes with nothing in the run log but a
   pending ticket. That is not a hang. What re-keys it: anything under `rust/`,
   `std/cargo`, `std/flake-builder`, the flake and its lock. What does NOT: edits
-  to `tests/`, `dev/`, `design/`, `examples/`, `spec/` and `.github/`, which the
+  to `tests/`, `dev/`, `design/`, `examples/`, `spec/`, `.github/` and the top-level
+  docs (`README.md`, `AGENTS.md`, `CLAUDE.md`, `SPEC.md`), which the
   root expression blanks before the nix builds see the repo (`NIXIN` in
   `.caos-expr`). Once built, the core is cached by key, so the next stack or
   tree that reaches it is a hit.

@@ -31,9 +31,11 @@
 //! NAME=curry --base:<type>=<image> [--k=v | --k:@=path]
 //! NAME=<<TERM … TERM                        # a here-string: NAME is a literal blob
 //! NAME=graft [--in:<type>=<tree>] --name[:<type>]=value …
-//! curry --base=$NAME --worker1:@=path       # the value (a run/curry/graft, or a bare $NAME)
+//! NAME=mount [--in:<type>=<tree>] --name[:<type>]=value …
+//! curry --base=$NAME --worker1:@=path       # the value (any verb, or a bare $NAME)
 //! ```
 //!
+<<<<<<< 3736f83846cfd26d9a605cb14404620a2cdcafea
 //! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`, `graft`) are
 //! lowercase, so a line is an assignment iff it starts `NAME=<verb>`.
 //! A `run` value evaluates to the run's result; a `curry` value to the curried
@@ -41,6 +43,13 @@
 //! in `.caos-mounts`). `--base=$NAME` names the object a prior line produced,
 //! and `$NAME/<path>` (anywhere `$NAME` may appear) the object at `<path>`
 //! inside it, reached through evaluation like any other descent.
+=======
+//! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`, `graft`,
+//! `mount`) are lowercase, so a line is an assignment iff it starts
+//! `NAME=<verb>`. A `run` value evaluates to the run's result; a `curry` value
+//! to the curried ArgTree; a `graft` value to `--in` with the named entries set;
+//! a `mount` value to the same, with the names also recorded in `.caos-mounts`. `--base=$NAME` names the object a prior line produced.
+>>>>>>> 2283827543f4463a12cf7d0cc842a7d38fcd057c
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from
@@ -74,8 +83,8 @@ pub const EXPR_VAR: &str = "CAOS_EXPR";
 /// `graft`'s reserved arg naming the tree it grafts into.
 pub const GRAFT_IN_ARG: &str = "in";
 /// The file, at a tree's root, listing the paths in it that were MOUNTED —
-/// grafted in as finished values (by `graft`, or by `std/flake-input-loader`)
-/// rather than checked in. One path per line, relative to that root, sorted. A
+/// grafted in as finished values (by the `mount` verb, or by
+/// `std/flake-input-loader`) rather than checked in. One path per line, relative to that root, sorted. A
 /// tree transform that rewrites a tree (deep-deps) treats each as opaque.
 pub const MOUNTS_FILE: &str = ".caos-mounts";
 
@@ -544,7 +553,7 @@ fn parse_assignment(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     match rest.split_whitespace().next() {
-        Some("run") | Some("curry") | Some("graft") => Some((name, rest)),
+        Some("run") | Some("curry") | Some("graft") | Some("mount") => Some((name, rest)),
         _ => None,
     }
 }
@@ -675,12 +684,12 @@ fn eval_command_args(
     env: &HashMap<String, (String, String)>,
     vars: bool,
 ) -> Result<(String, String), String> {
-    if verb == "graft" {
-        return eval_graft(host, input_tree, tokens, env, vars);
+    if verb == "graft" || verb == "mount" {
+        return eval_graft(host, input_tree, verb, tokens, env, vars);
     }
     if verb != "run" && verb != "curry" {
         return Err(format!(
-            "eval-path: expected `run`, `curry` or `graft`, got {verb:?}"
+            "eval-path: expected `run`, `curry`, `graft` or `mount`, got {verb:?}"
         ));
     }
     // No positional image and no `--`: every token after the verb is a
@@ -710,9 +719,9 @@ fn eval_command_args(
     host.dispatch(&image_ref, entries)
 }
 
-/// `graft [--in:<t>=<tree>] --<name>[:<t>]=<value> …` — the tree `--in` (the
-/// empty tree when absent) with each `<name>` entry set to `<value>`, replacing
-/// an entry of that name. PURE TREE ASSEMBLY, like `curry`: it dispatches
+/// `graft|mount [--in:<t>=<tree>] --<name>[:<t>]=<value> …` — the tree `--in`
+/// (the empty tree when absent) with each `<name>` entry set to `<value>`,
+/// replacing an entry of that name. PURE TREE ASSEMBLY, like `curry`: it dispatches
 /// nothing of its own, so it is available before any worker exists. That is
 /// what the repo root needs to put a freshly built core into its own tree before
 /// anything can be built WITH that core (design/nix-bootstrap.md); a worker such
@@ -722,13 +731,16 @@ fn eval_command_args(
 /// it is an expression —, `:@@=`, `:hash=`, a literal blob), and `--in` like
 /// one too, so `--in:@=.` is the expression's own tree.
 ///
-/// A grafted entry is a FINISHED value, already evaluated where it came from.
-/// The result records that: each name grafted is added to [`MOUNTS_FILE`] at
-/// the result's root, which is how a later tree transform (deep-deps) knows not
-/// to descend into it.
+/// `mount` is `graft` that also RECORDS what it set: each name is added to
+/// [`MOUNTS_FILE`] at the result's root, saying the entry is a FINISHED value,
+/// already evaluated where it came from, so a later tree transform (deep-deps)
+/// must not descend into it. The two are separate verbs because assembling a
+/// tree (an image layer, the core itself) must not leave a `.caos-mounts` file
+/// in what it assembles.
 fn eval_graft(
     host: &dyn EvalHost,
     input_tree: &str,
+    verb: &str,
     tokens: &[&str],
     env: &HashMap<String, (String, String)>,
     vars: bool,
@@ -739,63 +751,64 @@ fn eval_graft(
         let (name, _, _) = parse_arg(tok)?;
         if name == GRAFT_IN_ARG {
             if base.replace(tok).is_some() {
-                return Err("eval-path: `graft` given --in twice".to_string());
+                return Err(format!("eval-path: `{verb}` given --in twice"));
             }
             continue;
         }
         if name == "." || name == ".." || name == MOUNTS_FILE || name == ".caos-expr" {
-            return Err(format!("eval-path: `graft` cannot set the entry {name:?}"));
+            return Err(format!("eval-path: `{verb}` cannot set the entry {name:?}"));
         }
         if toks
             .iter()
             .any(|t| parse_arg(t).map(|(n, _, _)| n == name).unwrap_or(false))
         {
-            return Err(format!("eval-path: `graft` given --{name} twice"));
+            return Err(format!("eval-path: `{verb}` given --{name} twice"));
         }
         toks.push(tok);
     }
     if toks.is_empty() {
-        return Err("eval-path: `graft` needs at least one --<name>=<value> entry".to_string());
+        return Err(format!("eval-path: `{verb}` needs at least one --<name>=<value> entry"));
     }
     let mut entries = match base {
         None => Vec::new(),
         Some(tok) => {
             let input = eval_expr_args(host, input_tree, &[tok], env, vars)?
                 .pop()
-                .ok_or("eval-path: `graft` --in resolved to nothing")?;
+                .ok_or("eval-path: --in resolved to nothing")?;
             if !input.mode.is_tree() {
-                return Err("eval-path: `graft` --in must name a tree".to_string());
+                return Err(format!("eval-path: `{verb}` --in must name a tree"));
             }
             host.fetch_tree_entries(&input.oid.to_string())?
-                .ok_or("eval-path: `graft` --in is not a tree")?
+                .ok_or("eval-path: --in is not a tree")?
         }
     };
-    let mut mounts = std::collections::BTreeSet::new();
-    if let Some(existing) = entries
-        .iter()
-        .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
-    {
-        for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                mounts.insert(line.to_string());
+    let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;
+    entries.retain(|e| !grafted.iter().any(|g| g.filename == e.filename));
+    if verb == "mount" {
+        let mut mounts = std::collections::BTreeSet::new();
+        if let Some(existing) = entries
+            .iter()
+            .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
+        {
+            for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    mounts.insert(line.to_string());
+                }
             }
         }
+        for g in &grafted {
+            mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
+        }
+        let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
+        entries.retain(|e| entry_name(e) != MOUNTS_FILE.as_bytes());
+        entries.push(Entry {
+            mode: EntryKind::Blob.into(),
+            filename: MOUNTS_FILE.as_bytes().to_vec().into(),
+            oid: host.post_object("blob", list.as_bytes())?,
+        });
     }
-    let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;
-    for g in &grafted {
-        mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
-    }
-    entries.retain(|e| {
-        entry_name(e) != MOUNTS_FILE.as_bytes() && !grafted.iter().any(|g| g.filename == e.filename)
-    });
     entries.extend(grafted);
-    let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
-    entries.push(Entry {
-        mode: EntryKind::Blob.into(),
-        filename: MOUNTS_FILE.as_bytes().to_vec().into(),
-        oid: host.post_object("blob", list.as_bytes())?,
-    });
     Ok(("tree".to_string(), host.post_tree(entries)?.to_string()))
 }
 
@@ -1473,12 +1486,25 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_adds_entries_to_the_expressions_own_tree_and_records_them() {
+    fn graft_assembles_and_records_nothing() {
+        let host = Memory::default();
+        let out = eval_in(&host, &[("a", "A")], "graft --in:@=. --b=B\n").unwrap();
+        assert_eq!(
+            listing(&host, &out),
+            [
+                ("a".to_string(), "A".to_string()),
+                ("b".to_string(), "B".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn mount_adds_entries_to_the_expressions_own_tree_and_records_them() {
         let host = Memory::default();
         let out = eval_in(
             &host,
             &[("a", "A")],
-            "C=curry --base:docker=img@sha256:00 --x=1\ngraft --in:@=. --core=$C --note=hi\n",
+            "C=curry --base:docker=img@sha256:00 --x=1\nmount --in:@=. --core=$C --note=hi\n",
         )
         .unwrap();
         let got = listing(&host, &out);
@@ -1491,9 +1517,9 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_without_in_starts_from_the_empty_tree() {
+    fn mount_without_in_starts_from_the_empty_tree() {
         let host = Memory::default();
-        let out = eval_in(&host, &[("a", "A")], "graft --y=2 --x=1\n").unwrap();
+        let out = eval_in(&host, &[("a", "A")], "mount --y=2 --x=1\n").unwrap();
         let got = listing(&host, &out);
         assert_eq!(
             got,
@@ -1506,12 +1532,12 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_replaces_an_entry_and_keeps_earlier_mounts() {
+    fn mount_replaces_an_entry_and_keeps_earlier_mounts() {
         let host = Memory::default();
         let out = eval_in(
             &host,
             &[("a", "old"), (".caos-mounts", "m\n")],
-            "graft --in:@=. --a=new\n",
+            "mount --in:@=. --a=new\n",
         )
         .unwrap();
         let got = listing(&host, &out);
@@ -1583,7 +1609,7 @@ mod evaluated_tests {
             ("graft --in:@=.\n", "at least one"),
             ("graft --x=1 --x=2\n", "twice"),
             ("graft --in:@=. --in:@=. --x=1\n", "twice"),
-            ("graft --.caos-mounts=x\n", "cannot set"),
+            ("mount --.caos-mounts=x\n", "cannot set"),
             ("graft --in:@=a --x=1\n", "must name a tree"),
         ] {
             let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();

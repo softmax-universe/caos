@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::{percent_encode, request_compute_url, Secrets, Transport};
+use super::{percent_encode, request_compute_url_with, Secrets, Transport};
 
 /// The shared walk's kind/mode helper, re-exported so the rest of the client
 /// keeps naming it through `eval::` — the same function the server uses.

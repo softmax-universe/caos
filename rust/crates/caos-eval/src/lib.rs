@@ -860,12 +860,7 @@ fn eval_expr_base(
     }
     match ty {
         // `:docker=<ref>` — a registry image, carried as the blob
-        // `docker://<ref>`. This is how a core item breaks a resolution-time
-        // cycle: `flake-builder`'s `.caos-expr` names its own image as the
-        // sentinel `--base:docker=seeded`, so evaluating it never re-enters
-        // flake-builder's own entry (design/caos-expr.md, "Breaking the
-        // cycles"). The formed arg-tree carries the ref as a blob, exactly what
-        // the seeder registers.
+        // `docker://<ref>`. The formed arg-tree carries the ref as a blob.
         ArgType::Docker => Ok(format!("{DOCKER_SCHEME}{value}")),
         // `:nix=v1` — the nix primitive: nothing to resolve here, the server
         // runs it.

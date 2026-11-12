@@ -107,7 +107,7 @@ fn start() -> Result<(), String> {
     // needs extra runtime capabilities can pass the distinct `output-runner`
     // arg; do not rebind `runner`, which is already part of the seeded rustc
     // curry and also determines where this factory executes.
-    let runner = read_arg("runner")?;
+    let runner = read_image("runner")?;
 
     let proj = scratch("proj")?;
     let src = arg("src");

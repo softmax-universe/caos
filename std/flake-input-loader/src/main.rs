@@ -16,6 +16,13 @@
 //! The caller says WHICH input, WHAT of it to load, and WHERE to put it. This
 //! worker checks the pin and does the splice.
 //!
+//! `--output-path=.` puts it HERE: the result is the input tree itself, in
+//! place of `--in`. That is for an expression kept in a directory of its own
+//! (`caos-std/`, holding the expression, `flake.nix` and `flake.lock`): the
+//! loader's input is then those three files rather than a whole session tree,
+//! so it is keyed on something that does not change from one call to the next.
+//! The pin is checked first, exactly as for any other path.
+//!
 //! Two things are worth understanding about the shape:
 //!
 //! - **The locator appears twice, and must.** `--base` yields this worker's

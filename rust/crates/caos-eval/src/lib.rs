@@ -67,6 +67,13 @@ pub const CURRY_MARKER: &str = ".caos-curry";
 pub const BASE_ARG: &str = "base";
 /// The reserved variable naming a `.caos-expr`'s OWN blob (see [`eval_path`]).
 pub const EXPR_VAR: &str = "CAOS_EXPR";
+/// `graft`'s reserved arg naming the tree it grafts into.
+pub const GRAFT_IN_ARG: &str = "in";
+/// The file, at a tree's root, listing the paths in it that were MOUNTED —
+/// grafted in as finished values (by `graft`, or by `std/flake-input-loader`)
+/// rather than checked in. One path per line, relative to that root, sorted. A
+/// tree transform that rewrites a tree (deep-deps) treats each as opaque.
+pub const MOUNTS_FILE: &str = ".caos-mounts";
 
 /// The **type tag** of a `--name[:type]=value` argument — the operator's
 /// explicit choice of how the value is read (never sniffed from the value's

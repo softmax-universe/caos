@@ -530,12 +530,16 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
         Err(error) if from.is_some() => refuse_prompt(&error),
         Err(error) => return Err(error),
     };
+    let trace = session_trace_ticket(&id)?;
     let text = match (recorded.status.as_str(), &from) {
         ("forked", Some(from)) => format!(
-            "caos session ref {} forked from {from}; {readers}",
+            "caos session ref {} forked from {from}; {readers}; trace {trace}",
             session_ref(&id)?
         ),
-        ("created", _) => format!("caos session ref {}; {readers}", session_ref(&id)?),
+        ("created", _) => format!(
+            "caos session ref {}; {readers}; trace {trace} (caos-cli watch {trace})",
+            session_ref(&id)?
+        ),
         _ => return Ok(()),
     };
     let mut message = json!({ "systemMessage": text });
@@ -553,6 +557,20 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
             .map_err(|error| format!("encoding hook response: {error}"))?
     );
     Ok(())
+}
+
+/// The trace ticket of the caos session `id`: the root its tool calls are
+/// listed under, which `caos-cli watch` follows. The server records under the
+/// same oid (`compute::session_trace_root`), both hashing
+/// `caos_world::session_trace_material`, so naming it needs no round trip.
+fn session_trace_ticket(id: &str) -> Result<String, String> {
+    gix::objs::compute_hash(
+        gix::hash::Kind::Sha1,
+        gix::objs::Kind::Blob,
+        &caos_world::session_trace_material(id),
+    )
+    .map(|oid| oid.to_string())
+    .map_err(|error| format!("hashing the session trace ticket: {error}"))
 }
 
 /// The `AGENTS.md` at the root of the session `head`, introduced for the

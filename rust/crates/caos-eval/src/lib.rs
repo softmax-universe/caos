@@ -147,11 +147,12 @@ pub fn parse_arg(kv: &str) -> Result<(&str, ArgType, &str), String> {
         Some((name, "commit")) => (name, ArgType::Commit),
         Some((name, "hash")) => (name, ArgType::Hash),
         Some((name, "docker")) => (name, ArgType::Docker),
+        Some((name, "nix")) => (name, ArgType::Nix),
         Some((_, ty)) => {
             return Err(format!(
                 "unknown argument type {ty:?} in {kv:?}; use --name=value (literal), \
                  --name:@=path, --name:@@=<git ref>, --name:commit=rev, --name:hash=oid \
-                 (a tree/blob the server holds), or --name:docker=ref"
+                 (a tree/blob the server holds), --name:docker=ref, or --base:nix=v1"
             ))
         }
     };

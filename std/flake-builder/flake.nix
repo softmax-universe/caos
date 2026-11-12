@@ -26,8 +26,12 @@
   outputs =
     { self, nixpkgs }:
     let
+      # `extra` is merged into the image's attrs, so the root flake can build
+      # this same image with the caos additions baked in (`lib.<system>.imageWith`,
+      # design/nix-bootstrap.md) while `packages.<system>.caosImage` stays the
+      # CLEAN image the flake contract names.
       forSystem =
-        system:
+        system: extra:
         let
           pkgs = import nixpkgs { inherit system; };
           script = pkgs.writeTextFile {

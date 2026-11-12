@@ -536,22 +536,30 @@ pub(crate) fn trace_child(config: &crate::Config, body: &str) -> Result<Vec<u8>,
         ));
     }
 
-    let parent = {
-        let st = lock();
-        let Some(id) = st.by_nonce.get(nonce) else {
-            return Err(HttpError::new(410, "unknown or consumed job nonce"));
-        };
-        let job = &st.jobs[id];
-        if !matches!(job.phase, Phase::Inflight) {
-            return Err(HttpError::new(409, "job is not in flight"));
-        }
-        job.arg_tree.clone()
-    };
+    let parent = inflight_arg_tree(nonce)?;
     crate::status::child(config, &parent, "stack", name, child);
     Ok(b"{}".to_vec())
 }
 
-fn valid_hex(value: &str, len: usize) -> bool {
+/// The ArgTree of the job the nonce names, if it is in flight. The nonce is the
+/// whole authority: it is unpredictable, scoped to one claimed job, and removed
+/// with that job.
+pub(crate) fn inflight_arg_tree(nonce: &str) -> Result<String, HttpError> {
+    if !valid_hex(nonce, 32) {
+        return Err(HttpError::new(400, "a job nonce is 32 lowercase hex digits"));
+    }
+    let st = lock();
+    let Some(id) = st.by_nonce.get(nonce) else {
+        return Err(HttpError::new(410, "unknown or consumed job nonce"));
+    };
+    let job = &st.jobs[id];
+    if !matches!(job.phase, Phase::Inflight) {
+        return Err(HttpError::new(409, "job is not in flight"));
+    }
+    Ok(job.arg_tree.clone())
+}
+
+pub(crate) fn valid_hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()

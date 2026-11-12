@@ -36,8 +36,9 @@ REPO='git+file:///synthetic/input'
 # The input to splice: a plain tree, standing in for whatever a locator would
 # have resolved to. The loader takes it as `--input-tree` either way.
 input_tree() {
-  rm -rf /tmp/input && mkdir -p /tmp/input/thing
+  rm -rf /tmp/input && mkdir -p /tmp/input/thing /tmp/input/other
   printf 'from the input\n' > /tmp/input/thing/file
+  printf 'other part\n' > /tmp/input/other/x
   caos put /tmp/input /cas/input >/dev/null || fail "publishing the input tree"
   echo /cas/input
 }

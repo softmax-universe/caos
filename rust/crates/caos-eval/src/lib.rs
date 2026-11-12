@@ -126,6 +126,27 @@ pub enum ArgType {
     /// path because that is the common case, and `:@@=` carries the full ref
     /// grammar for the rare one.
     Remote,
+    /// `--base:nix=v1` — the NIX PRIMITIVE (design/nix-bootstrap.md): build a
+    /// flake attribute (`--in`, `--attr`) with the stack's own nix, adding
+    /// nothing. Only a base. Stored as the blob `nix:v1`, which the server
+    /// runs in its configured nix image; the stack is deliberately NOT in the
+    /// key, and `v1` versions the output format so a change misses cleanly.
+    Nix,
+}
+
+/// The prefix of the base blob that names the nix primitive (`nix:v1`).
+pub const NIX_SCHEME: &str = "nix:";
+
+/// The base ref for `--base:nix=<version>`, refusing a version this caos
+/// does not know: an unknown one would be run with today's format and answer
+/// wrongly rather than miss.
+pub fn nix_base(version: &str) -> Result<String, String> {
+    match version {
+        "v1" => Ok(format!("{NIX_SCHEME}{version}")),
+        other => Err(format!(
+            "--base:nix={other:?} is not a nix primitive this caos knows; use --base:nix=v1"
+        )),
+    }
 }
 
 /// Split a `--name[:type]=value` argument into its name, [`ArgType`] and raw

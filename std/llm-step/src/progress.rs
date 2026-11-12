@@ -369,13 +369,14 @@ fn fetch_single_object(oid: &Oid) -> Result<(ObjectKind, Vec<u8>), String> {
         .iter()
         .position(|byte| *byte == 0)
         .ok_or_else(|| format!("GET {url}: no object header"))?;
-    let kind = match bytes[..header_end].split(|byte| *byte == b' ').next() {
-        Some(b"blob") => ObjectKind::Blob,
-        Some(b"tree") => ObjectKind::Tree,
-        Some(b"commit") => ObjectKind::Commit,
-        _ => return Err(format!("GET {url}: unknown object kind")),
-    };
-    Ok((kind, bytes[header_end + 1..].to_vec()))
+    let kind = bytes[..header_end]
+        .split(|byte| *byte == b' ')
+        .next()
+        .unwrap_or_default();
+    Ok((
+        String::from_utf8_lossy(kind).into_owned(),
+        bytes[header_end + 1..].to_vec(),
+    ))
 }
 
 fn require_server_object(commit: &Oid, object: &Oid) -> Result<(), String> {

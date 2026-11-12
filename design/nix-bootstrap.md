@@ -327,3 +327,50 @@ tree.
 4. deep-deps stops at mounts; the loader takes `--mounts`.
 5. Delete the seeder, the seed records, `required-pool=seeded` and the seed
    half of `build-builtins.sh`; then try dropping `CAOS_CACHE_NAMESPACE`.
+
+## What differed
+
+The design held. These are the places the implementation had to depart from the
+sketch, in the order they were found.
+
+- **The core images need `/bin/caos` and friends, and the primitive adds
+  nothing.** runnerd forces `/bin/caos` as the entrypoint, so a clean nix image
+  cannot run. Baking the caos binary into the image derivations would have
+  re-tarred the 3.4 GB cargo image on every Rust edit, which is what
+  `build-builtins.sh` had avoided by layering outside the image. The root
+  expression keeps that split, in nix: the three images stay CLEAN, and
+  `graft` adds `layer00..` to each delta: a checked-in static layer
+  (`stack/core-layers/static`: user db, `/usr/bin/env`, `/tmp`), the caos binary
+  (`caos-core-layer-caos`, a tiny nix output whose setuid mode rides in a
+  `.caosmeta` sidecar, so nix never holds a setuid file), and `/worker` for runner
+  and cargo (`caos-core-layer-worker-*`). The server already stacks any
+  `layer<NN>` entries.
+- **The host/test "world" had to go.** It stamped a compile-time tag on every
+  client and refused a mismatch, which made one flake output wrong in either the
+  host or the test stack. Host and test stacks are kept apart reliably now, so the
+  tag and its checks are removed.
+- **`worker-rustc` takes a tree for `--cargo` and `--runner`.** The sketch
+  bound `--cargo=$CARGO`, which is the image tree; the worker expected a blob
+  holding the image's hash. It accepts either now.
+- **The nix builds see a narrowed repo.** The primitive's key includes its `--in`,
+  so with the whole repo as input every edit anywhere re-keyed the core. The root
+  expression blanks `tests/`, `dev/`, `design/`, `examples/`, `spec/` and
+  `.github/` before the builds see it.
+- **`std/cargo` and `std/flake-builder` keep their directories** (their flakes
+  are what the root flake builds the images from) but lose their sentinel
+  `.caos-expr` and `DEPS`. `std/runner`, `std/rustc` and `std/deep-deps` held only
+  sentinels and are deleted. `std/.caos-expr` is deleted: the root is the only
+  bootstrap.
+- **`build-builtins.sh` is not deleted.** One image cannot be built by the
+  primitive: the primitive's own. It streams that image, describes it as a
+  delta, and names it for the server in `CAOS_NIX_IMAGE_FILE`. Everything else it
+  did, the hand-deepen, the seed records and the hand-built core images, is gone.
+- **A cold core is slow, and a fresh dev stack can lose its mock API key to it.**
+  The first evaluation after an edit that reaches the flake builds the whole
+  workspace and the cargo image inside the primitive, 30 to 50 minutes. The test
+  stack grants its mock key by evaluating `std/llm-call` and others at the
+  tree's commit and records the grant even when that evaluation timed out. See
+  AGENTS.md.
+- **`CAOS_CACHE_NAMESPACE` is kept**, with a note that it may no longer be needed:
+  the hole it closed (a seeded key that named no binary) is gone, but dropping it
+  is a step to take once the stack has run without it.

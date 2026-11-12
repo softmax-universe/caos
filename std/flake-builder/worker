@@ -46,6 +46,42 @@ if caos get /cas/args/stage 2>/dev/null; then stage=$(cat /cas/args/stage); fi
 # nothing else.
 if [ "$stage" = orchestrate ] && caos get /cas/args/attr 2>/dev/null; then stage=nix; fi
 
+# Single-user, unsandboxed nix: root in a container with no nixbld group and
+# no privilege to build a sandbox.
+nixf() {
+  nix --extra-experimental-features "nix-command flakes" \
+    --option build-users-group "" --option sandbox false "$@"
+}
+# Unsandboxed builders run with HOME=/homeless-shelter; a builder that
+# writes $HOME (go builds do — e.g. a flake compiling the slimmed docker
+# client) leaves that directory behind, and nix (2.35) then refuses to
+# START the next local build ("home directory exists ... purity") without
+# ever cleaning it up itself — post-build-hook demonstrably does not fire
+# for this. So: retry, removing the litter, but ONLY on that exact error —
+# completed drvs stay in the store, so each retry makes monotonic progress
+# and a genuinely broken flake still fails on its first real error.
+#
+# PARAMETERIZED ON THE ATTRIBUTE, because the litter is a property of
+# unsandboxed nix, not of which output you asked for. It wrapped only
+# #caosImage while the go build happened to live under that attribute;
+# moving the docker client into #depsImage's closure (where it belongs — it
+# is source-independent) put a go build under the OTHER nix build, and the
+# deps build died on exactly the error this exists to absorb.
+nix_build_flake() { # <attr> <out-link>
+  while :; do
+    rm -rf /homeless-shelter
+    # The pipeline (pipefail is on) keeps the full log flowing to stderr
+    # while capturing a copy to grep; `-o` carries the result, stdout is
+    # empty.
+    if nixf build -L "path:/tmp/ws#$1" -o "$2" 2>&1 | tee /tmp/nix-err >&2; then
+      return 0
+    fi
+    grep -q "homeless-shelter" /tmp/nix-err || return 1
+    echo "flake-build: homeless-shelter litter; resuming $1" >&2
+  done
+}
+sk() { skopeo --insecure-policy "$@"; }
+
 case "$stage" in
 
 orchestrate)

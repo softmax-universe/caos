@@ -90,7 +90,12 @@ impl State<GitStore> {
     pub fn scratch_store() -> Result<GitStore, String> {
         let server =
             std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
-        GitStore::scratch("llm-step-git", server.trim_end_matches('/'))
+        let store = GitStore::scratch("llm-step-git", server.trim_end_matches('/'))?;
+        // A read of one object is a read of one object: without this, a
+        // missing commit is fetched with its whole history and a missing
+        // tree with every file under it.
+        store.set_object_fetcher(Box::new(fetch_single_object));
+        Ok(store)
     }
 
     /// Publish a commit object after its referenced tree and parents are known

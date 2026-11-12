@@ -13,6 +13,8 @@
       "Grep",
       "NotebookEdit",
       "Monitor",
+      "EnterWorktree",
+      "ExitWorktree",
       "mcp__claude-code-remote__add_repo",
       "mcp__github__actions_get",
       "mcp__github__actions_list",

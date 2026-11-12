@@ -3247,7 +3247,7 @@ fn source_tree_paths(state: &mut progress::State) -> Result<Vec<String>, String>
     let source_trees = state.session()?.source_trees()?;
     let mut paths = Vec::with_capacity(source_trees.len());
     for source_tree in source_trees.values() {
-        paths.push(materialize_source_tree(state, &source_tree.commit)?.0);
+        paths.push(materialize_source_tree(&source_tree.commit)?.0);
     }
     Ok(paths)
 }

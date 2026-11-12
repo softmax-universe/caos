@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# dev/fc-test — std/bash's script interpreter (workload.nix). Fetch `worker1`
+# and run it with bash. A resident `worker1` loops on `caos next`, so this does
+# not return until the daemon leaves.
+set -euo pipefail
+
+caos get /cas/args/worker1
+bash /cas/args/worker1
+if [ ! -e /cas/out ]; then
+  : > /tmp/caos-empty-out
+  caos put /tmp/caos-empty-out /cas/out
+fi

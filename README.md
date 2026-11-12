@@ -265,7 +265,10 @@ its bare hash; `/object` itself never needs that flag).
 Environment overrides: `SERVER_ADDR` (`0.0.0.0:80`), `CAOS_GIT_DIR` (`/git`),
 `CAOS_REGISTRY_PUSH_URL` (`http://caos-registry:5000`),
 `CAOS_REGISTRY_PULL_HOST` (`localhost:5000`), `CAOS_REDIS_ADDR`
-(`caos-redis:6379`), `CAOS_RUNNER_TOKEN` (unset = runner auth disabled).
+(`caos-redis:6379`), `CAOS_RUNNER_TOKEN` (unset = runner auth disabled;
+`caosd serve` always sets one — minted on first boot and kept at
+`$CAOS_STACK_STATE/runner-token` — so a runner outside the stack reads it from
+there; `CAOS_RUNNER_TOKEN=none` on the stack turns auth off).
 Worker-running knobs (network, docker binary, slots) live on `caos-runnerd`.
 
 ### Compute

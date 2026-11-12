@@ -42,7 +42,9 @@ pub fn mismatch(server: &str, client: &str) -> String {
     )
 }
 
+pub mod appliance;
 pub mod mcp;
+pub mod runner_lineage;
 pub mod secrets;
 
 /// The reserved ArgTree entry carrying a run's secret-cache-isolation tag

@@ -1,0 +1,5 @@
+# dev/fc-test's image: this directory is a flake (flake.nix + workload.nix +
+# worker), so its image is the flake-builder applied to the directory itself.
+# The root flake builds the matching Firecracker appliance from the same
+# workload.nix (`caos-fc-test-appliance`).
+run --base:@=DEEP-DEPS/flake-builder --in:@=. --lock:@=DEEP-DEPS/flake.lock

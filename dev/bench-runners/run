@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# dev/bench-runners/run — BALLPARK NUMBERS for the two execution backends,
+# Docker containers and Firecracker microVMs, on a KVM-capable Linux host
+# against the running host stack (`caosd up`).
+#
+# Same workload on both sides: dev/fc-test, whose Docker image and Firecracker
+# appliance are built from one definition (dev/fc-test/workload.nix), and the
+# job is dev/firecracker-check/job.sh, which answers with the kernel that ran
+# it — so every sample is also checked to have run where it was meant to.
+#
+# The Docker side is the host stack's own generic runnerd, i.e. the path every
+# ordinary job takes today. The Firecracker side is a dedicated pool started
+# here (a container next to the stack, as dev/firecracker-check's FC_POOL=docker
+# does), so the two differ only in the backend and in the pool's slot count.
+#
+# What is measured, each as the wall time of one `caos-cli run` on the client:
+#
+#   floor    a cache HIT: the client's own cost (bundle, push, start, wait).
+#            Both backends pay it; subtract it to see the backend alone.
+#   cold     a job with NO warm runner: dispatch + container start / VM boot
+#            + the job. The runner lingers CAOS_RUNNER_TTL_MS (30s for this
+#            workload) after each job, so each cold sample waits that out.
+#   warm     a job right after another on the same runner: dispatch + job.
+#   fanout   FANOUT jobs at once with no warm runner: how the backend scales
+#            a burst, as one wall time for the whole batch.
+#   rss      resident memory of one warm runner (the VM process, or the
+#            container), read while it is idle after a warm sample.
+#
+# Usage: [COLD=3] [WARM=10] [FANOUT=4] [BENCH_OUT=<dir>] dev/bench-runners/run
+#   COLD, WARM   samples per backend. FANOUT also sizes the Firecracker pool.
+#   BENCH_OUT    where samples.tsv, summary.tsv and summary.md land
+#                (default: a fresh directory under /tmp).
+#   KEEP=1       leave the Firecracker pool up afterwards.
+# Needs: nix, /dev/kvm, docker, a host stack (`caosd up`). Under rootless
+# docker the VMs run unjailed (the jailer mknods device nodes), as the check
+# does; the summary says which.
+#
+# Numbers are what they are: a shared host, a stack with other tenants, and a
+# warm pool all move them. Read the medians, and read them against `floor`.
+set -euo pipefail
+self=$(realpath "$0")
+cd "$(dirname "$self")/../.."
+
+COLD=${COLD:-3}
+WARM=${WARM:-10}
+FANOUT=${FANOUT:-4}
+pool=bench-fc
+container=caos-bench-fc
+state=/var/lib/caos-runnerd-fc
+log=/var/log/runnerd.log
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+step() { echo "== $* ==" >&2; }
+note() { echo "  $*" >&2; }
+
+# ---- preparation -------------------------------------------------------------
+step "building the appliance, the pool image and the client"
+appliance=$(nix build --no-link --print-out-paths .#caos-fc-test-appliance)
+cli=$(nix build --no-link --print-out-paths .#caos-tools)/bin/caos-cli
+docker load < "$(nix build --no-link --print-out-paths .#caos-runnerd-firecracker-docker)" >/dev/null
+
+step "evaluating dev/fc-test, the workload both backends run"
+base=$("$cli" eval-path dev/fc-test | tail -n1)
+case "$base" in "tree "*) base=${base#tree } ;; *) fail "eval-path dev/fc-test said: $base" ;; esac
+# The reference the Docker side pulls, so its warm containers can be found.
+image_ref=$(curl -fsS "http://localhost:9090/resolve-image?image=$base") \
+  || fail "the host stack does not answer on :9090 (caosd up?)"
+image_digest=${image_ref##*@}
+note "base $base"
+note "docker image $image_ref"
+
+server_ip=$(docker inspect caos-stack --format '{{(index .NetworkSettings.Networks "caos-net").IPAddress}}')
+[ -n "$server_ip" ] || fail "no host stack on caos-net (caosd up)"
+# The stack's runner token (stack/serve mints one); an older stack has none.
+token=$(docker exec caos-stack cat /state/runner-token 2>/dev/null || true)
+jailer=jailer
+if grep -q "name=rootless" <<<"$(docker info --format '{{.SecurityOptions}}')"; then
+  jailer=none
+  note "rootless docker: VMs run WITHOUT the jailer"
+fi
+
+out=${BENCH_OUT:-$(mktemp -d /tmp/caos-bench.XXXXXX)}
+mkdir -p "$out"
+scratch=$(mktemp -d)
+samples="$out/samples.tsv"
+printf 'backend\tkind\tn\tms\twhere\n' > "$samples"
+
+# ---- the Firecracker pool ----------------------------------------------------
+pool_sh() { docker exec "$container" sh -c "$1"; }
+pool_log() { pool_sh "cat '$log'" 2>/dev/null || true; }
+log_has() { grep -q -- "$1" <<<"$(pool_log)"; }
+
+stop_pool() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+start_pool() {
+  stop_pool
+  local env=(
+    CAOS_RUNNER_BACKEND=firecracker
+    CAOS_FC_APPLIANCE="$appliance" CAOS_FC_JAILER="$jailer"
+    CAOS_SERVER_URL=http://caos-server CAOS_FC_GUEST_SERVER_URL="http://$server_ip"
+    CAOS_FC_STATE="$state" CAOS_RUNNER_SLOTS="$FANOUT"
+    "CAOS_RUNNER_REQUIRE=required-pool=$pool base:hash=$base"
+    "CAOS_RUNNER_TOKEN=$token"
+  )
+  local e args=()
+  for e in "${env[@]}"; do args+=(-e "$e"); done
+  docker run -d --name "$container" --network caos-net \
+    --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+    --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+    --sysctl net.ipv4.ip_forward=1 -v /nix/store:/nix/store:ro "${args[@]}" \
+    --entrypoint /bin/bash caos-runnerd-firecracker -c '
+      mkdir -p /var/log /var/lib
+      iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o eth0 -j MASQUERADE
+      while true; do caos-runnerd >> /var/log/runnerd.log 2>&1; sleep 1; done' >/dev/null
+  local i
+  for i in $(seq 1 600); do
+    if log_has "slots, server"; then return 0; fi
+    if log_has "firecracker backend:"; then fail "pool refused to start: $(pool_log | tail -n2)"; fi
+    sleep 0.2
+  done
+  fail "pool did not start: $(pool_log | tail -n5)"
+}
+
+# Live VMs, from runnerd's pid files: a non-zombie firecracker process.
+vm_pids() {
+  pool_sh "for f in '$state'/*/vms/*/pid; do
+    [ -f \"\$f\" ] || continue
+    p=\$(cat \"\$f\")
+    [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = firecracker ] || continue
+    case \"\$(cut -d' ' -f3 /proc/\$p/stat 2>/dev/null)\" in Z|X|'') continue ;; esac
+    echo \$p
+  done" 2>/dev/null || true
+}
+live_vms() { local n; n=$(grep -c . <<<"$(vm_pids)" || true); echo "${n:-0}"; }
+wait_no_vms() {
+  local i
+  for i in $(seq 1 200); do
+    if [ "$(live_vms)" = 0 ]; then return 0; fi
+    sleep 0.5
+  done
+  fail "VMs still running after 100s"
+}
+
+# The Docker side's warm containers for our image, on the host engine. `docker
+# ps` prints a digest-pinned image WITHOUT its digest, so every worker reads
+# as `localhost:5000/caos`; the ref as given to `run` is in the inspect.
+docker_workers() {
+  local c
+  for c in $(docker ps --format '{{.Names}}' | grep '^caos-worker-' || true); do
+    case "$(docker inspect --format '{{.Config.Image}}' "$c" 2>/dev/null)" in
+      *"$image_digest"*) echo "$c" ;;
+    esac
+  done
+}
+wait_no_workers() {
+  local i
+  for i in $(seq 1 200); do
+    if [ -z "$(docker_workers)" ]; then return 0; fi
+    sleep 0.5
+  done
+  fail "warm containers still up after 100s: $(docker_workers)"
+}
+
+cleanup() {
+  if [ -z "${KEEP:-}" ]; then stop_pool; fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+# ---- running jobs ------------------------------------------------------------
+host_kernel=$(uname -r)
+run_id="bench-$(date +%s%N)-$$"
+now_ms() { date +%s%N | cut -c1-13; }
+
+# A `key=value` field out of an answer.
+field() {
+  local word
+  for word in $1; do
+    case "$word" in "$2="*) printf '%s' "${word#"$2="}"; return ;; esac
+  done
+}
+
+# run_job <backend> <name>: one job, its wall time in ms on stdout, and the
+# sample recorded. Checks the answer came from the right kind of machine.
+run_job() {
+  local backend=$1 name=$2 extra=() t0 t1 answer kernel where
+  if [ "$backend" = firecracker ]; then extra=("--required-pool=$pool"); fi
+  local dir="$scratch/$backend-$name"
+  t0=$(now_ms)
+  "$cli" run "$dir" --base:@=dev/fc-test --worker1:@=dev/firecracker-check/job.sh \
+    "--n=$run_id-$name" "${extra[@]}" >/dev/null 2>"$scratch/err" \
+    || fail "$backend $name: $(tail -n3 "$scratch/err")"
+  t1=$(now_ms)
+  answer=$(cat "$dir/answer")
+  kernel=$(field "$answer" kernel)
+  if [ "$kernel" = "$host_kernel" ]; then where=container; else where=vm; fi
+  case "$backend:$where" in
+    docker:container | firecracker:vm) ;;
+    *) fail "$backend $name ran in a $where: $answer" ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$backend" "${name%%-*}" "$name" "$((t1 - t0))" "$where" >> "$samples"
+  echo $((t1 - t0))
+}
+
+# Median, min and max of the ms column for one backend and kind.
+stats() { # <backend> <kind>
+  awk -F'\t' -v b="$1" -v k="$2" '$1 == b && $2 == k { print $4 }' "$samples" | sort -n \
+    | awk '{ v[NR] = $1 } END {
+        if (NR == 0) { print "-\t-\t-\t0"; exit }
+        m = (NR % 2) ? v[(NR + 1) / 2] : int((v[NR / 2] + v[NR / 2 + 1]) / 2)
+        printf "%d\t%d\t%d\t%d\n", m, v[1], v[NR], NR }'
+}
+
+# Resident memory of one warm runner, in MiB.
+rss_vm() {
+  local p
+  p=$(vm_pids | head -n1)
+  [ -n "$p" ] || { echo "-"; return; }
+  # Neither awk nor grep in the pool image: read the file out, parse it here.
+  local kb
+  kb=$(pool_sh "cat /proc/$p/status" | grep VmRSS | tr -s ' ' | cut -d' ' -f2)
+  echo $(( ${kb:-0} / 1024 ))
+}
+rss_container() {
+  local c
+  c=$(docker_workers | head -n1)
+  [ -n "$c" ] || { echo "-"; return; }
+  # "12.3MiB / 125GiB" -> MiB as an integer.
+  docker stats --no-stream --format '{{.MemUsage}}' "$c" | awk '{
+    v = $1; u = v; sub(/[0-9.]+/, "", u); sub(/[A-Za-z]+/, "", v)
+    if (u == "GiB") v *= 1024; else if (u == "KiB") v /= 1024; else if (u == "B") v /= 1048576
+    printf "%d", v }'
+}
+
+# ---- the measurements --------------------------------------------------------
+step "starting the Firecracker pool ($FANOUT slots)"
+start_pool
+
+step "floor: a cache hit, the client's own cost"
+run_job docker floor-0 >/dev/null
+for i in $(seq 1 3); do
+  # The same n as floor-0 is the same ArgTree: a hit, no runner involved.
+  t0=$(now_ms)
+  "$cli" run "$scratch/floor-hit-$i" --base:@=dev/fc-test --worker1:@=dev/firecracker-check/job.sh \
+    "--n=$run_id-floor-0" >/dev/null 2>&1 || fail "floor hit $i"
+  printf 'client\tfloor\tfloor-hit-%s\t%s\thit\n' "$i" "$(( $(now_ms) - t0 ))" >> "$samples"
+done
+note "$(stats client floor | cut -f1)ms median"
+
+for backend in docker firecracker; do
+  if [ "$backend" = docker ]; then wait_idle=wait_no_workers; rss=rss_container; else wait_idle=wait_no_vms; rss=rss_vm; fi
+
+  step "$backend cold: $COLD samples, each after the warm runner has idled out"
+  for i in $(seq 1 "$COLD"); do
+    $wait_idle
+    note "cold-$i $(run_job "$backend" "cold-$i")ms"
+  done
+
+  step "$backend warm: $WARM samples back to back on the runner cold-$COLD left warm"
+  for i in $(seq 1 "$WARM"); do
+    run_job "$backend" "warm-$i" >/dev/null
+  done
+  note "$(stats "$backend" warm | cut -f1)ms median"
+  sleep 1
+  rss_value=$($rss)
+  printf '%s\trss\trss-1\t%s\tidle\n' "$backend" "$rss_value" >> "$samples"
+  note "warm runner rss ${rss_value}MiB"
+
+  step "$backend fanout: $FANOUT jobs at once with no warm runner"
+  $wait_idle
+  t0=$(now_ms)
+  pids=()
+  for i in $(seq 1 "$FANOUT"); do
+    run_job "$backend" "fan-$i" >/dev/null &
+    pids+=("$!")
+  done
+  for p in "${pids[@]}"; do wait "$p" || fail "$backend fanout job failed"; done
+  printf '%s\tfanout\tfanout-batch\t%s\tbatch\n' "$backend" "$(( $(now_ms) - t0 ))" >> "$samples"
+  note "$(stats "$backend" fanout | cut -f1)ms for the batch"
+done
+
+# ---- the report --------------------------------------------------------------
+summary="$out/summary.tsv"
+printf 'backend\tkind\tmedian_ms\tmin_ms\tmax_ms\tn\n' > "$summary"
+printf 'client\tfloor\t%s\n' "$(stats client floor)" >> "$summary"
+for backend in docker firecracker; do
+  for kind in cold warm fanout rss; do
+    printf '%s\t%s\t%s\n' "$backend" "$kind" "$(stats "$backend" "$kind")" >> "$summary"
+  done
+done
+
+md="$out/summary.md"
+{
+  echo "# Runner backends: Docker vs Firecracker"
+  echo
+  echo "Host \`$(hostname)\`, kernel $host_kernel, $(nproc) CPUs, $(date --iso=s)."
+  echo "Workload dev/fc-test (\`$base\`); Firecracker pool of $FANOUT slots, jailer: $jailer."
+  echo "Docker side: the host stack's generic runnerd. Times are \`caos-cli run\` wall time, ms."
+  echo
+  echo "| measure | docker | firecracker | n |"
+  echo "|---|---|---|---|"
+  floor=$(stats client floor)
+  echo "| floor (cache hit, client only) | $(cut -f1 <<<"$floor") | $(cut -f1 <<<"$floor") | $(cut -f4 <<<"$floor") |"
+  for kind in cold warm fanout; do
+    d=$(stats docker "$kind"); f=$(stats firecracker "$kind")
+    echo "| $kind median (min–max) | $(cut -f1 <<<"$d") ($(cut -f2 <<<"$d")–$(cut -f3 <<<"$d")) | $(cut -f1 <<<"$f") ($(cut -f2 <<<"$f")–$(cut -f3 <<<"$f")) | $(cut -f4 <<<"$d") |"
+  done
+  d=$(stats docker rss); f=$(stats firecracker rss)
+  echo "| warm runner RSS, MiB | $(cut -f1 <<<"$d") | $(cut -f1 <<<"$f") | 1 |"
+  echo
+  echo "cold = no warm runner (container start or VM boot included); warm = next job on the"
+  echo "same runner; fanout = $FANOUT concurrent cold jobs, one wall time for the batch."
+} > "$md"
+
+echo >&2
+cat "$md" >&2
+echo >&2
+note "samples: $samples"
+note "summary: $summary, $md"

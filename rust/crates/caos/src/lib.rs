@@ -23,6 +23,7 @@ pub mod import_git;
 pub mod push_git;
 pub mod runner;
 pub mod timing;
+pub mod vm_init;
 
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
@@ -32,7 +33,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gix::objs::WriteTo;
 
@@ -3409,8 +3410,102 @@ fn run_request(
     // caller that is not a person (the suite, a worker) gets nothing started on
     // its behalf — see `watch::Watch::start`.
     let _watch = watch::Watch::start(&server, &ticket);
-    // No secrets: the grant was decided when the request was started.
-    request_compute_url(&server, &format!("/wait/{ticket}"), &Secrets::default())
+    wait_for_ticket(&server, &ticket, || start_request(t, base, kvs, secrets))
+}
+
+/// Attempts [`wait_for_ticket`] makes before giving up, and the longest pause
+/// between two. Together about five minutes of an unreachable server; a
+/// reachable one that keeps answering 503 is given the same.
+const WAIT_ATTEMPTS: u32 = 30;
+const WAIT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// `GET /wait/<ticket>`, re-attaching when the wait itself is what failed.
+///
+/// A run is a ticket, and a ticket outlives the connection that asked for it:
+/// the work is content-addressed on the server, so losing the HTTP call that
+/// was blocking on it loses nothing but the call. Two things end that call
+/// without ending the work, and both are retried here by STARTING THE TICKET
+/// AGAIN (`restart`, which is `POST /start` with the same bundle — the same
+/// ticket, joined if it is still running, re-run if its server died) and then
+/// waiting on it:
+///
+/// - the connection dropped (the server restarted, a tunnel blipped); the
+///   server answers a restarted-under ticket with `503 … start it again`;
+/// - the server refused the request with 503 outright (its in-flight cap).
+///
+/// Any other answer — the result, or a failure the WORK recorded — is final:
+/// a failed run is not retried, because a failure is an answer (the rule the
+/// result cache keeps). No secrets ride on the wait: the grant was decided
+/// when the request was started.
+fn wait_for_ticket(
+    server: &str,
+    ticket: &str,
+    restart: impl Fn() -> Result<String, String>,
+) -> Result<(String, String), String> {
+    let mut ticket = ticket.to_string();
+    let mut attempt = 0;
+    loop {
+        let path = format!("/wait/{ticket}");
+        // NO TIMEOUT, deliberately: this is the call that waits for the work.
+        let answer = server_request(
+            server,
+            &ServerRequest {
+                method: "GET",
+                path: &path,
+                headers: &[],
+                body: None,
+                timeout_secs: None,
+            },
+        );
+        let why = match answer {
+            Ok(response) if (200..300).contains(&response.status) => {
+                return kind_and_hash(response.body);
+            }
+            Ok(response) if response.status == 503 => format!(
+                "server returned 503 {}: {}",
+                response.reason,
+                String::from_utf8_lossy(&response.body).trim()
+            ),
+            Ok(response) => {
+                let body = String::from_utf8_lossy(&response.body);
+                let body = body.trim();
+                let detail = if body.is_empty() {
+                    String::new()
+                } else {
+                    format!(":\n{body}")
+                };
+                return Err(format!(
+                    "GET {server}{path}: server returned {} {}{detail}",
+                    response.status, response.reason
+                ));
+            }
+            Err(transport) => transport,
+        };
+        attempt += 1;
+        if attempt >= WAIT_ATTEMPTS {
+            return Err(format!(
+                "GET {server}{path}: {why} (gave up after {attempt} attempts)"
+            ));
+        }
+        let pause = Duration::from_secs(u64::from(attempt.min(5)) * 2).min(WAIT_BACKOFF_MAX);
+        eprintln!(
+            "ticket {ticket}: {why}; starting it again in {}s",
+            pause.as_secs()
+        );
+        std::thread::sleep(pause);
+        // The same bundle names the same ticket, so this joins a run that is
+        // still going and re-runs one whose server died. A different ticket
+        // (the bundle re-formed differently) is simply the one to follow now.
+        match restart() {
+            Ok(started) => {
+                if started != ticket {
+                    eprintln!("ticket {started} (was {ticket})");
+                    ticket = started;
+                }
+            }
+            Err(e) => eprintln!("ticket {ticket}: cannot start it again yet: {e}"),
+        }
+    }
 }
 
 /// Everything in [`run_request`] up to (and including) getting the ArgTree onto

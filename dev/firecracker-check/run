@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+# dev/firecracker-check/run — the Firecracker backend's ACCEPTANCE CHECKS
+# (design/firecracker-runners.md, "Acceptance"), on a KVM-capable Linux host
+# against the running host stack (`caosd up`).
+#
+# This is not in `caos-test`: the suite's workers have no /dev/kvm and no way
+# to create a tap, and the checks need both. It starts a Firecracker pool,
+# drives it with caos-cli, and removes it. Two places to run the pool:
+#
+#   FC_POOL=docker (default)  a container next to the stack on caos-net, with
+#       /dev/kvm, /dev/net/tun, NET_ADMIN and SYS_ADMIN (seccomp unconfined:
+#       Docker's default profile refuses pivot_root). Its taps and NAT live in
+#       that container's own netns. Under ROOTLESS docker the jailer cannot run
+#       (it mknods device nodes, which a user namespace never allows), so VMs
+#       run unjailed there and the run says so.
+#   FC_POOL=host  runnerd as ROOT on this machine, under the jailer: the one
+#       way to check the jailed path when the only docker is rootless. The
+#       script builds as you, then re-runs itself as root ONCE. Inside, every
+#       caos-cli call drops back to you, so nothing in the repo becomes root's.
+#       Guests reach the stack at their tap's host end, port 9090; a firewall
+#       rule letting the taps in is added to nixos-fw for the run and removed
+#       after. It escalates with $SUDO (default: sudo).
+#
+# Covered:
+#
+#   vm          a pool job runs in a VM (the guest kernel answers)
+#   warm        a second job within the TTL runs on the SAME VM
+#   exclusion   the same base WITHOUT the pool runs in a container, not here
+#   resident    successive messages for one instance: one VM, one process
+#   durable     a file result is still readable after its VM is gone
+#   isolation   two concurrent VMs write the same path and each reads its own
+#   crash       a VM killed during a LATER warm job fails that job promptly
+#   boot        a VM that cannot boot fails its job as a boot failure
+#   restart     a restarted runnerd leaves a live VM alone, reaps an exited
+#               one, and never touches another deployment's state
+#
+# Usage: [FC_POOL=docker|host] [SUDO=<cmd>] dev/firecracker-check/run [check ...]
+#        (default: all checks, in order). KEEP=1 leaves the pool up.
+# Needs: nix, /dev/kvm, a host stack (`caosd up`); docker for FC_POOL=docker,
+#        sudo for FC_POOL=host.
+set -euo pipefail
+self=$(realpath "$0")
+cd "$(dirname "$self")/../.."
+
+mode=${FC_POOL:-docker}
+case "$mode" in docker | host) ;; *) echo "FC_POOL must be docker or host" >&2; exit 2 ;; esac
+pool=fc-test
+container=caos-fc-check
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+step() { echo "== $* ==" >&2; }
+ok() { echo "  ok: $*" >&2; }
+
+# A `key=value` field out of an answer.
+field() {
+  local word
+  for word in $1; do
+    case "$word" in "$2="*) printf '%s' "${word#"$2="}"; return ;; esac
+  done
+}
+
+# become_root <args>: re-run this script as root, once, with what the user
+# stage prepared, and exit with its status. It escalates with $SUDO, which
+# defaults to sudo; any command that takes `<program> <args>` and runs it as
+# root will do. Escalation clears the environment, so the stage's results go
+# through `env`.
+become_root() {
+  local pass=(FC_ROOT_STAGE=1 FC_POOL=host FC_APPLIANCE="$appliance" FC_CLI="$cli"
+    FC_TOOLS="$tools" FC_BASE="$base" FC_SCRATCH="$scratch" FC_USER="$(id -un)"
+    FC_HOME="$HOME" KEEP="${KEEP:-}" FC_JAILER="${FC_JAILER:-}")
+  local root
+  read -ra root <<<"${SUDO:-sudo}"
+  step "root needed for the VM pool (taps, jailer, firewall): ${root[*]} asks next"
+  local rc=0
+  "${root[@]}" "$(command -v env)" "${pass[@]}" "$self" "$@" || rc=$?
+  # The root stage removes the scratch dir; a refused one never started.
+  rm -rf "$scratch"
+  exit "$rc"
+}
+
+# ---- preparation, as the invoking user -------------------------------------
+# In host mode this half runs before the sudo; the root half finds its results
+# in FC_* variables and skips it.
+if [ -z "${FC_ROOT_STAGE:-}" ]; then
+  step "building the appliance, the pool tools and the client"
+  appliance=$(nix build --no-link --print-out-paths .#caos-fc-test-appliance)
+  cli=$(nix build --no-link --print-out-paths .#caos-tools)/bin/caos-cli
+  if [ "$mode" = docker ]; then
+    docker load < "$(nix build --no-link --print-out-paths .#caos-runnerd-firecracker-docker)" >/dev/null
+    tools=""
+  else
+    tools=$(nix build --no-link --print-out-paths .#caos-runnerd-firecracker-env)
+  fi
+  step "evaluating dev/fc-test, the base the pool serves"
+  base=$("$cli" eval-path dev/fc-test | tail -n1)
+  case "$base" in "tree "*) base=${base#tree } ;; *) fail "eval-path dev/fc-test said: $base" ;; esac
+  scratch=$(mktemp -d)
+  if [ "$mode" = host ]; then
+    become_root "$@"
+  fi
+else
+  appliance=$FC_APPLIANCE cli=$FC_CLI tools=$FC_TOOLS base=$FC_BASE scratch=$FC_SCRATCH
+fi
+
+# caos-cli as the invoking user: in host mode we are root, and a root caos-cli
+# would write root-owned objects into the user's repository.
+cli() {
+  if [ "$mode" = host ]; then
+    runuser -u "$FC_USER" -- env HOME="$FC_HOME" "$cli" "$@"
+  else
+    "$cli" "$@"
+  fi
+}
+
+# ---- the pool ----------------------------------------------------------------
+if [ "$mode" = docker ]; then
+  state=/var/lib/caos-runnerd-fc
+  log=/var/log/runnerd.log
+  # The jailer mknods device nodes, which a user namespace never allows.
+  jailer=${FC_JAILER:-}
+  if [ -z "$jailer" ]; then
+    if grep -q "name=rootless" <<<"$(docker info --format '{{.SecurityOptions}}')"; then
+      jailer=none
+      echo "NOTE: rootless docker: VMs run WITHOUT the jailer (CAOS_FC_JAILER=none)." >&2
+      echo "      FC_POOL=host checks the jailed path." >&2
+    else
+      jailer=jailer
+    fi
+  fi
+  server_ip=$(docker inspect caos-stack --format '{{(index .NetworkSettings.Networks "caos-net").IPAddress}}')
+  [ -n "$server_ip" ] || fail "no host stack on caos-net (caosd up)"
+  server=http://caos-server guest_server="http://$server_ip"
+else
+  state=/var/lib/caos-fc-check
+  log=$state/runnerd.log
+  jailer=${FC_JAILER:-jailer}
+  # sudo resets PATH; the system's own tools (runuser) stay after ours.
+  export PATH="$tools/bin:/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
+  # The stack's published port, from the host. Guests reach it at their tap's
+  # host end (runnerd's default guest URL), so no NAT is needed.
+  server=http://127.0.0.1:9090 guest_server=""
+  mkdir -p "$state"
+fi
+ok "base $base, jailer $jailer"
+
+# pool_sh <script>: run a shell snippet where the pool is.
+pool_sh() {
+  if [ "$mode" = docker ]; then docker exec "$container" sh -c "$1"; else bash -c "$1"; fi
+}
+
+# The firewall rule letting guests reach the stack (host mode only).
+fw_rule=(nixos-fw -i cfc+ -p tcp --dport 9090 -m comment --comment caos-fc-check -j ACCEPT)
+fw_added=""
+open_firewall() {
+  if [ "$mode" = host ] && iptables -n -L nixos-fw >/dev/null 2>&1; then
+    iptables -I "${fw_rule[@]}"
+    fw_added=1
+  fi
+}
+
+loop_pid=""
+# stop_pool: the pool's runnerd loop and every VM it started, by OUR records
+# (pid files under our state, the loop's own pid), never by process name: in
+# host mode a `pkill -x firecracker` as root would hit anyone's VMs.
+stop_pool() {
+  if [ "$mode" = docker ]; then
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [ -n "$loop_pid" ]; then
+    kill -KILL -- "-$loop_pid" 2>/dev/null || true
+    loop_pid=""
+  fi
+  kill_vms
+}
+
+# start_pool [NAME=VALUE ...]: a fresh pool with extra runnerd env. runnerd runs
+# in a restart loop, so the restart check can kill runnerd alone and leave its
+# VMs running.
+start_pool() {
+  stop_pool
+  # The host stack mints a runner token (stack/serve) that every poller must
+  # present; this pool is a poller outside the group, so read it from the
+  # stack's state. An older stack has no file, and then auth is off anyway.
+  local token
+  token=$(docker exec caos-stack cat /state/runner-token 2>/dev/null || true)
+  local env=(
+    CAOS_RUNNER_BACKEND=firecracker
+    CAOS_FC_APPLIANCE="$appliance" CAOS_FC_JAILER="$jailer"
+    CAOS_SERVER_URL="$server" CAOS_FC_STATE="$state" CAOS_RUNNER_SLOTS=2
+    "CAOS_RUNNER_REQUIRE=required-pool=$pool base:hash=$base"
+    "CAOS_RUNNER_TOKEN=$token"
+    "$@"
+  )
+  if [ -n "$guest_server" ]; then env+=(CAOS_FC_GUEST_SERVER_URL="$guest_server"); fi
+  if [ "$mode" = docker ]; then
+    local e args=()
+    for e in "${env[@]}"; do args+=(-e "$e"); done
+    docker run -d --name "$container" --network caos-net \
+      --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+      --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+      --sysctl net.ipv4.ip_forward=1 -v /nix/store:/nix/store:ro "${args[@]}" \
+      --entrypoint /bin/bash caos-runnerd-firecracker -c '
+        mkdir -p /var/log /var/lib
+        iptables -t nat -A POSTROUTING -s 172.30.0.0/16 -o eth0 -j MASQUERADE
+        while true; do caos-runnerd >> /var/log/runnerd.log 2>&1; sleep 1; done' >/dev/null
+  else
+    : > "$log"
+    # Its own session, so stop_pool can kill the loop and its runnerd as a group.
+    setsid env "${env[@]}" bash -c \
+      'while true; do caos-runnerd >> "$0" 2>&1; sleep 1; done' "$log" &
+    loop_pid=$!
+  fi
+  local i
+  for i in $(seq 1 600); do
+    if log_has "slots, server"; then return 0; fi
+    if log_has "firecracker backend:"; then fail "pool refused to start: $(pool_log | tail -n2)"; fi
+    sleep 0.2
+  done
+  fail "pool did not start: $(pool_log | tail -n5)"
+}
+
+# Read the log ONCE into a variable before grepping it: `cmd | grep -q` is false
+# under pipefail whenever grep exits before cmd is done writing (CLAUDE.md).
+pool_log() { pool_sh "cat '$log'" 2>/dev/null || true; }
+log_has() { grep -q -- "$1" <<<"$(pool_log)"; }
+log_count() { local n; n=$(grep -c -- "$1" <<<"$(pool_log)" || true); echo "${n:-0}"; }
+boots() { log_count "caos-vm-init: runner started"; }
+
+# The pool's live VMs, from runnerd's own pid files: a non-zombie firecracker.
+vm_pids() {
+  pool_sh "for f in '$state'/*/vms/*/pid; do
+    [ -f \"\$f\" ] || continue
+    p=\$(cat \"\$f\")
+    [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = firecracker ] || continue
+    case \"\$(cut -d' ' -f3 /proc/\$p/stat 2>/dev/null)\" in Z|X|'') continue ;; esac
+    echo \$p
+  done" 2>/dev/null || true
+}
+live_vms() { local n; n=$(grep -c . <<<"$(vm_pids)" || true); echo "${n:-0}"; }
+kill_vms() {
+  local p
+  for p in $(vm_pids); do pool_sh "kill -KILL $p" 2>/dev/null || true; done
+}
+# Kill runnerd alone, leaving its VMs: the restart loop starts a new one.
+kill_runnerd() {
+  if [ "$mode" = docker ]; then
+    pool_sh "pkill -KILL -x caos-runnerd"
+  else
+    pkill -KILL -P "$loop_pid" -x caos-runnerd
+  fi
+}
+# Claim records across the pool's live report disks. Unjailed, a VM's disks
+# are in its own directory; jailed, in its chroot.
+claims() {
+  local n
+  n=$(pool_sh "cat '$state'/*/vms/*/report '$state'/*/jail/*/*/root/report 2>/dev/null" \
+    | tr -d '\0' | grep -c "caos-runner claimed" || true)
+  echo "${n:-0}"
+}
+our_taps() { local t; t=$(pool_sh "ip -br link show type tun" 2>/dev/null || true); grep '^cfc' <<<"$t" || true; }
+wait_no_vms() {
+  local i
+  for i in $(seq 1 120); do
+    if [ "$(live_vms)" = 0 ]; then return 0; fi
+    sleep 0.5
+  done
+  fail "VMs still running after 60s"
+}
+
+cleanup() {
+  if [ -z "${KEEP:-}" ]; then
+    stop_pool
+    if [ "$mode" = host ]; then
+      # runnerd is gone, so its reaper will not run again: delete what is left.
+      local t
+      for t in $(pool_sh "cat '$state'/*/vms/*/tap 2>/dev/null" || true); do
+        ip link del "$t" 2>/dev/null || true
+      done
+      rm -rf "$state"
+    fi
+  fi
+  if [ -n "$fw_added" ]; then iptables -D "${fw_rule[@]}" 2>/dev/null || true; fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+# run_job <n> [extra args...]: a job on the pool's base, its answer on stdout.
+run_id="fc-$(date +%s%N)-$$"
+run_job() {
+  local n=$1; shift
+  local out="$scratch/out-$n"
+  cli run "$out" --base:@=dev/fc-test --worker1:@=dev/firecracker-check/job.sh \
+    "--n=$run_id-$n" "$@" >/dev/null
+  cat "$out/answer"
+}
+pool_job() { run_job "$@" "--required-pool=$pool"; }
+
+host_kernel=$(uname -r)
+
+check_vm() {
+  step "vm: a pool job runs in a VM"
+  local a; a=$(pool_job vm)
+  [ "$(field "$a" kernel)" != "$host_kernel" ] || fail "answered by the host kernel: $a"
+  ok "$a"
+}
+
+check_warm() {
+  step "warm: a second job within the TTL runs on the same VM"
+  local before a b
+  before=$(boots)
+  a=$(pool_job warm-a)
+  b=$(pool_job warm-b)
+  [ "$(field "$a" boot)" = "$(field "$b" boot)" ] || fail "two VMs: $a / $b"
+  [ "$(boots)" -le $((before + 1)) ] || fail "booted $(( $(boots) - before )) VMs for two jobs"
+  ok "both on $(field "$a" boot)"
+}
+
+check_exclusion() {
+  step "exclusion: the same base without the pool runs in a container"
+  local before a
+  before=$(boots)
+  a=$(run_job unpooled)
+  [ "$(field "$a" kernel)" = "$host_kernel" ] || fail "an unpooled job ran in a VM: $a"
+  [ "$(boots)" = "$before" ] || fail "the pool booted a VM for an unpooled job"
+  ok "$a"
+}
+
+check_resident() {
+  step "resident: successive messages for one instance, one VM, one process"
+  local name="$run_id-res" m r boot="" token="" daemon
+  daemon=$(cli curry --base:@=dev/fc-test --worker1:@=dev/firecracker-check/daemon.sh \
+    "--affinity=$name" "--required-pool=$pool" | tail -n1)
+  for m in 1 2 3; do
+    r=$(cli run "--base:hash=$daemon" "--in=$m" | tail -n1)
+    [ "$(field "$r" in)" = "$m" ] || fail "message $m answered: $r"
+    [ "$(field "$r" n)" = "$m" ] || fail "message $m was not job $m of one daemon: $r"
+    if [ -z "$boot" ]; then boot=$(field "$r" boot); token=$(field "$r" token); fi
+    [ "$(field "$r" boot)" = "$boot" ] && [ "$(field "$r" token)" = "$token" ] \
+      || fail "message $m went to another VM or process: $r"
+  done
+  # Stop the daemon, so its VM ends now rather than at its lifetime cap.
+  cli run "--base:hash=$daemon" --in=stop >/dev/null
+  ok "3 messages, VM $boot, process $token"
+}
+
+check_durable() {
+  step "durable: a file result outlives its VM"
+  local tree out="$scratch/durable"
+  tree=$(cli run "$scratch/durable-first" --base:@=dev/fc-test \
+    --worker1:@=dev/firecracker-check/job.sh "--n=$run_id-durable" "--required-pool=$pool" | tail -n1)
+  case "$tree" in "tree "*) tree=${tree#tree } ;; *) fail "no tree result: $tree" ;; esac
+  wait_no_vms
+  cli get "$tree" "$out" >/dev/null
+  grep -q "n=$run_id-durable " "$out/answer" || fail "result after the VM exited: $(cat "$out/answer")"
+  ok "tree $tree read back with no VM running"
+}
+
+check_isolation() {
+  step "isolation: two concurrent VMs write the same path"
+  wait_no_vms
+  pool_job iso-a --iso=1 --sleep=3 > "$scratch/iso-a" &
+  local pa=$!
+  pool_job iso-b --iso=1 --sleep=3 > "$scratch/iso-b" &
+  local pb=$!
+  wait "$pa" || fail "iso-a failed"
+  wait "$pb" || fail "iso-b failed"
+  local a b; a=$(cat "$scratch/iso-a"); b=$(cat "$scratch/iso-b")
+  [ "$(field "$a" iso)" = "$run_id-iso-a" ] || fail "iso-a read back another VM's write: $a"
+  [ "$(field "$b" iso)" = "$run_id-iso-b" ] || fail "iso-b read back another VM's write: $b"
+  [ "$(field "$a" boot)" != "$(field "$b" boot)" ] || fail "both ran on one VM: $a / $b"
+  ok "each read its own write, on two VMs"
+}
+
+check_crash() {
+  step "crash: a VM killed during a LATER warm job fails that job promptly"
+  wait_no_vms
+  local before started rc=0 err
+  before=$(boots)
+  pool_job crash-a > /dev/null
+  # The warm VM claims b and sleeps in it; kill the VM under it.
+  ( pool_job crash-b --sleep=60 > "$scratch/crash-b" 2> "$scratch/crash-b.err" ) &
+  local pb=$!
+  # Wait until b is claimed: the VM's report holds a's claim and b's.
+  for _ in $(seq 1 150); do
+    if [ "$(claims)" -ge 2 ]; then break; fi
+    sleep 0.2
+  done
+  [ "$(claims)" -ge 2 ] || fail "b was never claimed by a's warm VM"
+  [ "$(boots)" = $((before + 1)) ] || fail "b did not land on a's warm VM (boots: $(( $(boots) - before )))"
+  started=$(date +%s)
+  kill_vms
+  wait "$pb" || rc=$?
+  [ "$rc" != 0 ] || fail "the killed job succeeded: $(cat "$scratch/crash-b")"
+  err=$(cat "$scratch/crash-b.err")
+  grep -q "before its runner reported an exit" <<<"$err" || fail "b failed, but not by the backstop: $err"
+  [ $(( $(date +%s) - started )) -lt 30 ] || fail "b took $(( $(date +%s) - started ))s to fail"
+  ok "b failed in $(( $(date +%s) - started ))s: $(grep -m1 "runner reported" <<<"$err")"
+}
+
+check_boot() {
+  step "boot: a VM that cannot boot fails its job as a boot failure"
+  # 32 MiB is not enough to boot this kernel and initrd: it panics, and with
+  # panic=1 reboot=k Firecracker exits before the readiness line.
+  start_pool CAOS_FC_MEM_MIB=32 CAOS_FC_BOOT_TIMEOUT_SECS=20
+  local rc=0 err
+  pool_job boot-fail > /dev/null 2> "$scratch/boot.err" || rc=$?
+  [ "$rc" != 0 ] || fail "a job ran on a VM that cannot boot"
+  err=$(cat "$scratch/boot.err")
+  grep -q "boot failure" <<<"$err" || fail "not reported as a boot failure: $err"
+  ok "$(grep -m1 "boot failure" <<<"$err")"
+  start_pool
+}
+
+check_restart() {
+  step "restart: live VMs are left alone, exited ones reaped, others' untouched"
+  wait_no_vms
+  pool_sh "mkdir -p '$state'/someone-else/vms/vm && echo 1 > '$state'/someone-else/vms/vm/pid"
+  # A warm VM, then kill runnerd alone: the VM keeps running (TTL 30s).
+  pool_job restart-a > /dev/null
+  [ "$(live_vms)" -ge 1 ] || fail "no warm VM to orphan"
+  kill_runnerd
+  for _ in $(seq 1 50); do
+    if [ "$(log_count "slots, server")" -ge 2 ]; then break; fi
+    sleep 0.2
+  done
+  log_has "is still running; leaving it" || fail "the restarted runnerd did not leave the live VM: $(pool_log | tail -n5)"
+  ok "live VM left alone"
+  wait_no_vms
+  kill_runnerd
+  for _ in $(seq 1 50); do
+    if [ "$(log_count "slots, server")" -ge 3 ]; then break; fi
+    sleep 0.2
+  done
+  log_has "reaping leftover VM state" || fail "the exited VM was not reaped: $(pool_log | tail -n5)"
+  [ -z "$(our_taps)" ] || fail "a tap survived: $(our_taps)"
+  pool_sh "test -e '$state'/someone-else/vms/vm/pid" || fail "another deployment's VM state was deleted"
+  ok "exited VM reaped, its tap gone, another deployment's state kept"
+}
+
+checks=("$@")
+if [ ${#checks[@]} -eq 0 ]; then
+  checks=(vm warm exclusion resident durable isolation crash boot restart)
+fi
+open_firewall
+start_pool
+for c in "${checks[@]}"; do
+  "check_$c"
+done
+echo "firecracker-check: ALL PASS (${checks[*]}; pool: $mode, jailer: $jailer)" >&2

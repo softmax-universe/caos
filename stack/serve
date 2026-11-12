@@ -85,7 +85,25 @@
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
 #   CAOS_RUNNER_SLOTS         the general pool's concurrency
+#   CAOS_STACK_POOLS          dedicated runner pools beside the general one, as
+#                             space-separated `name=slots` pairs. Each is a
+#                             runnerd requiring `required-pool=<name>`, so it
+#                             takes only jobs that name it and the general pool
+#                             takes none of them (design/firecracker-runners.md).
+#                             Unset or empty: none.
 #   CAOS_PENDING_TIMEOUT_SECS how long a job waits for a runner to exist
+#   CAOS_RUNNER_TOKEN         the bearer token runners present to claim jobs
+#                             and post results. Unset: MINTED here on first
+#                             boot and kept at $CAOS_STACK_STATE/runner-token
+#                             (0600), so a restart keeps it and an operator can
+#                             hand it to a runner outside the group
+#                             (dev/firecracker-check/run reads it from there).
+#                             `none`: runner auth off — anything that reaches
+#                             the server may then claim jobs and post results,
+#                             which are cached under their ArgTree hash with
+#                             nothing checking they came from running the
+#                             image. Only for a stack whose network is itself
+#                             the trust boundary.
 #   CAOS_STACK_IROH           "yes" to answer `caos://` clients as well
 #                             (design/iroh-transport.md): an iroh endpoint that
 #                             splices HTTP streams to this server and serves git
@@ -157,6 +175,32 @@ SERVER_URL=http://127.0.0.1
 REDIS_ADDR=${CAOS_STACK_REDIS_ADDR:-127.0.0.1:$CAOS_STACK_REDIS_PORT}
 pids=()
 names=()
+
+# --- runner token: minted once, shared by every member that polls ------------
+# The server, runnerd (every pool), the seeder and — through the job payload —
+# each worker's own `caos runner` all present it, so it has to be ONE value
+# across the group, and it is decided here, before any of them starts. Kept
+# in the state dir so a restarted stack keeps the token its external runners
+# already hold.
+RUNNER_TOKEN_FILE=$CAOS_STACK_STATE/runner-token
+case "${CAOS_RUNNER_TOKEN:-}" in
+  none)
+    echo "caosd serve: CAOS_RUNNER_TOKEN=none, runner auth is OFF" >&2
+    CAOS_RUNNER_TOKEN=""
+    ;;
+  "")
+    if [ ! -s "$RUNNER_TOKEN_FILE" ]; then
+      # 256 random bits as hex; od is coreutils, which every placement has
+      # (the seed placement's builder image has no openssl).
+      (umask 077; od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$RUNNER_TOKEN_FILE.new") \
+        || fail "cannot mint a runner token at $RUNNER_TOKEN_FILE"
+      mv "$RUNNER_TOKEN_FILE.new" "$RUNNER_TOKEN_FILE"
+      echo "caosd serve: minted a runner token at $RUNNER_TOKEN_FILE" >&2
+    fi
+    CAOS_RUNNER_TOKEN=$(cat "$RUNNER_TOKEN_FILE")
+    [ -n "$CAOS_RUNNER_TOKEN" ] || fail "the runner token at $RUNNER_TOKEN_FILE is empty"
+    ;;
+esac
 
 fail() {
   echo "caosd serve: $*" >&2
@@ -276,6 +320,7 @@ fi
 start server env \
   CAOS_GIT_DIR="$CAOS_STACK_STATE/git" \
   CAOS_REDIS_ADDR="$REDIS_ADDR" \
+  CAOS_RUNNER_TOKEN="$CAOS_RUNNER_TOKEN" \
   CAOS_CACHE_NAMESPACE="${CAOS_CACHE_NAMESPACE:-}" \
   CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
   "$CAOS_STACK_BIN/server"
@@ -317,6 +362,7 @@ start_runnerd() { # <log-name> <slots> <require>
   start "$name" env \
     CAOS_SERVER_URL="${CAOS_STACK_RUNNER_SERVER_URL:-$SERVER_URL}" \
     CAOS_WORKER_REDIS_ADDR="${CAOS_STACK_RUNNER_REDIS_ADDR:-$REDIS_ADDR}" \
+    CAOS_RUNNER_TOKEN="$CAOS_RUNNER_TOKEN" \
     CAOS_DOCKER_BIN="${CAOS_DOCKER_BIN:-docker}" \
     CAOS_RUNNER_SLOTS="$slots" \
     CAOS_RUNNER_REQUIRE="$require" \
@@ -338,6 +384,13 @@ start_runnerd() { # <log-name> <slots> <require>
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
+  for pool in ${CAOS_STACK_POOLS:-}; do
+    case "$pool" in
+      *=*) ;;
+      *) fail "CAOS_STACK_POOLS entry $pool is not name=slots" ;;
+    esac
+    start_runnerd "runnerd-${pool%%=*}" "${pool#*=}" "required-pool=${pool%%=*}"
+  done
 fi
 
 # --- caos-iroh: the same server, reachable by ticket -------------------------
@@ -426,6 +479,7 @@ if [ "${CAOS_STACK_SEEDER:-no}" = yes ]; then
   : "${CAOS_SEED_TREE:?serve needs a seed tree for the seeder — set CAOS_STACK_PUBLISH=yes, or pass CAOS_SEED_TREE}"
   start core-seeder-runner env \
     CAOS_SERVER_URL="$SERVER_URL" \
+    CAOS_RUNNER_TOKEN="$CAOS_RUNNER_TOKEN" \
     CAOS_GIT_DIR="$CAOS_STACK_STATE/git" \
     CAOS_SEED_TREE="$CAOS_SEED_TREE" \
     "$CAOS_STACK_BIN/core-seeder-runner"

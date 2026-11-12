@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# dev/warm-crash-test — std/bash's script interpreter, on an image whose runner
+# stays warm and then dies holding its second job (flake.nix). Fetch `worker1`
+# and run it with bash.
+set -euo pipefail
+
+caos get /cas/args/worker1
+bash /cas/args/worker1
+if [ ! -e /cas/out ]; then
+  : > /tmp/caos-empty-out
+  caos put /tmp/caos-empty-out /cas/out
+fi

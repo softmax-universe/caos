@@ -16,6 +16,13 @@
 //! The caller says WHICH input, WHAT of it to load, and WHERE to put it. This
 //! worker checks the pin and does the splice.
 //!
+//! `--mounts=<from>:<to>,…` instead of `--output-path` mounts several
+//! directories of the one input in one call — `std:caos-std,caos-core:caos-core`
+//! gives a consumer caos' std beside its built core (design/nix-bootstrap.md).
+//! `<from>` is a path in `--input-tree` (`.` for all of it). Either way the
+//! result's `.caos-mounts` lists what was mounted, so a later deep-deps over
+//! the consumer's tree treats each mount as the finished tree it is.
+//!
 //! `--output-path=.` puts it HERE: the result is the input tree itself, in
 //! place of `--in`. That is for an expression kept in a directory of its own
 //! (`caos-std/`, holding the expression, `flake.nix` and `flake.lock`): the

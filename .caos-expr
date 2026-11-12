@@ -13,20 +13,23 @@
 # This is the seed half of `stack/build-builtins.sh`, written as an expression.
 # `--in:@=.` is the whole repo; nix keeps the repeated builds cheap, and each key
 # is cached per rev.
-# The three images are built CLEAN, and what a Rust edit moves is grafted on as
-# layers: the static user db and /tmp (checked in), the caos binary, and the
-# runner/cargo /worker, each its own small nix output. This is the delta
-# `build-builtins.sh` stages by hand: {base, config.json, layer00.. }.
-STATIC=graft --layer00:@=stack/core-layers/static
-CAOSL=run --base:nix=v1 --in:@=. --attr=caos-core-layer-caos
-RUNNERW=run --base:nix=v1 --in:@=. --attr=caos-core-layer-worker-runner
-CARGOW=run --base:nix=v1 --in:@=. --attr=caos-core-layer-worker-cargo
-RUNNER=graft --in=$RUNNERCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$RUNNERW
-FB=graft --in=$FBCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL
-CARGO=graft --in=$CARGOCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$CARGOW
+
+# The three images, built CLEAN: they depend on nothing in the workspace.
 RUNNERCLEAN=run --base:nix=v1 --in:@=. --attr=caos-worker-runner-docker
 FBCLEAN=run --base:nix=v1 --in:@=. --attr=caos-worker-flake-builder-docker
 CARGOCLEAN=run --base:nix=v1 --in:@=. --attr=caos-worker-cargo-docker
+# What a Rust edit moves, each its own small nix output: the caos binary (with
+# its setuid sidecar) and the runner/cargo /worker. The user db, /usr/bin/env and
+# /tmp never move, so they are checked in (stack/core-layers/static).
+CAOSL=run --base:nix=v1 --in:@=. --attr=caos-core-layer-caos
+RUNNERW=run --base:nix=v1 --in:@=. --attr=caos-core-layer-worker-runner
+CARGOW=run --base:nix=v1 --in:@=. --attr=caos-core-layer-worker-cargo
+# Each image is the delta `build-builtins.sh` stages by hand, {base, config.json,
+# layer<NN>...}: the clean image with its layers grafted on.
+RUNNER=graft --in=$RUNNERCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$RUNNERW
+FB=graft --in=$FBCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL
+CARGO=graft --in=$CARGOCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$CARGOW
+
 DDBIN=run --base:nix=v1 --in:@=. --attr=worker-deep-deps
 RUSTCBIN=run --base:nix=v1 --in:@=. --attr=worker-rustc
 DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps

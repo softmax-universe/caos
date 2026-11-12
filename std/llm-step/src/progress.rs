@@ -161,6 +161,44 @@ impl State<GitStore> {
         Err(format!("publishing code ref {refname}: {last}"))
     }
 
+    /// Bring ONE commit object into the local store over the object API.
+    /// A git fetch of a commit brings its whole history; a caller that only
+    /// reads the commit's own headers needs none of it.
+    pub fn seed_commit(&mut self, commit: &Oid) -> Result<(), String> {
+        if self.store.has_local(commit)? {
+            return Ok(());
+        }
+        let base =
+            std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
+        let url = format!("{}/object/{commit}", base.trim_end_matches('/'));
+        let response = minreq::get(&url)
+            .with_timeout(30)
+            .send()
+            .map_err(|error| format!("GET {url}: {error}"))?;
+        if !(200..=299).contains(&response.status_code) {
+            return Err(format!(
+                "GET {url}: {} {}",
+                response.status_code, response.reason_phrase
+            ));
+        }
+        let bytes = response.as_bytes();
+        let header_end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| format!("GET {url}: no object header"))?;
+        if !bytes[..header_end].starts_with(b"commit ") {
+            return Err(format!("{commit} is not a commit"));
+        }
+        let info = session_protocol::v3::tree::parse_commit_bytes(commit, &bytes[header_end + 1..])
+            .map_err(String::from)?;
+        let written = self.store.write_commit(&info).map_err(String::from)?;
+        if written != *commit {
+            return Err(format!("seeding {commit} wrote {written}"));
+        }
+        crate::timing::phase("seed commit");
+        Ok(())
+    }
+
     pub fn fetch_object(&mut self, oid: &Oid) -> Result<(), String> {
         self.store.ensure_local(oid)
     }

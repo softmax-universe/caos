@@ -1834,7 +1834,7 @@ fn launch_root_tool(
         },
     )? {
         progress::TryAppend::HeadChanged(_) => resume(cfg, state, turn),
-        progress::TryAppend::Appended(_) => dispatch_started(state, &turn.request, call, &started),
+        progress::TryAppend::Appended(_) => dispatch_started(&turn.request, call, &started),
     }
 }
 

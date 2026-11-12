@@ -49,7 +49,15 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use worker_common::{arg, caos, entries, file_name, link, path, read_arg, run_worker, scratch};
+use worker_common::{
+    arg, caos, entries, file_name, link, path, read_arg, read_arg_opt, run_worker, scratch,
+};
+
+/// The file at a tree's root listing the paths in it that were MOUNTED rather
+/// than checked in — the same file and format the evaluator's `graft` writes
+/// (`caos_eval::MOUNTS_FILE`; not imported, because this tool is built from its
+/// own directory and links only worker-common).
+const MOUNTS_FILE: &str = ".caos-mounts";
 
 fn main() -> ExitCode {
     run_worker("flake-input-loader", run)

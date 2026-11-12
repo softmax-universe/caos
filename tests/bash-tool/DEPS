@@ -15,7 +15,7 @@
 # test loudly rather than letting it borrow something ambient. An
 # unnecessary line only over-keys the test, so when in doubt, declare.
 ../../std/bash-tool bash-tool
-../../std/cargo cargo
+../../caos-core/cargo cargo
 # The image this client test runs in, with the client-repo setup as its
 # /worker: a dependency, not a harness.
 ../../std/bash bash

@@ -3,4 +3,4 @@
 # and curries the built binary onto it, so no tool names a runner. LOCAL deps
 # (mounted under DEEP-DEPS/ by deepening) rather than /std, so std has no
 # ambient self-reference.
-../rustc rustc
+../../caos-core/rustc rustc

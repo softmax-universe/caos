@@ -2,7 +2,7 @@
 # protocol and curries the result onto the opt-in Git runner. rustc brings its
 # own default runner/cargo/worker-common; this tool overrides only the runtime
 # of the binary rustc produces.
-../rustc rustc
+../../caos-core/rustc rustc
 ../git-runner git-runner
 ../../rust/crates/session-protocol session-protocol
 ../../rust/crates/git-locator git-locator

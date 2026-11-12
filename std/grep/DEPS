@@ -1,4 +1,4 @@
 # What this tool builds from and runs (format `<path> <name>`): the compiler, and
 # the fold that finds the matches.
-../rustc rustc
+../../caos-core/rustc rustc
 ../rgrep rgrep

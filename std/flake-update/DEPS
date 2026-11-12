@@ -3,6 +3,6 @@
 # LOCAL dep (mounted at DEEP-DEPS/flake-builder by deepening) rather than /std;
 # the ONE flake.lock at the repo root, placed by the builder (`--lock`); and
 # std/go's prelude module, which flake.nix compiles worker.go into.
-../flake-builder flake-builder
+../../caos-core/flake-builder flake-builder
 ../../flake.lock flake.lock
 ../go/prelude prelude

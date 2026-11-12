@@ -8,8 +8,8 @@
 # (see cli.sh). A flake-built image like bash's is pinned as a run
 # result and so cannot exhibit it.
 ../../std/rgrep rgrep
-../../std/runner runner
-../../std/rustc rustc
+../../caos-core/runner runner
+../../caos-core/rustc rustc
 # The image this client test runs in, with the client-repo setup as its
 # /worker: a dependency, not a harness.
 ../../dev/cli-test cli-test

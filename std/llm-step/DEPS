@@ -11,7 +11,7 @@
 # they are llm-step's dependencies: the caller should say what the turn is, not
 # which shell the agent greps with. `.caos-expr` binds them, so resolving
 # llm-step yields a step image with its tools already attached.
-../rustc rustc
+../../caos-core/rustc rustc
 ../git-runner git-runner
 ../llm-client llm-client
 ../../rust/crates/session-protocol session-protocol

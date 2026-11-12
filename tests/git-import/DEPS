@@ -1,4 +1,4 @@
-../../std/cargo cargo
-../../std/flake-builder flake-builder
+../../caos-core/cargo cargo
+../../caos-core/flake-builder flake-builder
 ../../flake.lock flake.lock
 ../../rust rust

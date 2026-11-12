@@ -179,6 +179,9 @@ impl GitStore {
             legacy_reads: RefCell::new(std::collections::HashMap::new()),
             batch: RefCell::new(None),
             batch_dirty: Cell::new(false),
+            object_fetcher: RefCell::new(None),
+            single_objects: RefCell::new(HashSet::new()),
+            written_commits: RefCell::new(HashSet::new()),
             #[cfg(test)]
             command_count: Cell::new(0),
         };

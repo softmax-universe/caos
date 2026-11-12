@@ -1,5 +1,13 @@
 # `.caos-expr`: evaluable trees and DEEP-DEPS resolution (simplified)
 
+> **The seeder in this note is gone.** Everything below about seeded sentinels
+> (`docker://seeded…`), seed records, the `core-seeder-runner`, hand-deepening in
+> `build-builtins.sh` and "Phase 3: bootstrap + seeder" describes how the core
+> was built until `design/nix-bootstrap.md` landed. It is kept as the record of
+> why the evaluator looks the way it does. Today the repo's root `.caos-expr`
+> builds the core with the `nix=v1` primitive and grafts it in at `caos-core/`;
+> read `design/nix-bootstrap.md` for the current design.
+
 Caos provides a standard way for trees to express the computation required build tools or otherwise work with the tree
 
 Examples:

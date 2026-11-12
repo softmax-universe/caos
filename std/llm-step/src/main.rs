@@ -1848,7 +1848,7 @@ fn dispatch_started(
         .input_commit
         .as_ref()
         .ok_or("compute tool.start has no input source tree")?;
-    let (ws, wc) = materialize_source_tree(state, commit)?;
+    let (ws, wc) = materialize_source_tree(commit)?;
     let mut extras = vec![
         ("current-tool", Arg::Lit(call.name.as_str())),
         ("ws", Arg::Path(ws.as_str())),

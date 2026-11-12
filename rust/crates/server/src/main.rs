@@ -120,7 +120,8 @@ struct Config {
     /// but not the caos that ran it. Where a server's behavior changes without
     /// any of those moving, a stale entry is served as a hit: CLAUDE.md records
     /// the observed case, a rebuilt `caos` binary leaving a seeded sentinel's
-    /// key unmoved so redis hands back the previous deploy's worker image. Any
+    /// key unmoved so redis handed back the previous deploy's worker image
+    /// (there are no seeded sentinels any more, but the namespace is kept). Any
     /// value that identifies the build closes that, and folding it into the KEY
     /// beats invalidating entries — nothing has to be deleted, so nothing has to
     /// be deleted correctly.

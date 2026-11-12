@@ -70,15 +70,6 @@
 #                             CAOS_REGISTRY_HTTP) is inherited from ours;
 #                             CAOS_SERVER_URL is not, because this script knows
 #                             where its own server is.
-#   CAOS_STACK_SEEDER         "yes" to run the core-seeder-runner (the bootstrap
-#                             answerer, design/caos-expr.md Phase 3), "no"/unset
-#                             otherwise. It answers seeded arg-tree keys from
-#                             the seed tree, spawning no container. Default off:
-#                             the seed placement only PUBLISHES.
-#   CAOS_SEED_TREE            the tree of seed records the seeder answers from.
-#                             Normally produced by the publish above; settable
-#                             directly for a placement that seeds without
-#                             publishing. Required when SEEDER=yes.
 #   CAOS_STACK_SEED_GIT       optional: a prebuilt server repo to start from.
 #                             std published at image build time rides in the
 #                             image as one of these (design/one-stack-image.md,

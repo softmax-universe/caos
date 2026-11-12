@@ -1891,10 +1891,10 @@ sandbox = false''
           caos-worker-cargo-docker = workerCargoImage;
           # The nix primitive's image (design/nix-bootstrap.md).
           caos-worker-nix-docker = workerNixImage;
-          # The core's fast-moving layers (see `coreLayerCaos`).
-          caos-core-layer-caos = coreLayerCaos;
-          caos-core-layer-worker-runner = coreLayerWorker "worker-runner";
-          caos-core-layer-worker-cargo = coreLayerWorker "worker-cargo";
+          # Everything in the core that depends on the workspace, as ONE output
+          # (see `caosCoreParts`): the caos and /worker layers and the two
+          # worker binaries.
+          caos-core-parts = caosCoreParts;
 
           # The flake-builder contract (design/flake-images.md): handed a tree,
           # the builder builds `#caosImage`. What this flake defines under that

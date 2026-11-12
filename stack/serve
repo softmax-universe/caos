@@ -54,13 +54,13 @@
 #                             which is what makes the seed legal inside the
 #                             flake-builder container (it holds no engine socket
 #                             grant, and does not need one).
-#   CAOS_STACK_PUBLISH        "yes" to publish std into this stack once the
-#                             server and registry are up — build-builtins.sh,
-#                             run HERE and nowhere else. This is the only
-#                             publish in the tree, and it is here because its
-#                             output (the seed tree) is what the seeder below
-#                             needs: adjacent lines, a value between them, no
-#                             name in the middle for anyone else to write.
+#   CAOS_STACK_PUBLISH        "yes" to run build-builtins.sh once the server
+#                             and registry are up: it streams the nix
+#                             primitive's image to the registry and names it
+#                             for the server (CAOS_NIX_IMAGE_FILE). Run HERE
+#                             and nowhere else. Nothing else is published:
+#                             the core is built by the primitive, from the
+#                             tree's own flake, when something asks for it.
 #   CAOS_STACK_PUBLISH_SCRIPT the build-builtins.sh to run (required when
 #                             PUBLISH=yes). Its DIRECTORY is the tree it
 #                             publishes from — build-builtins `cd`s to its own

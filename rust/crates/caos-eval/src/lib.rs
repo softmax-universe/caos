@@ -1403,7 +1403,11 @@ mod evaluated_tests {
             host.put(gix::objs::Kind::Blob, expr.as_bytes().to_vec()),
         )];
         for &(name, body) in files {
-            entries.push((name, false, host.put(gix::objs::Kind::Blob, body.as_bytes().to_vec())));
+            entries.push((
+                name,
+                false,
+                host.put(gix::objs::Kind::Blob, body.as_bytes().to_vec()),
+            ));
         }
         let root = host.tree(entries);
         let (kind, oid) = eval_path(host, &root.to_string(), "")?;

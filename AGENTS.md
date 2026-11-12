@@ -303,18 +303,12 @@ work is **share what is keyed by CONTENT, and give everything else a name of
 the container's own.** Where it was backwards, none of the failures looked like
 concurrency.
 
-- **A seed record is keyed by NAME, so a second publisher REPLACES yours.** This
-  is why the seed tree is now PASSED BY VALUE — `stack/serve` runs
-  `stack/build-builtins.sh`, takes the tree it prints on stdout, and starts the
-  seeder with it — rather than written to `refs/caos/seed` and polled for. With
-  a ref, two trees differing under `std/` differ in `required`, so the loser's
-  keys vanish and its jobs park until the 503 that blames capacity; and two
-  BUILDS of caos are worse, because `required` is identical and only `result`
-  differs, so the loser's seeder silently answers with the winner's binaries.
-  The whole visible trace of that was one line —
-  `core-seeder-runner: deep-deps now answers tree X (was tree Y)`. Both
-  reproduced with two dev stacks against one host. If you ever reintroduce a
-  name between a publisher and an answerer, this is what you are signing up for.
+- **A name between a publisher and an answerer is a place two stacks collide.**
+  The core used to be answered from seed records keyed by NAME, so a second
+  publisher replaced the first's and its seeder silently answered with the
+  other build's binaries. There is no seeder now: the core is built by a
+  primitive whose key is the flake it builds. If you ever reintroduce a shared
+  name for something a stack publishes, this is what you are signing up for.
 - **One fixed path under a shared volume is one stack's answer for all of
   them.** `/caos-dev/bin` was the symlink `std/caos-test` reads to find the
   client it just built, so the stack that started second repointed it and the

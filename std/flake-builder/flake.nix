@@ -103,5 +103,16 @@
             "aarch64-linux"
           ]
       );
+      lib = builtins.listToAttrs (
+        map
+          (system: {
+            name = system;
+            value.imageWith = forSystem system;
+          })
+          [
+            "x86_64-linux"
+            "aarch64-linux"
+          ]
+      );
     };
 }

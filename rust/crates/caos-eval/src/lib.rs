@@ -700,35 +700,37 @@ fn eval_graft(
         let (name, _, _) = parse_arg(tok)?;
         if name == GRAFT_IN_ARG {
             if base.replace(tok).is_some() {
-                return Err("eval-path: `graft` given --in twice".to_string());
+                return Err(format!("eval-path: `{verb}` given --in twice"));
             }
             continue;
         }
         if name == "." || name == ".." || name == MOUNTS_FILE || name == ".caos-expr" {
-            return Err(format!("eval-path: `graft` cannot set the entry {name:?}"));
+            return Err(format!("eval-path: `{verb}` cannot set the entry {name:?}"));
         }
         if toks
             .iter()
             .any(|t| parse_arg(t).map(|(n, _, _)| n == name).unwrap_or(false))
         {
-            return Err(format!("eval-path: `graft` given --{name} twice"));
+            return Err(format!("eval-path: `{verb}` given --{name} twice"));
         }
         toks.push(tok);
     }
     if toks.is_empty() {
-        return Err("eval-path: `graft` needs at least one --<name>=<value> entry".to_string());
+        return Err(format!(
+            "eval-path: `{verb}` needs at least one --<name>=<value> entry"
+        ));
     }
     let mut entries = match base {
         None => Vec::new(),
         Some(tok) => {
             let input = eval_expr_args(host, input_tree, &[tok], env, vars)?
                 .pop()
-                .ok_or("eval-path: `graft` --in resolved to nothing")?;
+                .ok_or("eval-path: --in resolved to nothing")?;
             if !input.mode.is_tree() {
-                return Err("eval-path: `graft` --in must name a tree".to_string());
+                return Err(format!("eval-path: `{verb}` --in must name a tree"));
             }
             host.fetch_tree_entries(&input.oid.to_string())?
-                .ok_or("eval-path: `graft` --in is not a tree")?
+                .ok_or("eval-path: --in is not a tree")?
         }
     };
     let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;

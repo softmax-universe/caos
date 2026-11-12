@@ -917,7 +917,7 @@ impl GitStore {
                         && !fetched
                         && !self.has_local(oid).map_err(StoreError::Other)?
                     {
-                        self.fetch_object(oid).map_err(StoreError::Other)?;
+                        self.fetch_missing(oid).map_err(StoreError::Other)?;
                         fetched = true;
                     } else {
                         restarted = true;

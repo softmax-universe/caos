@@ -906,7 +906,7 @@ impl GitStore {
                     return Ok(bytes);
                 }
                 BatchResult::Missing if self.remote.is_some() && !fetched => {
-                    self.fetch_object(oid).map_err(StoreError::Other)?;
+                    self.fetch_missing(oid).map_err(StoreError::Other)?;
                     fetched = true;
                     self.reset_batch();
                 }

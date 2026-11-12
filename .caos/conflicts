@@ -1,8 +1,0 @@
-100644 e83d07a782513c721a23d2d4e418faa33279f311 1	tests/cloud-setup/worker.go
-100644 3cc135b8187a55b9064ebb6f056053c91e8d7834 2	tests/cloud-setup/worker.go
-100644 333f2a0535cf1a411b487287eea73c8487fa9e0a 3	tests/cloud-setup/worker.go
-
-Auto-merging integrations/claude-code/cloud/README.md
-Auto-merging integrations/claude-code/cloud/bootstrap.go
-Auto-merging tests/cloud-setup/worker.go
-CONFLICT (content): Merge conflict in tests/cloud-setup/worker.go

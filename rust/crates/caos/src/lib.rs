@@ -3313,8 +3313,8 @@ pub use git_locator::{parse_git_ref, GitRef};
 /// reachable at all. A raw walk hands the evaluator a bare `std/<x>` directory
 /// whose expression names `DEEP-DEPS/<dep>` mounts that only exist once the ROOT
 /// expression has deepened the tree, so it fails with `base path "DEEP-DEPS/…"
-/// not found in tree`; and a seeded entry like `std/rustc` forms its key from
-/// its *deepened* entry, which a raw fetch cannot reproduce. Descending through
+/// not found in tree`; and an entry's key is formed from its *deepened*
+/// tree, which a raw fetch cannot reproduce. Descending through
 /// evaluation makes a pinned consumer see caos exactly as caos sees itself.
 ///
 /// One request, not a walk: `/eval` does the fetch and the descent

@@ -337,15 +337,10 @@ concurrency.
 - **A concurrency fix is not tested by one stack.** Run two, from two trees that
   really differ, at the same time — `git clone --local` two worktrees, put an
   `eprintln!` marker in `worker-deep-deps` in each, `caos-cli run-tool caos-test
-  --only=hello` in both at once — and then read
-  `/caos-dev/runs/*/logs/core-seeder-runner.log`: each stack must answer its OWN
-  `deep-deps` tree, and each `runs/*/bin` must point at its own
-  `caos-test-stack-inputs`. A green suite from one of them proves nothing.
-  Do NOT diverge the trees by editing a SEEDED std entry (`std/deep-deps`,
-  `std/rustc`, `std/runner`, `std/cargo`, `std/flake-builder`): the HOST's
-  seeder has to answer for those while resolving `caos-test`'s own image, so the
-  run dies at the host with a 503 naming `docker://seeded-…` before either dev
-  stack exists. Diverge `rust/` instead.
+  --only=hello` in both at once — and then check that each `runs/*/bin` points
+  at its own `caos-test-stack-inputs` and that each stack's core was built from
+  its own tree. A green suite from one of them proves nothing. Diverge `rust/`
+  rather than `tests/`, which the core's build never sees.
 
 # Before committing
 

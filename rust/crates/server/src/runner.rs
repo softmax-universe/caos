@@ -371,21 +371,6 @@ pub(crate) fn dispatch(
         let nonce = new_nonce(id);
         st.by_nonce.insert(nonce.clone(), id);
         let deadline = Instant::now() + pending_timeout();
-        // A SEEDED SENTINEL IS FOR A SEEDER, AND FOR NOBODY ELSE. `docker://seeded…`
-        // names no registry image; it is a key a core-seeder-runner answers with a
-        // pre-built result (design/caos-expr.md, Phase 3). A generic runner that
-        // claims one cannot do anything but `docker run seeded-deep-deps` and die
-        // — and `offer_job` prefers the most specific poll, so the ONLY way that
-        // happens is a seeder that has not parked its polls yet. That window is
-        // real: a stack whose seed ref is published after boot answers nothing
-        // until the seeder's next rescan, and the caller sees a docker error
-        // pointing nowhere near the cause (observed, from caos-tools/build/worker.sh
-        // publishing std and resolving it moments later).
-        //
-        // Deferring generic polls for the WHOLE pending window makes the sentinel
-        // contract what it always claimed to be: it waits for an answerer, and if
-        // none ever comes it fails loudly on the pending timeout.
-        let defer_generic_until = if seeded { Some(deadline) } else { None };
         let key = job_key(&arg_entries);
         st.jobs.insert(
             id,
@@ -397,7 +382,7 @@ pub(crate) fn dispatch(
                 nonce,
                 phase: Phase::Pending {
                     deadline,
-                    defer_generic_until,
+                    defer_generic_until: None,
                 },
                 enqueued: Instant::now(),
                 events: event_tx,
@@ -409,19 +394,10 @@ pub(crate) fn dispatch(
         id
     };
 
-    // A seeded sentinel defers generic runners for its whole pending window, so
-    // when it goes unanswered NOTHING happens — no container starts, no log
-    // line appears, and the machine sits idle for 900s before a 503 that blames
-    // capacity. Wake once at the grace point to say what is actually true.
-    let mut seeded_check = if seeded {
-        Some(Instant::now() + seeded_grace())
-    } else {
-        None
-    };
 
     loop {
         // Sleep until the job's current phase deadline (the result sender wakes
-        // us early through the channel), or the seeded grace point if sooner.
+        // us early through the channel).
         let wait = {
             let st = lock();
             match st.jobs.get(&id).map(|j| &j.phase) {
@@ -438,10 +414,6 @@ pub(crate) fn dispatch(
                 // Job already resolved and removed: the outcome is in the channel.
                 None => Duration::ZERO,
             }
-        };
-        let wait = match seeded_check {
-            Some(at) => wait.min(at.saturating_duration_since(Instant::now())),
-            None => wait,
         };
         match event_rx.recv_timeout(wait.max(Duration::from_millis(10))) {
             Ok(DispatchEvent::Note(note)) => on_note(note),

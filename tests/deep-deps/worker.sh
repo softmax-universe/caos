@@ -171,6 +171,23 @@ evaluated)
   [ -e "$F/DEEP-DEPS/shared/bar.txt" ] || fail "deepened foo missing its shared dep"
   echo "  ok: evaluation deepened the tree and dug into a package's node" >&2
 
+  echo "== a mount listed in .caos-mounts is carried across, never walked ==" >&2
+  deepen mounted mounts
+  ;;
+
+mounts)
+  M=/cas/args/result; caos get -r "$M" || fail "reading the deepened tree"
+  IN=$(fixture mounted); caos get -r "$IN"
+  [ "$(caos hash "$M/vendor/core")" = "$(caos hash "$IN/vendor/core")" ] \
+    || fail "the mount was rewritten"
+  [ -e "$M/vendor/core/tool/DEPS" ] || fail "the mount's own DEPS was consumed"
+  [ "$(caos hash "$M/app/DEEP-DEPS/tool")" = "$(caos hash "$IN/vendor/core/tool")" ] \
+    || fail "a dep inside the mount was not mounted as-is"
+  [ -e "$M/app/DEEP-DEPS/foo/DEEP-DEPS/shared/bar.txt" ] \
+    || fail "the rest of the tree stopped deepening"
+  [ "$(cat "$M/.caos-mounts")" = "vendor/core" ] || fail ".caos-mounts was lost"
+  echo "  ok: mount untouched, a dep inside it mounted by oid, the rest deepened" >&2
+
   printf 'deep-deps: ALL PASS\n' > /tmp/report
   cat /tmp/report >&2
   caos put /tmp/report /cas/out

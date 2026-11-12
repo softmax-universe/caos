@@ -44,7 +44,11 @@ hanging polls and answers them.
 
 Two endpoints. Both take `Authorization: Bearer <CAOS_RUNNER_TOKEN>` (shared
 secret from env; the job payload carries the token so children inherit it —
-closes "anyone can poll jobs containing curried creds").
+closes "anyone can poll jobs containing curried creds"). `stack/serve` mints
+the token on first boot and keeps it at `$CAOS_STACK_STATE/runner-token`, so
+every placement runs with auth on unless it says `CAOS_RUNNER_TOKEN=none`; a
+runner outside the group (a Firecracker pool on a KVM host) reads it from
+there.
 
 ### `POST /runner/poll`
 

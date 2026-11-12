@@ -69,29 +69,225 @@ pub(crate) struct Config {
     /// content-addressed, so a cached answer cannot go stale, and the same
     /// handful of images run over and over.
     grants: Mutex<HashMap<String, ImageGrants>>,
+    /// Ceilings every worker container runs under. See [`Limits`].
+    limits: Limits,
+    /// Which images may be granted host-level power. See [`Trust`].
+    trust: Trust,
+}
+
+/// Resource ceilings for a worker container, as `docker run` flags.
+///
+/// Capacity here is counted in SLOTS, and a slot says nothing about memory: one
+/// runaway `cargo test` or an agent's bash tool could take the whole host, and
+/// the host is where redis, the registry and the server also live (caosd is one
+/// process group), so a worker that eats the machine takes the stack with it.
+///
+/// Each ceiling is an env var with three readings: unset means the DEFAULT
+/// below, `0` (or `none`) means no limit, anything else is passed to the engine
+/// verbatim (`CAOS_WORKER_MEMORY=16g`, `CAOS_WORKER_CPUS=4`,
+/// `CAOS_WORKER_PIDS_LIMIT=4096`).
+///
+/// The defaults are OPPORTUNISTIC, an explicit value is not. A default applies
+/// only where `docker info` reports the engine can enforce it (a Docker engine
+/// on cgroup v2 says `MemoryLimit: true`, `PidsLimit: true`); the podman a dev
+/// stack carries runs with `cgroups = "disabled"` (dev/devbox/flake.nix) and
+/// reports neither, and a limit it cannot apply would fail every job rather
+/// than bound one. A value the operator SET is passed through whatever the
+/// engine says, so a misconfiguration fails loudly on the first job instead of
+/// silently running unbounded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Limits {
+    /// `--memory`. Default: three quarters of the host's MemTotal, so no
+    /// single worker can take the stack's own share.
+    memory: Option<String>,
+    /// `--cpus`. No default: a cap on CPU slows work without protecting
+    /// anything, and the kernel already shares fairly.
+    cpus: Option<String>,
+    /// `--pids-limit`. Default 32768 (the classic pid_max): room for a dev
+    /// stack's nested engine and its 48 workers, fatal for a fork bomb.
+    pids: Option<String>,
+}
+
+/// Three-quarters of the host's memory, as a `--memory` value in MiB.
+fn default_memory_mib() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kib / 1024 * 3 / 4).filter(|mib| *mib > 0)
+}
+
+/// One ceiling's env var: `None` for "no limit", `Some(value)` to pass on.
+/// `default` is used when the var is unset, and only when `supported`.
+fn limit_from_env(name: &str, default: Option<String>, supported: bool) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let value = value.trim().to_string();
+            if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Err(_) => default.filter(|_| supported),
+    }
+}
+
+/// What the engine says it can enforce: `(memory, pids)`. Docker's `info`
+/// carries both as top-level booleans; anything else (podman's differs, and an
+/// engine that cannot be asked) reads as "neither", which only withholds the
+/// DEFAULTS — an explicit `CAOS_WORKER_*` still applies.
+fn engine_limit_support(docker_bin: &str, docker_args: &[String]) -> (bool, bool) {
+    let out = Command::new(docker_bin)
+        .args(docker_args)
+        .args(["info", "--format", "{{json .}}"])
+        .output();
+    let Ok(out) = out else { return (false, false) };
+    if !out.status.success() {
+        return (false, false);
+    }
+    let Ok(info) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return (false, false);
+    };
+    let flag = |name: &str| info.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    (flag("MemoryLimit"), flag("PidsLimit"))
+}
+
+impl Limits {
+    fn from_env(docker_bin: &str, docker_args: &[String]) -> Limits {
+        let (memory_ok, pids_ok) = engine_limit_support(docker_bin, docker_args);
+        Limits {
+            memory: limit_from_env(
+                "CAOS_WORKER_MEMORY",
+                default_memory_mib().map(|mib| format!("{mib}m")),
+                memory_ok,
+            ),
+            cpus: limit_from_env("CAOS_WORKER_CPUS", None, true),
+            pids: limit_from_env("CAOS_WORKER_PIDS_LIMIT", Some("32768".to_string()), pids_ok),
+        }
+    }
+
+    /// The `docker run` flags for these ceilings.
+    fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(memory) = &self.memory {
+            args.extend(["--memory".to_string(), memory.clone()]);
+        }
+        if let Some(cpus) = &self.cpus {
+            args.extend(["--cpus".to_string(), cpus.clone()]);
+        }
+        if let Some(pids) = &self.pids {
+            args.extend(["--pids-limit".to_string(), pids.clone()]);
+        }
+        args
+    }
+
+    fn describe(&self) -> String {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "unlimited".to_string());
+        format!(
+            "memory {}, cpus {}, pids {}",
+            show(&self.memory),
+            show(&self.cpus),
+            show(&self.pids)
+        )
+    }
+}
+
+/// Which images this runner will grant host-level power to: the engine socket,
+/// CAP_SYS_ADMIN (with seccomp and AppArmor off), and device passthrough. Each
+/// is root-equivalent on the host, or close to it.
+///
+/// A grant is DECLARED by the image's author, in the image's own config env,
+/// and that is a statement of need, not of trust: anyone who can publish an
+/// image to this server can declare one. Whether the declaration is honored is
+/// this runner's decision, made from `CAOS_RUNNER_TRUSTED_IMAGES`:
+///
+/// - unset: every declared grant is honored (how it always was — right for a
+///   single-tenant host, and logged as such per image so it is a choice);
+/// - `none`: no image is granted any of the three, whatever it declares;
+/// - a space- or comma-separated list of `sha256:<digest>` (or full refs):
+///   only those images are. A digest is the image's content, so the list
+///   names exactly the images someone looked at.
+///
+/// `CAOS_GRANT_VOLUMES` is outside this gate on purpose: runnerd derives the
+/// volume NAMES, so a volume grant can reach only this deployment's own
+/// storage, never the host's.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Trust {
+    Everyone,
+    Only(Vec<String>),
+}
+
+impl Trust {
+    fn from_env() -> Trust {
+        match std::env::var("CAOS_RUNNER_TRUSTED_IMAGES") {
+            Ok(list) if !list.trim().is_empty() => Trust::Only(
+                list.split(|c: char| c.is_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            _ => Trust::Everyone,
+        }
+    }
+
+    /// Is `image_ref` one this runner grants host-level power to? A listed
+    /// entry matches the whole ref or its digest (the part after `@`).
+    fn allows(&self, image_ref: &str) -> bool {
+        match self {
+            Trust::Everyone => true,
+            Trust::Only(list) => {
+                let digest = image_ref.rsplit_once('@').map(|(_, d)| d);
+                list.iter()
+                    .any(|entry| entry == image_ref || Some(entry.as_str()) == digest)
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Trust::Everyone => "granting every image what it declares".to_string(),
+            Trust::Only(list) if list.is_empty() => "granting no image host power".to_string(),
+            Trust::Only(list) => format!("granting host power to {} trusted image(s)", list.len()),
+        }
+    }
 }
 
 impl Config {
     pub(crate) fn from_env() -> Config {
+        let docker_bin = env_or("CAOS_DOCKER_BIN", "docker");
+        let docker_args: Vec<String> = std::env::var("CAOS_DOCKER_ARGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let limits = Limits::from_env(&docker_bin, &docker_args);
         Config {
             network: env_or("CAOS_DOCKER_NETWORK", "caos-net"),
-            docker_bin: env_or("CAOS_DOCKER_BIN", "docker"),
-            docker_args: std::env::var("CAOS_DOCKER_ARGS")
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect(),
+            docker_bin,
+            docker_args,
             grants: Mutex::new(HashMap::new()),
             socket: std::env::var("CAOS_RUNNER_SOCKET")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            limits,
+            trust: Trust::from_env(),
         }
     }
 }
 
 impl Backend for Config {
     fn describe(&self) -> String {
-        format!("network {}", self.network)
+        format!(
+            "network {}, limits ({}), {}",
+            self.network,
+            self.limits.describe(),
+            self.trust.describe()
+        )
     }
 
     fn reap_leftovers(&self) {
@@ -242,6 +438,33 @@ fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
         // that goes wrong reads as "nothing granted".
         _ => eprintln!("caos-runnerd: cannot inspect {image_ref}; granting it nothing"),
     }
+    // The trust decision, applied where the grants are decided so no later
+    // reader can forget it: an untrusted image's host-level declarations are
+    // dropped here, and the memo below remembers the DECISION, not the claim.
+    let asks_host_power = grants.socket || grants.sys_admin || !grants.devices.is_empty();
+    if asks_host_power && !config.trust.allows(image_ref) {
+        eprintln!(
+            "caos-runnerd: {image_ref} declares host-level grants ({}) but is not in \
+             CAOS_RUNNER_TRUSTED_IMAGES; refusing them",
+            [
+                grants.socket.then_some(SOCKET_GRANT_ENV),
+                grants.sys_admin.then_some(SYS_ADMIN_GRANT_ENV),
+                (!grants.devices.is_empty()).then_some(DEVICE_GRANT_ENV),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+        );
+        grants.socket = false;
+        grants.sys_admin = false;
+        grants.devices.clear();
+    } else if asks_host_power && config.trust == Trust::Everyone {
+        eprintln!(
+            "caos-runnerd: {image_ref} declares host-level grants and CAOS_RUNNER_TRUSTED_IMAGES \
+             is unset, so its own declaration is trusted"
+        );
+    }
     if grants.socket {
         eprintln!("caos-runnerd: {image_ref} declares {SOCKET_GRANT_ENV}; granting engine socket");
     }
@@ -292,7 +515,8 @@ fn run_container(config: &Config, common: &Common, slot: u32, job: &Job) -> Outc
         // the engine's own copy is a second one nobody reads: conmon wrote it to
         // the store's disk at ~19 MB/s in a suite run, fsyncing as it went, on
         // the volume whose fsync latency is what every container start waits on.
-        .args(["--log-driver", "none"]);
+        .args(["--log-driver", "none"])
+        .args(config.limits.args());
     // One inspect answers both grants, memoized together.
     let grants = image_grants(config, &job.image_ref);
     if let Some(sock) = &config.socket {
@@ -444,5 +668,79 @@ fn reap_leftovers(config: &Config) {
     eprintln!("caos-runnerd: reaping {} leftover container(s)", ids.len());
     for id in ids {
         remove_container(config, id);
+    }
+}
+
+#[cfg(test)]
+mod limits_and_trust_tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_is_flags_and_none_is_no_flags() {
+        let limits = Limits {
+            memory: Some("4g".to_string()),
+            cpus: None,
+            pids: Some("512".to_string()),
+        };
+        assert_eq!(limits.args(), ["--memory", "4g", "--pids-limit", "512"]);
+        assert!(Limits::default().args().is_empty());
+    }
+
+    #[test]
+    fn a_set_value_applies_whatever_the_engine_says_and_zero_lifts_it() {
+        // No engine support: the default is withheld, but a set value is not.
+        assert_eq!(
+            limit_from_env("CAOS_TEST_LIMIT_UNSET", Some("1g".into()), false),
+            None
+        );
+        assert_eq!(
+            limit_from_env("CAOS_TEST_LIMIT_UNSET", Some("1g".into()), true),
+            Some("1g".to_string())
+        );
+        std::env::set_var("CAOS_TEST_LIMIT_SET", "2g");
+        assert_eq!(
+            limit_from_env("CAOS_TEST_LIMIT_SET", Some("1g".into()), false),
+            Some("2g".to_string())
+        );
+        for lifted in ["0", "none", "NONE", ""] {
+            std::env::set_var("CAOS_TEST_LIMIT_LIFTED", lifted);
+            assert_eq!(
+                limit_from_env("CAOS_TEST_LIMIT_LIFTED", Some("1g".into()), true),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn trust_matches_a_digest_or_a_whole_ref() {
+        let digest = "sha256:0123456789abcdef";
+        let image = format!("localhost:5000/caos/images@{digest}");
+        let only = Trust::Only(vec![digest.to_string()]);
+        assert!(only.allows(&image));
+        assert!(!only.allows("localhost:5000/caos/images@sha256:ffff"));
+        assert!(Trust::Only(vec![image.clone()]).allows(&image));
+        assert!(!Trust::Only(vec![]).allows(&image));
+        assert!(Trust::Everyone.allows(&image));
+    }
+
+    #[test]
+    fn trust_from_env_reads_unset_none_and_a_list() {
+        std::env::remove_var("CAOS_RUNNER_TRUSTED_IMAGES");
+        assert_eq!(Trust::from_env(), Trust::Everyone);
+        std::env::set_var("CAOS_RUNNER_TRUSTED_IMAGES", "none");
+        assert_eq!(Trust::from_env(), Trust::Only(vec![]));
+        std::env::set_var(
+            "CAOS_RUNNER_TRUSTED_IMAGES",
+            "sha256:aa, sha256:bb sha256:cc",
+        );
+        assert_eq!(
+            Trust::from_env(),
+            Trust::Only(vec![
+                "sha256:aa".into(),
+                "sha256:bb".into(),
+                "sha256:cc".into()
+            ])
+        );
+        std::env::remove_var("CAOS_RUNNER_TRUSTED_IMAGES");
     }
 }

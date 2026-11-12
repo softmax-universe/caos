@@ -34,7 +34,12 @@
 //! `CAOS_RUNNER_SOCKET` (an engine socket, granted only to images that declare
 //! `CAOS_GRANT_ENGINE_SOCKET=1` in their own config env; `CAOS_GRANT_VOLUMES`
 //! is declared the same way and backs the listed mountpoints with persistent
-//! named volumes), and
+//! named volumes), `CAOS_RUNNER_TRUSTED_IMAGES` (which images may be granted
+//! host-level power — the socket, CAP_SYS_ADMIN, devices — by digest; unset
+//! trusts every image's own declaration, `none` trusts no one; see
+//! `docker::Trust`), `CAOS_WORKER_MEMORY` / `CAOS_WORKER_CPUS` /
+//! `CAOS_WORKER_PIDS_LIMIT` (ceilings on every worker container; see
+//! `docker::Limits` for the defaults and `0` to lift one), and
 //! `CAOS_WORKER_REDIS_ADDR` (a redis a worker may use for its own caching,
 //! injected into the containers; unset means none is offered).
 //!

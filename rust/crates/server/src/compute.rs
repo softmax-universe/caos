@@ -2307,6 +2307,9 @@ fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), 
 /// git images (the default): convert it to a real image, push it to the registry,
 /// and return a digest reference into the registry.
 fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
+    if image.starts_with(caos_eval::NIX_SCHEME) {
+        return resolve_image(config, &nix_image(image)?);
+    }
     if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
         validate_docker_reference(reference, true).map_err(|e| HttpError::new(400, e))?;
         return Ok(reference.to_string());

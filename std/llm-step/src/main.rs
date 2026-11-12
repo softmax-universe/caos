@@ -1424,10 +1424,7 @@ fn inline_files_path(call: &Call) -> Option<(&'static str, String)> {
     Some((key, path.to_string()))
 }
 
-fn materialize_source_tree(
-    state: &mut progress::State,
-    commit: &Oid,
-) -> Result<(String, String), String> {
+fn materialize_source_tree(commit: &Oid) -> Result<(String, String), String> {
     static MATERIALIZED: OnceLock<Mutex<HashMap<Oid, (String, String)>>> = OnceLock::new();
     let mut memo = MATERIALIZED
         .get_or_init(Default::default)

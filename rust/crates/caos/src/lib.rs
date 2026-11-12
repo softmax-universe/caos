@@ -3348,10 +3348,11 @@ pub fn eval_remote_arg(
         return Ok(hit);
     }
 
-    let (kind, hash) = request_compute_url(
+    let (kind, hash) = request_compute_url_with(
         &t.server_url()?,
         &format!("/eval?root:@@={}", percent_encode(value)),
         secrets,
+        eval::trace_headers(),
     )
     .map_err(|e| format!("git ref {value:?}: {e}"))?;
     let resolved = (eval::mode_of_kind(&kind), parse_oid(&hash)?);

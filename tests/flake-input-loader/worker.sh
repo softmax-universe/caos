@@ -78,6 +78,12 @@ load() { # <rev-the-expression-pins> [<output-path>] -> the ArgTree to run
     --input-tree:@="$(input_tree)" --output-path="$out"
 }
 
+load_mounts() { # <mounts> -> the ArgTree to run
+  caos curry --base:@=/cas/args/loader \
+    --expr:@="$(expr_pinning "$SHA" mounts)" --input=demo \
+    --input-tree:@="$(input_tree)" --mounts="$1"
+}
+
 case "$stage" in
 
 start)

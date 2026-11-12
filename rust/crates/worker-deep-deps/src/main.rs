@@ -156,19 +156,19 @@ fn full(base: &str, rel: &str) -> String {
 /// `memo` maps an absolute tree path to a staged directory already deepened, so
 /// a dependency reached twice is computed once. `visiting` is the current
 /// dependency chain, and it is what catches a cycle — one pass makes no server
-/// round trip, so there is no run-cycle detection to fall back on.
-fn deepen(
-    base: &str,
-    rel: &str,
-    into: &Path,
-    memo: &mut HashMap<String, PathBuf>,
-    visiting: &mut Vec<String>,
-) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}/{rel}")
-    };
+/// round trip, so there is no run-cycle detection to fall back on. `mounts`
+/// are carried across by reference and never walked ([`fetch`]).
+struct Pass<'a> {
+    base: &'a str,
+    mounts: &'a [String],
+    memo: &'a mut HashMap<String, PathBuf>,
+    visiting: Vec<String>,
+}
+
+impl Pass<'_> {
+    fn deepen(&mut self, rel: &str, into: &Path) -> Result<(), String> {
+    let base = self.base;
+    let dir = full(base, rel);
 
     let mut deps_file: Option<PathBuf> = None;
     let mut subdirs: Vec<(String, PathBuf)> = Vec::new();

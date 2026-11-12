@@ -1694,7 +1694,10 @@ sandbox = false''
               ;;
             runner-ticket)
               # One of the three a runner on another machine pins a local port
-              # to (prod/runner). Read from the listener's file, as `ticket` is.
+              # to (prod/runner). Read from the listener's file, as `ticket` is,
+              # but BARE: the file holds the `caos://` URL a git remote takes,
+              # and `iroh-vhost pin` parses the endpoint ticket alone and refuses
+              # the URL ("wrong prefix, expected endpoint").
               case "''${2:-}" in
               server | registry | redis) ;;
               *) die "usage: caosd runner-ticket <server|registry|redis>" ;;
@@ -1703,7 +1706,7 @@ sandbox = false''
               if [ ! -e "$ticket" ]; then
                 die "no $2 runner ticket here. Bring the stack up with 'caosd up --runner-tickets' (or CAOS_RUNNER_TICKETS=yes)"
               fi
-              cat "$ticket"
+              sed 's|^caos://||' "$ticket"
               ;;
             doctor)
               # Is every stored object's history stored? The server's own check

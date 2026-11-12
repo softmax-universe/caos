@@ -885,9 +885,9 @@ fn eval_expr_base(
             // Evaluate the subtree's own `.caos-expr` (if any) to the image it
             // builds — so a path to an EVALUABLE dependency (a `DEEP-DEPS/<name>`
             // mount) resolves to its image, not its raw source; a subtree with no
-            // `.caos-expr` evaluates to itself. For a seeded worker this
-            // dispatches its build — which is why forming a `run` expr's key
-            // needs that worker already seeded (design/caos-expr.md).
+            // `.caos-expr` evaluates to itself. For a worker built here this
+            // dispatches its build, so forming a `run` expr's key needs that
+            // worker built first (design/caos-expr.md).
             let (_kind, hash) = eval_path(host, &oid.to_string(), "")?;
             Ok(hash)
         }

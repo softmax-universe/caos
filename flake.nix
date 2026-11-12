@@ -1312,6 +1312,24 @@ sandbox = false''
               exit 0
               ;;
             up)
+              # Match Docker's endpoint selection: DOCKER_CONTEXT overrides
+              # DOCKER_HOST, otherwise use the selected context. Keep the socket
+              # at its host path inside the stack too: runnerd passes that path
+              # back to the host engine when granting it to nested workers.
+              if [ -n "''${DOCKER_CONTEXT:-}" ]; then
+                engine_endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
+              elif [ -n "''${DOCKER_HOST:-}" ]; then
+                engine_endpoint=$DOCKER_HOST
+              else
+                engine_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+              fi
+              case "$engine_endpoint" in
+                unix:///*) engine_socket="''${engine_endpoint#unix://}" ;;
+                *) die "caosd up needs a local Unix Docker socket; active endpoint is $engine_endpoint" ;;
+              esac
+              [ -S "$engine_socket" ] || die "caosd up: Docker endpoint is not a socket: $engine_socket"
+              docker info >/dev/null
+
               # REACHABLE BY TICKET UNLESS TOLD OTHERWISE. `caosd up` adds the
               # `caos://` listener (design/iroh-transport.md), which publishes
               # this machine's endpoint and answers anyone holding the ticket.
@@ -1466,7 +1484,8 @@ sandbox = false''
                 -p 9090:80 -p "$REGISTRY_PORT:5000" "''${iroh_publish[@]}" \
                 -v "$CAOS_DATA/stack:/state" \
                 -v caos-vol-mounted-nix:/mounted-nix \
-                -v /var/run/docker.sock:/var/run/docker.sock \
+                --mount "type=bind,source=$engine_socket,target=$engine_socket" \
+                -e "DOCKER_HOST=unix://$engine_socket" \
                 -e CAOS_STACK_TREE=/state/tree \
                 -e CAOS_STACK_INPUTS_ATTR=caos-stack-inputs \
                 -e CAOS_STACK_STORE=/mounted-nix \
@@ -1489,7 +1508,7 @@ sandbox = false''
                 -e CAOS_STACK_RUNNER_REDIS_ADDR=caos-redis:6379 \
                 -e CAOS_REGISTRY_PULL_HOST="$REGISTRY" \
                 -e CAOS_DOCKER_NETWORK="$NET" \
-                -e CAOS_RUNNER_SOCKET=/var/run/docker.sock \
+                -e "CAOS_RUNNER_SOCKET=$engine_socket" \
                 -e CAOS_PENDING_TIMEOUT_SECS=900 \
                 caos-stack:latest >/dev/null
 

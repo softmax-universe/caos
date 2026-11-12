@@ -564,12 +564,12 @@ func seedCommit(repoDir, pinRel, server, sha string) string {
 		}
 	}
 	committed := func(name string) []byte {
-		cmd := exec.Command("git", "cat-file", "blob", "HEAD:"+name)
+		cmd := exec.Command("git", "cat-file", "blob", "HEAD:"+pinRel+name)
 		cmd.Dir = repoDir
 		out, err := cmd.Output()
 		if err != nil {
 			fatal("the checkout cannot be repointed at the dev server: HEAD has no %s\n"+
-				"  Without it this session runs your client against the pinned tools.", name)
+				"  Without it this session runs your client against the pinned tools.", pinRel+name)
 		}
 		return out
 	}

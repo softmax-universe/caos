@@ -458,6 +458,12 @@ impl GitStore {
             None => return self.fetch_object(oid),
         };
         let (kind, bytes) = fetched;
+        let kind = match kind.as_str() {
+            "blob" => ObjectKind::Blob,
+            "tree" => ObjectKind::Tree,
+            "commit" => ObjectKind::Commit,
+            other => return Err(format!("{oid} was fetched as an unknown kind {other:?}")),
+        };
         let written = self.write_object(kind, &bytes).map_err(String::from)?;
         if written != *oid {
             return Err(format!("the object fetched as {oid} hashes to {written}"));

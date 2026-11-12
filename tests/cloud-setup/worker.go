@@ -106,12 +106,23 @@ func fixtureAssets(dir string) string {
 // mounting that revision's std at a path of the repo's choosing. Both locators
 // carry the pinned rev, which is what stage 1 has to rewrite -- the loader
 // refuses a tree whose expression and lockfile disagree.
-func fixtureRepo(dir string) string {
+func fixtureRepo(dir string) string { return fixtureRepoAt(dir, false) }
+
+// The same client repo with its flake and expression in `caos-std/` and the
+// loader mounting at `.`: the loader then runs over a directory that does not
+// change as the session does.
+func fixtureNestedRepo(dir string) string { return fixtureRepoAt(dir, true) }
+
+func fixtureRepoAt(dir string, nested bool) string {
+	outputPath, pins := "caos-std", dir
+	if nested {
+		outputPath, pins = ".", filepath.Join(dir, "caos-std")
+	}
 	expr := "# the consumer root (design/flake-inputs.md)\n" +
 		"run --base:@@=github:Metta-AI/caos?rev=" + pinRev + "&dir=std/flake-input-loader" +
 		" --in:@=. --expr=$CAOS_EXPR --input=caos" +
 		" --input-tree:@@=github:Metta-AI/caos?rev=" + pinRev + "&dir=std" +
-		" --output-path=caos-std\n"
+		" --output-path=" + outputPath + "\n"
 	lock := `{
   "nodes": {
     "root": { "inputs": { "caos": "caos", "nixpkgs": "nixpkgs" } },

@@ -723,8 +723,7 @@ parse arm and a case in each resolver. The worker `caos` has no host filesystem
 
 - `import-image <docker-archive>` (`caos-cli`) — store a docker-archive image
   (`nix build .#caos-*-docker` output) as a git-docker tree on the server,
-  printing its hash. Used to ingest images into caos so they can be `run` (and to
-  assemble the std library — see `build-builtins.sh`).
+  printing its hash. Used to ingest images into caos so they can be `run`.
 - `put <src-path> <cas-path>` (`caos`) — store an outside path into the CAS and
   record it at a `/cas` path. Files become blobs, directories trees; a symlink
   into the CAS reuses the recorded hash.

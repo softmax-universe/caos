@@ -1,0 +1,2031 @@
+{
+  description = "caos — a Rust binary, packaged into a small Docker image with Nix";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Claude Code for the watchdog's responder. nixpkgs' copy lags by weeks
+    # and the API refuses old clients for new models ("Claude Code 2.1.260
+    # does not support this model; 2.1.280 or newer is required", seen
+    # 2026-10-30); this flake tracks Anthropic's release manifest.
+    claude-code = {
+      url = "github:sadjow/claude-code-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    crane.url = "github:ipetkov/crane";
+
+    flake-utils.url = "github:numtide/flake-utils";
+
+    # The Hermes gateway `hermes-gateway` runs (integrations/hermes/gateway),
+    # separately from any caos stack. Own nixpkgs, deliberately NOT
+    # `follows`'d to this flake's -- its pinning is its own project's
+    # concern, and the two never share a build.
+    hermes-agent.url = "github:NousResearch/hermes-agent";
+  };
+
+  outputs =
+    {
+      self,
+      nixpkgs,
+      claude-code,
+      rust-overlay,
+      crane,
+      flake-utils,
+      hermes-agent,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs { inherit system overlays; };
+
+        # The revision this flake was built from, baked into the host commands
+        # so a person can tell WHICH caos they are running.
+        #
+        # This exists because the failure mode is invisible: a devShell that
+        # fails to build leaves direnv on the PREVIOUS environment ("Falling
+        # back to previous environment!"), so `caosd` can be months older than
+        # the `flake.lock` that names it — and the symptom is an error message
+        # that reads exactly like a caos bug. It cost a session. `caosd version`
+        # and the usage banners answer it in one line.
+        #
+        # `dirtyRev` when the tree has uncommitted changes, so a working build
+        # says so rather than claiming the last commit. Injected at RUNTIME (see
+        # `caos-cli`), never compiled in: a compile-time rev would re-key the
+        # Rust workspace on every commit, so a docs-only commit would rebuild
+        # everything.
+        caosRev = self.rev or self.dirtyRev or "unknown";
+
+        # The Linux system whose binaries the Docker images carry. We build for
+        # the host's architecture (no arch-cross), so on Linux this is just the
+        # host; on macOS it's the matching Linux system, whose general-purpose
+        # packages (git, tar, the docker client in the server image) are
+        # substituted prebuilt from the binary cache — no local Linux build, no VM.
+        linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
+        linuxPkgs = import nixpkgs { system = linuxSystem; inherit overlays; };
+
+        # Toolchain is pinned via ./rust-toolchain.toml + the flake.lock'd
+        # rust-overlay revision, so every build uses the same compiler.
+        #
+        # `minimal` plus exactly the two extensions that do work: clippy and
+        # rustfmt, for the checks below and for any caos-tool that runs them
+        # in-worker. NOT the `default` profile — measured, its extras over
+        # minimal are rust-std-aarch64-unknown-linux-musl (135 MiB, and this
+        # flake deliberately never arch-crosses) and rust-src (51 MiB,
+        # IDE-only — rust-toolchain.toml says as much), against 31 MiB for
+        # clippy+rustfmt. The dev shell adds rust-src back, so nothing is lost
+        # where it is wanted. Binaries are identical either way: rustc and the
+        # musl std are the SAME component derivations in every profile, and the
+        # aggregate is a link farm that cannot influence codegen.
+        #
+        # Parameterized on the package set because the cargo worker image is
+        # Linux (linuxPkgs) while the host build is the host's. On Linux those
+        # are one derivation, which is what collapses the bake and
+        # cargoArtifacts into a single compile.
+        rustChannel = (builtins.fromTOML (builtins.readFile ./rust/rust-toolchain.toml)).toolchain.channel;
+        mkRustToolchain =
+          p:
+          (if rustChannel == "stable" then p.rust-bin.stable.latest else p.rust-bin.stable.${rustChannel})
+          .minimal.override
+            {
+              extensions = [
+                "clippy"
+                "rustfmt"
+              ];
+              targets = [ muslTarget ];
+            };
+        rustToolchain = mkRustToolchain pkgs;
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+        # The cargo source: ./rust, the whole of it. Everything cargo compiles
+        # lives under that one directory — Cargo.toml, Cargo.lock,
+        # rust-toolchain.toml and crates/ — which is what lets a package DECLARE
+        # the workspace as a dependency (`../../rust rust` in a DEPS) rather
+        # than be handed the repository.
+        #
+        # It is also what retired the exclusion that used to be here. Rooting at
+        # the repo made `cleanCargoSource` sweep in every Cargo.toml in the
+        # tree, so the suite's cargo FIXTURES — tests/cargo-check/{broken,mini},
+        # tests/cargo-crates/ws — landed in the DEPENDENCY cache key and editing
+        # one rebuilt all ~176 deps. They are runtime data handed to the cargo
+        # worker as trees to check, never compiled by this build; now they are
+        # simply not under `src`.
+        #
+        # NOT cleanCargoSource: crane's filter keeps *.rs, *.toml, Cargo.lock
+        # and .cargo/config and NOTHING else, so a `include_str!("x.sh")`
+        # compiles everywhere a full tree is present and fails HERE — which is
+        # exactly how crates/worker-llm-step/src/githist/*.sh broke this build
+        # after passing the whole suite (the suite compiles over the real
+        # crates/, so the flake's filter is the one thing `run-tool test` never
+        # exercises). Keep crates/**/*.sh: scripts a worker bakes into its
+        # binary are source, not data.
+        #
+        # tests/lint/lint-flake-src.sh is the other half of this rule — it resolves every
+        # include!/include_str!/include_bytes! under rust/crates and fails if the
+        # target is not kept here, WITHOUT running nix, so the suite can hold
+        # it. Widen this filter and you widen its keep_rule.
+        #
+        # This does not widen the DEPENDENCY key: buildDepsOnly builds
+        # mkDummySrc, which keeps only Cargo.lock, .cargo/config.toml and
+        # stubbed Cargo.tomls — never the .sh.
+        src = pkgs.lib.cleanSourceWith {
+          src = pkgs.lib.cleanSource ./rust;
+          name = "source";
+          filter =
+            path: type:
+            let
+              rel = pkgs.lib.removePrefix (toString ./rust + "/") (toString path);
+              isCrateScript = pkgs.lib.hasPrefix "crates/" rel && pkgs.lib.hasSuffix ".sh" rel;
+            in
+            craneLib.filterCargoSources path type || isCrateScript;
+        };
+
+        # THE VENDORED CRATE SOURCES, named here rather than left to crane so
+        # the path is known at EVALUATION time -- the remap flag below needs it.
+        # It is the same derivation crane would compute, and every arg set in
+        # this flake shares one `src`, so one vendor dir serves all of them.
+        cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+
+        # DO NOT WRITE THE VENDOR PATHS INTO THE BINARIES IN THE FIRST PLACE.
+        #
+        # Nix decides a store path's runtime dependencies by scanning its bytes
+        # for store paths, and rustc writes the vendored crate's source path
+        # into every panic site and -- with line-tables-only -- into the DWARF
+        # line table. Left alone, all ~498 vendored crate sources become
+        # runtime dependencies of every caos binary, so they follow it into
+        # every closure, image and `nix copy`.
+        #
+        # crane's answer is removeReferencesToVendoredSources, which blanks
+        # them afterwards with one sed whose regex carries a branch per crate.
+        # That runs in postInstallHooks, BEFORE fixupPhase strips, so it scans
+        # 411 MB of line-table-carrying binaries with a 499-way alternation:
+        # 67s on a laptop and ~6 minutes on the dev box, twice per deploy.
+        #
+        # Remapping removes the work instead of making it cheaper: rustc writes
+        # `/vendor/...`, which is not a store path, so there is nothing to
+        # record and nothing to blank. It costs no debuggability -- the store
+        # path it replaces does not exist on a machine running the binary
+        # either, so a backtrace naming /vendor is exactly as useful.
+        vendorRemap = "--remap-path-prefix=${cargoVendorDir}=/vendor";
+
+        # Build for musl so the binary is fully static (crt-static is on by
+        # default for musl targets) — its runtime closure is just itself.
+        # Target the build host's architecture, no arch-cross: aarch64 on Apple
+        # Silicon / aarch64 Linux, x86_64 otherwise. rust-toolchain.toml carries
+        # the std for both musl targets so either resolves.
+        muslTarget =
+          if pkgs.stdenv.hostPlatform.isAarch64 then
+            "aarch64-unknown-linux-musl"
+          else
+            "x86_64-unknown-linux-musl";
+        muslEnvTarget = pkgs.lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] muslTarget);
+
+        # On macOS the default linker is Apple ld, which can't link Linux ELF (it
+        # rejects GNU flags like --as-needed). rust-lld ships inside the toolchain
+        # and links musl ELF cross-platform, so we need no C cross-toolchain.
+        # Linux hosts link musl with their native toolchain, so this override is
+        # Darwin-only — keeping Linux/CI builds byte-identical.
+        muslCrossLinker = pkgs.writeShellScript "caos-rust-lld" ''
+          sysroot="$(${rustToolchain}/bin/rustc --print sysroot)"
+          exec "$(echo "$sysroot"/lib/rustlib/*/bin/rust-lld)" "$@"
+        '';
+        crossLinkerEnv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          "CARGO_TARGET_${muslEnvTarget}_LINKER" = "${muslCrossLinker}";
+          "CARGO_TARGET_${muslEnvTarget}_RUSTFLAGS" = "-Clinker-flavor=ld.lld -Clink-self-contained=yes ${vendorRemap}";
+        };
+
+        # A musl C cross-compiler: rustc links musl self-contained, but
+        # C-carrying deps compile via cc-rs, which needs a real musl cc. It
+        # must be set identically here and in the bake below — it is part of
+        # the fingerprint, so a mismatch is the difference between one dep
+        # build and two. (Same expression as std/cargo/bake.nix, evaluated
+        # against each side's own package set: on Linux they are one
+        # derivation, on macOS the image's is built Linux-hosted by the remote
+        # builder, which is what BUILDING_ON_MACOS.md sets up.)
+        muslCrossCC =
+          if pkgs.stdenv.hostPlatform.isAarch64 then
+            pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
+          else
+            pkgs.pkgsCross.musl64.stdenv.cc;
+        muslCCEnv = {
+          "CC_${builtins.replaceStrings [ "-" ] [ "_" ] muslTarget}" =
+            "${muslCrossCC}/bin/${muslCrossCC.targetPrefix}cc";
+        };
+
+        # With the remap above there are no vendored store paths left in the
+        # output, so crane's blanking pass has nothing to find. Verified after
+        # the change: zero of the 498 vendor hashes appear in any binary, and
+        # nix records no reference to the vendor dir.
+        noVendorRefsToRemove = {
+          doNotRemoveReferencesToVendorDir = true;
+        };
+
+        commonArgs = {
+          inherit src cargoVendorDir;
+          RUSTFLAGS = vendorRemap;
+          strictDeps = true;
+
+          # Shared across deps + every crate so crane keys the dep cache the
+          # same way every time.
+          pname = "caos-workspace";
+          version = "0.1.0";
+
+          # These three exist to make cargoArtifacts and the cargo worker's
+          # bake (std/cargo/bake.nix, called below with this same `src` and
+          # toolchain) the SAME derivation. They used to differ only by these
+          # and the toolchain profile — never by what was compiled — so the
+          # same ~176 dependencies were built twice: once here for the
+          # binaries, once inside caos for the worker image.
+          cargoExtraArgs = "--locked --workspace";
+
+          # The two absolute paths cargo fingerprints against. The worker must
+          # materialize the workspace at exactly these locations: build-script
+          # executables and their OUT_DIRs are keyed on the target dir too.
+          postInstall = ''
+            wsroot=$(pwd -P)
+            echo -n "$wsroot" > $out/ws-root
+            targetdir="''${CARGO_TARGET_DIR:-target}"
+            case "$targetdir" in /*) ;; *) targetdir="$wsroot/$targetdir" ;; esac
+            echo -n "$targetdir" > $out/target-dir
+          '';
+
+          CARGO_BUILD_TARGET = muslTarget;
+
+          # Build everything at the dev profile (opt-level 0, no LTO, many
+          # codegen units). These are dev-stack / local artifacts, so we trade
+          # runtime speed and binary size for much faster builds — the whole
+          # point of this flake path. musl still links static at any profile
+          # (crt-static is on), so the binaries still run on any base.
+          # line-tables-only keeps file:line backtraces without baking full
+          # DWARF (plain dev debuginfo) into every image. This mirrors the cargo
+          # worker's bake (cargoBake.deps, std/cargo/bake.nix), which
+          # already builds dev.
+          CARGO_PROFILE = "dev";
+          CARGO_PROFILE_DEV_DEBUG = "line-tables-only";
+
+          # Native build inputs / runtime libs go here as the project grows,
+          # e.g. pkgs.openssl + pkgs.pkg-config for TLS. Note: C deps would
+          # need a musl cross-toolchain to stay static. (the server's gix
+          # uses default-features = false, so it stays pure-Rust / static.)
+          # buildInputs = [ ];
+          # nativeBuildInputs = [ ];
+        }
+        // crossLinkerEnv
+        // muslCCEnv;
+
+        # Build the compute/runtime workspace dependencies once and cache them
+        # separately from the crates.
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # ONE build for every binary. Each crate used to be its own
+        # `buildPackage (--package <name>)`, but all of them took the same
+        # whole-tree `src`, so any edit re-keyed and rebuilt every one of them —
+        # the split bought no incrementality while paying the per-binary compile
+        # + link N times over. A single `--workspace` build does the shared work
+        # once and parallelizes across cores. Images stay single-binary: each
+        # consumer copies one *named* binary out of this output's /bin, so
+        # nothing extra ever lands in an image.
+        workspaceBins = craneLib.buildPackage (
+          commonArgs
+          // noVendorRefsToRemove
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "--workspace";
+            doCheck = false;
+          }
+        );
+
+        # The same workspace, stamped for the TEST world (crates/caos-world).
+        # A dev stack is built from this; the host's is built from the above, so
+        # a client of one is refused by the other's server.
+        #
+        # IT HAS TO BE A SECOND COMPILE, and that is not a design choice here:
+        # the tag is `option_env!`, read by rustc, because caos-world explains
+        # why it cannot be read at runtime — the interpreter exports its
+        # environment into `worker1`, so an env-carried tag would travel with it
+        # and declare the wrong binary correct. The tag is a property of the
+        # ARTIFACT, so two worlds are two artifacts.
+        #
+        # WHAT IT DOES NOT DUPLICATE IS THE EXPENSIVE HALF. `cargoArtifacts` is
+        # `buildDepsOnly commonArgs`, and this adds nothing to `commonArgs` — so
+        # the ~176 dependencies are one derivation shared by both worlds, and
+        # only the thin workspace compile happens twice. caos-tools/build's own
+        # guard measured that split: the deps are 12.6s of a 15.0s cold build,
+        # the workspace alone 2.4s.
+        #
+        # Do NOT move the stamp into `commonArgs` to "share more". It would land
+        # in the dependency key and rebuild all of them per world, which is the
+        # exact opposite of the intent.
+        testWorkspaceBins = craneLib.buildPackage (
+          commonArgs
+          // noVendorRefsToRemove
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "--workspace";
+            doCheck = false;
+            CAOS_WORLD = "test";
+          }
+        );
+
+        # Every crate's binary is selected (by name, at copy time) from the one
+        # build above, so these are all the same derivation. The generic `caos`
+        # worker and the user-facing `caos-cli` are separate Cargo
+        # packages; consumers copy only the named binary they need.
+        caos = workspaceBins;
+        server = workspaceBins;
+        runnerd = workspaceBins;
+        worker-rustc = workspaceBins;
+        worker-runner = workspaceBins;
+        worker-cargo = workspaceBins;
+        # The agent-harness workers (design/agent-harness.md). They have no
+        # image of their own: each runs as curry(runner, bin=<static binary>)
+        # in the shared runner pool, so only the binaries are exposed.
+        worker-deep-deps = workspaceBins;
+
+        # Minimal images: each contains *only* its static binary — no shell, no
+        # libc, no /nix/store. Crates are unprefixed (caos, server) but
+        # the published image names carry a `caos-` prefix.
+        # The images are Linux, but build on macOS too (no VM): the Rust binaries
+        # cross-compile for the host arch via rust-lld (see muslCrossLinker), and
+        # the server image's tools come from linuxPkgs — substituted prebuilt from
+        # the binary cache.
+
+        # Two worker images live here — the host-built streamed core: the
+        # flake-builder (below) and the runner (workerRunnerImage). Every
+        # other std entry is a literal checked-in flake tree (std/bash —
+        # design/flake-images.md part 2), each defining its
+        # own /worker, or a curry(runner, worker1=<static musl binary>)
+        # (builtinWorkerBins below).
+        #
+        # Both are built CLEAN — no caos, no user db, no /tmp. The caos
+        # additions (and the runner's /worker) are composed on at publish
+        # by build-builtins.sh as CONTENT-KEYED tar layers over these
+        # images: the same clean-image + additions-delta shape the stack
+        # stage gives every flake image, and the reason a workspace rebuild
+        # that leaves the binaries' bytes unchanged re-streams nothing.
+        # (Nix could not bake the additions anyway — it strips setuid when
+        # it seals a store path — and nix-side baking keyed them on store
+        # PATHS, which rename on every rebuild.)
+
+        # The flake-builder (design/flake-images.md): the SOLE bootstrap
+        # builtin — the one image the flake path can't build (it IS the
+        # flake path), so the host builds it. Its definition is
+        # std/flake-builder's own flake, taken AS-IS: we call its outputs
+        # function directly — the standard subflake call, no path-input
+        # lock churn — passing OUR nixpkgs (tests/lint pins the
+        # subflake's lock to the same revision). Its clean #caosImage is
+        # exactly what streams.
+        workerFlakeBuilderImage =
+          ((import ./std/flake-builder/flake.nix).outputs {
+            self = null;
+            inherit nixpkgs;
+          }).packages.${linuxSystem}.caosImage;
+
+        # std/runner as HOST-BUILT streamed core (design/flake-images.md,
+        # part 2): the pooled interpreter IMAGE every compiled worker runs
+        # on — not a worker itself (its /worker awaits a worker1; the
+        # workers are the curries over it). worker-runner is the in-image
+        # half of the runner-pool protocol — it versions with the client
+        # and the protocol, not with std content — so the host builds and
+        # streams this image; the std entry is a curry over the digest.
+        # The image here is the USERLAND ONLY: /worker rides in at publish
+        # as a content-keyed layer next to the additions (build-builtins),
+        # so this derivation depends on nothing from the workspace and a
+        # Rust edit never re-keys it.
+        workerRunnerImage = pkgs.dockerTools.buildLayeredImage {
+          name = "caos-worker-runner";
+          tag = "latest";
+          # bash provides /bin/sh too. The userland is what compiled workers
+          # — and the commands bash-tool runs for the agent — see at runtime.
+          contents = [
+            linuxPkgs.bash
+            linuxPkgs.coreutils
+            linuxPkgs.diffutils
+            linuxPkgs.gnugrep
+            linuxPkgs.gnused
+            linuxPkgs.findutils
+            linuxPkgs.gnutar
+            linuxPkgs.gzip
+          ];
+          config = {
+            # runnerd forces the entrypoint anyway; set it so the streamed
+            # compose (which renders config.Entrypoint into a Dockerfile)
+            # always has one.
+            Entrypoint = [
+              "/bin/caos"
+              "runner"
+            ];
+            Env = [ "PATH=/bin" ];
+          };
+        };
+
+        # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
+        # the one script that builds a flake attribute and adds nothing to it.
+        # HOST-BUILT and streamed like the runner, and deliberately NOT a std
+        # entry: the server finds it through the file CAOS_NIX_IMAGE_FILE names
+        # (build-builtins writes it), never through a key, so nothing evaluates
+        # it and it has no seed record. The same userland std/flake-builder
+        # carries, for the same reasons (its flake.nix says why each is there).
+        workerNixImage =
+          let
+            script = linuxPkgs.writeTextFile {
+              name = "caos-worker-nix-script";
+              executable = true;
+              destination = "/worker";
+              text = builtins.readFile ./stack/nix-worker;
+            };
+          in
+          pkgs.dockerTools.buildLayeredImage {
+            name = "caos-worker-nix";
+            tag = "latest";
+            contents = [
+              (linuxPkgs.buildEnv {
+                name = "caos-worker-nix-root";
+                paths = [
+                  script
+                  linuxPkgs.nix
+                  linuxPkgs.cacert
+                  linuxPkgs.bashInteractive
+                  linuxPkgs.coreutils
+                  linuxPkgs.gnugrep
+                  linuxPkgs.gzip
+                  linuxPkgs.gnutar
+                  linuxPkgs.skopeo
+                  linuxPkgs.jq
+                ];
+              })
+            ];
+            config = {
+              Entrypoint = [
+                "/bin/caos"
+                "runner"
+              ];
+              Env = [
+                "PATH=/bin"
+                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                # Root: the nix store is root-owned.
+                "CAOS_WORKER_UID=0"
+                "CAOS_WORKER_GID=0"
+              ];
+            };
+            # An in-image `nix build` needs the closure REGISTERED, not merely
+            # present.
+            includeNixDB = true;
+          };
+
+        # The cargo toolchain + workspace-deps bake (design/cargo-workers.md,
+        # phases 0–1): ONE definition in std/cargo/bake.nix, called with THIS
+        # flake's `src` and toolchain. That is what makes `cargoBake.deps` and
+        # `cargoArtifacts` the same derivation instead of two compiles of the
+        # same ~176 crates — the bake used to resolve its own `minimal`
+        # toolchain, and cargo fingerprints on the exact compiler build.
+        cargoBake = import ./std/cargo/bake.nix {
+          pkgs = linuxPkgs;
+          inherit crane src;
+          toolchain = mkRustToolchain linuxPkgs;
+        };
+
+        # std/cargo as HOST-BUILT streamed core, like std/flake-builder and
+        # std/runner: we call the subflake's outputs directly — the standard
+        # subflake call, no path-input lock churn — passing OUR nixpkgs,
+        # rust-overlay and crane, plus the workspace source and the shared
+        # toolchain. Nothing resolves std/cargo as a flake TREE any more,
+        # which is what let its vendored copies of the manifests, lockfile and
+        # crate stubs go: a published tree must be self-contained, a streamed
+        # image need not be.
+        cargoDef =
+          ((import ./std/cargo/flake.nix).outputs {
+            self = null;
+            inherit nixpkgs rust-overlay crane;
+          }).lib.${linuxSystem}.imageFor
+            {
+              inherit src;
+              toolchain = mkRustToolchain linuxPkgs;
+            };
+        workerCargoImage = pkgs.dockerTools.buildLayeredImage {
+          name = "caos-worker-cargo";
+          tag = "latest";
+          # CLEAN, exactly like the runner: no caos, no user db, no /tmp — and
+          # no /worker. build-builtins composes the additions AND worker-cargo
+          # on as content-keyed layers at publish. This image is 3.4 GB of
+          # toolchain and baked deps; it must depend on nothing in the
+          # workspace, or every Rust edit re-tars and re-gzips all of it and
+          # then pushes it again.
+          contents = cargoDef.contents;
+          config = cargoDef.config;
+          fakeRootCommands = cargoBake.inflateWith pkgs;
+        };
+
+        # ---- The stack root ----
+        # Everything the host's stack image adds over its userland, which is
+        # now just the one bring-up. It carries NO binaries: caosd stages
+        # `server` and `runnerd` into the state mount at `up` (see
+        # stage_bins), so this image — and therefore the `docker load` — is
+        # source-independent. Baking them in instead made a 181 MB image
+        # re-key on every Rust edit, so `nix build` re-tarred and re-gzipped
+        # the whole userland and `caosd up` re-ran `docker load`, all to move
+        # binaries the image shares with nothing.
+        #
+        # A TEST stack is not built here at all: caos-tools/build.sh assembles
+        # it inside caos, from compiled binaries, as one layer over
+        # `builderImage`. That is what lets the tree handed to the
+        # flake-builder be the reduced one.
+        hostStackRoot = pkgs.runCommand "caos-host-stack-root" { } ''
+          # ONE SCRIPT, and it is the one that cannot come from anywhere else.
+          # `bootstrap` is the entrypoint: it binds the store, builds the tree's
+          # stack inputs and execs `<tree>/stack/serve` — so serve, the publish
+          # and the daemons all come from the TREE, and editing any of them
+          # needs no `docker load`. This file changes about as often as the
+          # image's userland does, which is the property that keeps `nix build`
+          # from re-tarring 160 MB on a source edit.
+          #
+          # STILL NO /caos/images AND NO /caos/tree. They existed so a stack
+          # could run build-builtins.sh from inside itself, and were removed
+          # because ~250 MB of tarballs and a copy of the tree in the image
+          # re-keyed it constantly. Publishing from inside is back — but the
+          # tree arrives at runtime through the state mount, and the tarballs
+          # are built in here rather than carried in, so neither is baked.
+          mkdir -p $out/caos/stack
+          install -m 755 ${./stack/bootstrap} $out/caos/stack/bootstrap
+        '';
+        # The userland a caos stack shells out to, shared by both worlds.
+        stackUserland = [
+            # git (the server's
+            # smart-HTTP transport and the publish client), skopeo + certs
+            # (registry copies), redis (the private inner result cache), the
+            # docker client (the inner runnerd delegating to the outer
+            # engine), and a shell + the usual tools for the scripts that run
+            # here.
+            linuxPkgs.bashInteractive
+            linuxPkgs.coreutils
+            # cmp/diff: the tests compare cached results byte for byte, and
+            # tests/lint's two lint scripts diff and grep. This
+            # image is the environment every test runs in.
+            linuxPkgs.diffutils
+            linuxPkgs.gnugrep
+            linuxPkgs.gnused
+            linuxPkgs.findutils
+            linuxPkgs.gnutar
+            linuxPkgs.gzip
+            linuxPkgs.curl
+            linuxPkgs.jq
+            # build-builtins.sh reads the registry's manifest digest out of a
+            # curl -I with awk, and coreutils has none.
+            linuxPkgs.gawk
+            linuxPkgs.gitMinimal
+            linuxPkgs.redis
+            # The image cache, a member of the group in whichever placement
+            # owns one (stack/serve). Replaces compose's stock `registry:2`.
+            linuxPkgs.distribution
+            linuxPkgs.skopeo
+            linuxPkgs.cacert
+            # THE STACK BUILDS WHAT IT RUNS (stack/bootstrap): one `nix build`
+            # of the tree's stack inputs, into a store volume shared with every
+            # other caos container on this host. This is what lets `caosd`
+            # carry a 4 MB tree instead of 1.6 GB of tarballs, and what takes
+            # the three clean images out of the host's own `nix build`.
+            # Measured: the flake-builder image is a complete nix image in
+            # 99 MB, so this is not the expensive part of a 160 MB userland.
+            linuxPkgs.nix
+            # mount(8) for the bind that swaps that store over this image's
+            # own, and flock(1) to serialize the copy that precedes it —
+            # several containers seed one volume (see stack/bootstrap).
+            linuxPkgs.util-linux
+            (if pkgs.stdenv.hostPlatform.isLinux then
+              linuxPkgs.docker-client.override { buildxSupport = false; composeSupport = false; }
+            else
+              linuxPkgs.docker-client)
+        ];
+        stackEnv = [
+          "PATH=/bin"
+          "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+          # Root: this image starts daemons, owns a git dir, and drives the
+          # engine socket — the same per-image containment grant the
+          # flake-builder carries.
+          "CAOS_WORKER_UID=0"
+          "CAOS_WORKER_GID=0"
+          # The engine socket, declared the same way: this image hosts a caos
+          # stack whose own runnerd launches siblings on the engine, so it
+          # needs the socket runnerd was handing to EVERY worker before this
+          # existed. Only an image can ask — the grant is read from the
+          # image's config, never from a job or its args.
+          "CAOS_GRANT_ENGINE_SOCKET=1"
+          # Single-user, unsandboxed nix: root in a container with no nixbld
+          # group and no privilege to build a sandbox. `stack/bootstrap` runs
+          # one `nix build` here, and the same three settings the flake-builder
+          # and dev/devbox pass for the same situation — as NIX_CONFIG, so a
+          # plain `nix build` inherits them.
+          ''NIX_CONFIG=experimental-features = nix-command flakes
+build-users-group =
+sandbox = false''
+          "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+          # Explicitly, alongside the /etc/passwd entry that makes it
+          # resolvable: git and skopeo both look HOME up, and the two answers
+          # disagreeing is a worse failure than either being absent.
+          "HOME=/root"
+        ];
+        # THE image this flake defines (`#caosImage`, the flake-builder
+        # contract): the ENVIRONMENT a test stack is built and run in — never
+        # the stack itself.
+        #
+        # It carries no workspace binaries, no seed, and no source, which is
+        # the whole point: its inputs are the toolchain, the manifests and the
+        # lockfile, so `caos-tools/build.sh` can hand the flake-builder a
+        # REDUCED tree (flake + locks + manifests + zero-byte target stubs) and
+        # get a registry hit on every source edit. Verified: the reduced tree
+        # yields a byte-identical dep-bake derivation to the full tree, from
+        # 220 KB instead of 164 files.
+        #
+        # That retires `#depsImage` entirely. The deps memo existed only to
+        # carry a source-independent closure across a tree hash that moved on
+        # every edit; with the tree hash held still, there is nothing to carry.
+        #
+        # Both halves ride here because the build stage does both jobs in this
+        # one image: `cargoBake` to COMPILE the passed-in source, and
+        # `stackUserland` because the image it assembles must run a stack (and
+        # because cargo-check / cargo-self / rust-worker want a toolchain
+        # anyway). The assembled stack image bases on this one and adds only
+        # binaries, `serve`, `/worker` and the seed.
+        # /worker: the std/bash contract verbatim — fetch `worker1` and run it
+        # with bash. That is what lets caos-tools/build.sh be ONE staged
+        # script: stage 1 reduces the tree and tail-calls the flake-builder,
+        # stage 2 is `curry(<this image>, worker1=build.sh, stage=2, …)` and so
+        # runs the SAME script with the toolchain and the baked deps in scope.
+        # Copied rather than shared because std/bash is a published tree and
+        # this is a nix-built image; tests/lint keeps the rules honest
+        # elsewhere in the tree for the same reason.
+        builderWorker = pkgs.runCommand "caos-builder-worker" { } ''
+          mkdir -p $out
+          install -m 755 ${./std/bash/worker} $out/worker
+        '';
+        # The three CLEAN core images, as tarballs at a fixed path. std names
+        # them (runner, cargo, flake-builder), and the stage that publishes std
+        # runs in THIS image — so unlike the old arrangement, where the stack
+        # image carried them so a stack could publish from inside itself, they
+        # belong to the builder and never reach the assembled stack image.
+        #
+        # Safe for the reduced-tree key precisely because all three are
+        # source-independent: their /worker binaries ride as content-keyed
+        # publish-time layers, not baked in. Adding anything workspace-derived
+        # here would re-key the builder on every edit and undo the whole point.
+        builderImages = pkgs.runCommand "caos-builder-images" { } ''
+          mkdir -p $out/caos/images
+          ${pkgs.lib.concatMapStringsSep "\n" (i: "cp ${i} $out/caos/images/$(basename ${i})") builtinWorkerImages}
+        '';
+        builderImage = pkgs.dockerTools.buildLayeredImage {
+          name = "caos-test-stack-builder";
+          tag = "latest";
+          contents = [ builderWorker builderImages cargoBake.rootEnv ] ++ stackUserland;
+          config = {
+            Entrypoint = [ "/bin/caos" "runner" ];
+            # cargoBake.env's PATH already ends in /bin (where the caos
+            # additions land), so the stack-side vars append cleanly.
+            Env = cargoBake.env ++ [
+              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+              # Root, and the engine socket: the assembled stack image inherits
+              # this config, and it hosts a stack whose runnerd launches
+              # siblings. Only an image can ask for the socket.
+              "CAOS_WORKER_UID=0"
+              "CAOS_WORKER_GID=0"
+              "CAOS_GRANT_ENGINE_SOCKET=1"
+            ];
+          };
+          fakeRootCommands = cargoBake.inflateWith pkgs + ''
+            ln -sf bash bin/sh
+            # Workers scratch under /tmp; a bare nix root has none.
+            mkdir -p tmp
+            chmod 1777 tmp
+          '';
+        };
+        # The same image in the `host` world, which `caosd up` runs directly —
+        # so its entrypoint is the stack itself, not the runner protocol.
+        hostStackImage = pkgs.dockerTools.buildLayeredImage {
+          name = "caos-stack";
+          tag = "latest";
+          contents = [ hostStackRoot ] ++ stackUserland;
+          # Bootstrap imports this database into the persistent store. Without
+          # it, nix can replace its own live libraries while substituting paths
+          # it considers invalid, leaving the build hook unable to load libcurl.
+          includeNixDB = true;
+          config = {
+            # bash EXPLICITLY, not the script's `#!/usr/bin/env bash` shebang:
+            # /usr/bin/env comes from the caos additions, which the
+            # flake-builder stacks onto WORKER images. caosd runs this one
+            # directly, so nothing has stacked anything — and the failure is a
+            # bare "No such file or directory" naming the script, not env.
+            Entrypoint = [ "/bin/bash" "/caos/stack/bootstrap" ];
+            Env = stackEnv;
+          };
+          # WHAT A BARE NIX ROOT DOES NOT HAVE, and now needs — because this
+          # image both BUILDS (stack/bootstrap's `nix build`) and PUBLISHES
+          # (serve's build-builtins) rather than being handed the results.
+          # dev/devbox's image carries the same lines, and its comment
+          # records each as a distinct failure before it was a line:
+          #
+          #   /tmp, /var/tmp   a writable TMPDIR for every derivation nix
+          #                    realizes, and for the nix-DB dump bootstrap
+          #                    takes before binding the store over /nix.
+          #                    Absent, that bind fails with a bare
+          #                    `/tmp/image-db.dump: No such file or directory`
+          #                    and the stack silently comes up on the image's
+          #                    own store, rebuilding everything every time.
+          #   /etc/passwd,     skopeo resolves HOME through the user database
+          #   /etc/group,      and dies `unable to resolve HOME directory:
+          #   /root            user: unknown userid 0` without one. It only
+          #                    surfaced when the publish moved in here: skopeo
+          #                    used to run on the host, where root is real.
+          fakeRootCommands = ''
+            mkdir -p tmp var/tmp
+            chmod 1777 tmp var/tmp
+            mkdir -p root etc
+            printf 'root:x:0:0:root:/root:/bin/bash\n' > etc/passwd
+            printf 'root:x:0:\n' > etc/group
+            # /usr/bin/env, for every `#!/usr/bin/env ...`-shebanged script
+            # this image runs that ISN'T caos's own. Worker images get this
+            # for free from the
+            # `layer-additions/usr/bin/env` the flake-builder stacks on at
+            # build-builtins.sh time (see AGENTS.md) -- but this image is
+            # the one caosd runs DIRECTLY, with nothing stacked onto it, and
+            # a bare nix root has no /usr/bin at all. Confirmed the hard
+            # way: `hermes mcp test caos` failed "missing executable",
+            # which traced to `exec: No such file or directory` on
+            # /usr/bin/env itself, not the script it was trying to launch.
+            mkdir -p usr/bin
+            ln -s /bin/env usr/bin/env
+          '';
+        };
+
+
+
+        # ---- Cross-tree consumption: caos-cli, the stack, the stdlib ----
+        # These let another tree (one that has caos as a flake input) get the
+        # user-facing CLI on its PATH, bring the dev stack up, and publish the
+        # builtin worker library — without the caos source tree.
+
+        # Just the user-facing CLI (a consumer wants only `caos-cli`, not the
+        # worker-side `caos`, in its devShell) — and it runs on the *host*. On
+        # Linux the musl `caos-cli` already runs on the host, so copy it straight
+        # out of the caos-cli package; on macOS that's a Linux
+        # binary, so build a native `caos-cli` for the host instead.
+        nativeArgs = {
+          inherit src cargoVendorDir;
+          RUSTFLAGS = vendorRemap;
+          strictDeps = true;
+          pname = "caos-host-tools";
+          version = "0.1.0";
+          # Dev profile here too (the macOS host build of caos-cli),
+          # matching commonArgs — one profile everywhere.
+          CARGO_PROFILE = "dev";
+          CARGO_PROFILE_DEV_DEBUG = "line-tables-only";
+        };
+        # `caos-iroh` comes along for the ride, and has to: a `caos://` remote is
+        # served by `git-remote-caos`, which git execs BY NAME off PATH, and
+        # `caos-cli` shells out to git for every push and fetch. A client with
+        # one and not the other reaches the server itself and then fails inside
+        # git with `'remote-caos' is not a git command`.
+        cliPackages = "--package caos-cli --package caos-iroh --bins";
+
+        # THE CLIENT FOR A NAMED LINUX TARGET, regardless of what this machine
+        # is. `caosd up` pushes these into caosd so a cloud container can
+        # run uncommitted work; a container is x86_64, and the host build is
+        # not (`muslTarget` follows the build host: aarch64 on Apple Silicon).
+        # Publishing the host's binary from a Mac yields one that installs
+        # cleanly and then cannot exec, which presents as a session with no
+        # caos in it at all.
+        #
+# THE HOST'S TARGET COSTS NOTHING, and that is the common case. `workspaceBins`
+        # is already a static musl Linux build of the whole workspace for
+        # `muslTarget` — it is what `stackInputs` hands the dev stack — so on an
+        # x86_64 Linux machine the binaries a container needs are already on
+        # disk. Asking for them again under a different `pname` would compile
+        # the workspace a second time to produce identical bytes.
+        #
+        # So only a DIFFERENT target builds anything, which in practice means a
+        # Mac: its whole caos world is aarch64 (`linuxSystem`, `muslTarget`),
+        # and a cloud container is x86_64.
+        #
+        # SELF-CONTAINED ON PURPOSE in that branch. It builds its own toolchain,
+        # crane lib and args rather than parameterizing the ones above, so
+        # nothing that currently builds can change shape. The cost is a second
+        # `rust-std` (~135 MiB, which the toolchain above deliberately avoids)
+        # and a second dependency compile, paid only by whoever asks for a
+        # target their machine does not already build.
+        clientFromBins =
+          name: bins:
+          pkgs.runCommand name { } ''
+            mkdir -p $out/bin
+            cp ${bins}/bin/caos-cli $out/bin/caos
+            cp ${bins}/bin/git-remote-caos $out/bin/git-remote-caos
+            chmod +w $out/bin/caos $out/bin/git-remote-caos
+          '';
+
+        clientForTarget =
+          target:
+          if target == muslTarget then
+            clientFromBins "caos-client-${target}" workspaceBins
+          else
+          let
+            toolchain =
+              (
+                if rustChannel == "stable" then
+                  pkgs.rust-bin.stable.latest
+                else
+                  pkgs.rust-bin.stable.${rustChannel}
+              ).minimal.override
+                { targets = [ target ]; };
+            crossCrane = (crane.mkLib pkgs).overrideToolchain toolchain;
+            envTarget = pkgs.lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target);
+            isAarch64 = pkgs.lib.hasPrefix "aarch64" target;
+            # rustc links musl self-contained, but C-carrying deps (rustls'
+            # crypto backend, reached through iroh) compile via cc-rs and need a
+            # real musl cc for the TARGET, not the host.
+            crossCC =
+              if isAarch64 then
+                pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
+              else
+                pkgs.pkgsCross.musl64.stdenv.cc;
+            # Apple ld cannot link Linux ELF; rust-lld ships in the toolchain
+            # and links musl cross-platform. Same reasoning as `muslCrossLinker`
+            # above, but bound to THIS target.
+            crossLd = pkgs.writeShellScript "caos-rust-lld-${target}" ''
+              sysroot="$(${toolchain}/bin/rustc --print sysroot)"
+              exec "$(echo "$sysroot"/lib/rustlib/*/bin/rust-lld)" "$@"
+            '';
+            targetArgs =
+              nativeArgs
+              // {
+                pname = "caos-client-${target}";
+                CARGO_BUILD_TARGET = target;
+                "CC_${builtins.replaceStrings [ "-" ] [ "_" ] target}" =
+                  "${crossCC}/bin/${crossCC.targetPrefix}cc";
+                # UNCONDITIONALLY rust-lld, not just on Darwin as the host build
+                # above does. That guard is right for `muslTarget`, which is the
+                # host's OWN architecture -- "Linux hosts link musl with their
+                # native toolchain" holds when there is no arch to cross. This
+                # branch is only reached when the target arch DIFFERS, so the
+                # native `cc` is the wrong linker every time: measured as
+                # `collect2: error: ld returned 1 exit status` linking
+                # `caos-iroh` for aarch64 on an x86_64 host, with `cc` named as
+                # the linker in the failing command.
+                "CARGO_TARGET_${envTarget}_LINKER" = "${crossLd}";
+                "CARGO_TARGET_${envTarget}_RUSTFLAGS" = "-Clinker-flavor=ld.lld -Clink-self-contained=yes ${vendorRemap}";
+              };
+            built = crossCrane.buildPackage (
+              targetArgs
+              // noVendorRefsToRemove
+              // {
+                cargoArtifacts = crossCrane.buildDepsOnly (
+                  targetArgs // { cargoExtraArgs = cliPackages; }
+                );
+                cargoExtraArgs = cliPackages;
+                doCheck = false;
+              }
+            );
+          in
+          # Just the two files a container installs, under the names it expects.
+          # `caos` rather than `caos-cli`: the wrapper that renames it is a
+          # /nix/store shell script and does not travel.
+          clientFromBins "caos-client-${target}" built;
+        nativeCliArtifacts = craneLib.buildDepsOnly (
+          nativeArgs // { cargoExtraArgs = cliPackages; }
+        );
+        # Installed under both names: `caos` is what a person types (`caos talk`),
+        # `caos-cli` stays for scripts and docs that spell it out. (No collision
+        # with the worker-side `caos` binary — that one is baked into images and
+        # never lands on a host PATH.)
+        # `git-remote-caos` sits in the SAME directory as the binary it serves,
+        # which is how it gets found: `caos-cli` puts its own directory on PATH
+        # before shelling out to git (`ensure_helper_on_path`), so the helper
+        # travels with the client through a nix profile, a copy, or a devShell,
+        # with nothing to configure. `caos-iroh` joins them for `caos-iroh
+        # ticket` and for debugging a connection by hand.
+        caos-cli-bin =
+          if pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommand "caos-cli-bin" { } ''
+              mkdir -p $out/bin
+              for tool in caos-cli git-remote-caos caos-iroh; do
+                cp ${workspaceBins}/bin/$tool $out/bin/$tool
+              done
+            ''
+          else
+            craneLib.buildPackage (
+              nativeArgs
+              // noVendorRefsToRemove
+              // {
+                cargoArtifacts = nativeCliArtifacts;
+                cargoExtraArgs = cliPackages;
+                pname = "caos-cli-bin";
+                doCheck = false;
+              }
+            );
+
+        # The shipped command: the binary plus the revision it came from.
+        #
+        # Wrapped rather than compiled in, so the rev costs no rebuild — see
+        # `caosRev`. One wrapper for both platforms, so macOS cannot drift into
+        # printing a different answer.
+        #
+        # TWO wrappers, each with an explicit `--argv0`, rather than one plus a
+        # `caos -> caos-cli` symlink: this `makeWrapper` emits a bare
+        # `exec "<store path>" "$@"` with no `-a "$0"`, so a symlinked name is
+        # lost and `prog_name` reports `caos-cli` however you typed it — every
+        # usage line would then tell a person to run `caos-cli talk` when they
+        # had just typed `caos`. `--argv0` restores the name each entry point is
+        # meant to have. (`--set-default`, so a caller can still override the
+        # rev, e.g. to reproduce what an older build printed.)
+        caos-cli = pkgs.runCommand "caos-cli" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+          mkdir -p $out/bin
+          for name in caos-cli caos; do
+            makeWrapper ${caos-cli-bin}/bin/caos-cli $out/bin/$name \
+              --argv0 $name \
+              --set-default CAOS_REV ${caosRev} \
+              --set-default CAOS_HARNESS_SOURCE ${self.outPath} \
+              --run 'export CAOS_INVOKED_AS="$0"'
+          done
+          # UNWRAPPED, and symlinks rather than wrappers: neither reads CAOS_REV,
+          # and `git-remote-caos` is found by git through the wrapped binary's own
+          # directory anyway (see `caos-cli-bin`). These are here so a person can
+          # type `caos-iroh ticket`, and so a `caos://` remote works in a shell
+          # that has only this package.
+          for name in git-remote-caos caos-iroh; do
+            ln -s ${caos-cli-bin}/bin/$name $out/bin/$name
+          done
+        '';
+
+        # All the host-facing caos commands in one package, so a consumer lists
+        # *this* in its devShell and gets `caos-cli` and `caosd` on PATH together
+        # (like `pkgs.typescript` giving you tsc + tsserver) — no enumerating the
+        # individual tools. symlinkJoin merges their /bin into one output.
+        #
+        # `caos-runnerd` joins them on Linux only. Every workspace crate is built
+        # for musl (see CARGO_BUILD_TARGET), so the runnerd binary is a static
+        # Linux ELF: on a Linux host it runs as-is, on macOS it can't execute and
+        # would just be a dead entry on PATH. Running it on the host — rather than
+        # as the compose stack's containerized runner — is what you want when the
+        # daemon can't be handed a usable docker socket (rootless podman), since
+        # it then inherits the shell's own `docker`/`podman` (CAOS_DOCKER_BIN).
+        # Renamed on the way in: the crate is `runnerd`, but every host command
+        # carries the `caos-` prefix, matching the image name and the README.
+        caos-tools = pkgs.symlinkJoin {
+          name = "caos-tools";
+          paths = [
+            caos-cli
+            caosd
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ runnerd ];
+          postBuild = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            mv "$out/bin/runnerd" "$out/bin/caos-runnerd"
+          '';
+        };
+
+
+        # The worker images that make up `std`, keyed by the same builtin name
+        # build-builtins.sh maps them back to (via the <name> baked into each
+        # tarball's store path). caosd hands these to build-builtins.sh so it
+        # publishes the flake's own images without a runtime `nix build`.
+        builtinWorkerImages = [
+          # Streamed to the registry by build-builtins.sh, never git-imported.
+          workerFlakeBuilderImage
+          workerRunnerImage
+          workerCargoImage
+          # Not a std entry: the nix primitive's image (see workerNixImage).
+          workerNixImage
+        ];
+
+        # The worker binaries build-builtins.sh needs at publish, to curry onto
+        # std/runner (rustc, deep-deps). Handed over prebuilt so caosd needs no
+        # runtime nix. It finds each binary under /bin, so these may share one
+        # consolidated output.
+        builtinWorkerBins = [
+          worker-deep-deps
+          # Not curried, and not reached from here at all: the test suite's own
+          # image pipeline stages these (std's runner bakes its /worker in
+          # workerRunnerImage; std/cargo compiles its own). They are listed so
+          # the deploy carries them, nothing more.
+          worker-cargo
+          worker-runner
+          # Published as curry(runner, worker1) with the cargo ref and the
+          # worker-common source curried in.
+          worker-rustc
+        ];
+
+        # EVERYTHING A STACK BRING-UP NEEDS, in one derivation — so ONE
+        # `nix build` produces all of it: the daemons under `bin/` and the
+        # worker images under `images/`.
+        #
+        # `build-builtins.sh` takes both as store paths (CAOS_BUILTIN_BINS,
+        # CAOS_BUILTIN_IMAGES) and runs no nix when it has them. Handing them
+        # over is therefore the fast path, and this is what lets BOTH callers
+        # take it: caosd for the host, caos-tools/test for a dev stack.
+        #
+        # On the host that aggregation used to fall out by accident — caosd's
+        # script text names the image derivations, so building caosd built them.
+        # The dev stack had no equivalent, so `dev/stack-up` evaluated the flake
+        # three more times at runtime to find the same paths: 12 seconds of a
+        # 16-second bring-up, against ~1 second to actually start the stack.
+        #
+        # `bin` is a symlink to the workspace's own, so a consumer looks for
+        # `<inputs>/bin/<name>` exactly as it would in a plain build output. The
+        # images keep their store basenames, which is how build-builtins maps
+        # each back to its builtin (`*-caos-worker-<name>.tar.gz`).
+        stackInputs =
+          pname: bins:
+          pkgs.runCommand pname { } ''
+            mkdir -p $out/images
+            ln -s ${bins}/bin $out/bin
+            ${pkgs.lib.concatMapStringsSep "\n" (i: "ln -s ${i} $out/images/") builtinWorkerImages}
+          '';
+
+        # The dev stack's control command. Subcommands:
+        #   caosd up     (default) idempotently bring the stack up and publish all
+        #                of std, then RETURN — the stack stays running in the
+        #                background. Fast on a warm stack (~3s: images already
+        #                loaded, the std publish is a cache hit), so callers (the
+        #                tests, a consuming tree) just run it to guarantee a
+        #                current stack — no daemon to babysit, no teardown race.
+        #   caosd down   stop the stack (all CAOS_DATA state kept).
+        #   caosd reset  stop and wipe CAOS_DATA state and the dev stacks' volume
+        #                (caos-vol-caos-dev) for a clean slate.
+        #   caosd logs   follow the running stack's logs (Ctrl-C returns; the stack
+        #                keeps running).
+        #   caosd up     also answers `caos://` clients (design/
+        #                iroh-transport.md) by default, so a client anywhere
+        #                reaches this stack with a TICKET and no address. That
+        #                makes the stack reachable from outside this machine;
+        #                `caosd up --iroh=false` (or CAOS_IROH=no) turns it off.
+        #   caosd ticket that ticket — the whole of what a client configures
+        #                (`git remote add caos <ticket>`). Stable across
+        #                restarts; needs a stack brought up with --iroh.
+        #   caosd up --runner-tickets (or CAOS_RUNNER_TICKETS=yes) also answers
+        #                runners on other machines (prod/runner): the server,
+        #                registry and redis, each on its own ticket and UDP
+        #                port (11205-11207). Off by default: those tickets reach
+        #                an unauthenticated redis and the registry.
+        #   caosd runner-ticket <server|registry|redis>  one of those tickets.
+        # NO std-build AND NO std-check, and both went for the same reason.
+        # Publishing is not separable from bring-up any more: `stack/serve`
+        # publishes and then starts the seeder with the tree that publish
+        # returned, because those two steps have to agree and the only way to
+        # guarantee it is to make one a value the other consumes. So there is
+        # nothing for `std-build` to do to a running stack — republishing is
+        # `up`.
+        #
+        # `std-check` verified that the registry still held every image the SEED
+        # RECORDS name. That divergence needed two things persisting
+        # independently: `refs/caos/seed` in the git dir, and the blobs under
+        # `stack/registry` — reachable because `image-cleanup` wipes the second
+        # and deliberately not the first. The seed does not persist at all now;
+        # it is recomputed on every bring-up, and build-builtins re-pushes any
+        # clean image the registry is missing. The invariant it checked is a
+        # property of how the seed is made, so there is nothing left to check.
+        #   caosd image-cleanup  report rebuildable image-cache usage; with
+        #                --execute, clear it while the stack is stopped. The
+        #                next `up` republishes std and warms images on demand.
+        #   caosd version  the caos revision THIS command was built from. Ask it
+        #                before believing a bug report: a devShell that fails to
+        #                build leaves direnv on the previous environment, so the
+        #                `caosd` on PATH can be far older than the `flake.lock`
+        #                that names it, and the symptom looks like a caos bug.
+        #                `caos-cli`'s usage banner carries the same string.
+        # `up` HANDS OVER A TREE, not build products: it copies the flake source
+        # into the state mount and starts one container on `stack/bootstrap`,
+        # which binds a persistent nix store, builds the stack's inputs inside,
+        # and execs `stack/serve` to start the daemons, publish std and seed the
+        # core from what that publish returned. So this command carries no
+        # caos-cli, no worker images and no client repo, and runs no `nix`
+        # itself — hence it still works from any directory, including a tree
+        # that only imports this flake.
+        # Uses the host's docker; CAOS_DATA (absolute) holds all persistent
+        # state — server repo, the staged tree, publish client repo, redis,
+        # registry.
+        caosd = pkgs.writeShellApplication {
+          name = "caosd";
+          # COREUTILS AND BASH, AND THAT IS ALL. This command starts a container
+          # and waits for a file; everything it used to shell out for now
+          # happens inside the stack. skopeo + gzip were for pushing clean
+          # images at std_build, git for walking the seed records at std_check,
+          # curl for probing :9090, diffutils' cmp for deciding whether the
+          # staged binaries had changed, util-linux's setsid for a compose
+          # group that no longer exists — all of those callers are gone. Adding
+          # one back is a sign that work has leaked out of the stack again.
+          # docker rides in from the host PATH (caosd already requires it).
+          #
+          # GIT IS THE ONE EXCEPTION, and it is not work that leaked out of the
+          # stack: `up` publishes this checkout to the server it just started
+          # (see the dev publish at the end of that arm), which is a git push
+          # and can be nothing else. The client it publishes is a store path
+          # resolved at EVAL time, so there is no `nix` here and no shelling
+          # out to a script in the tree -- this command stays self-contained.
+          runtimeInputs = [ pkgs.coreutils pkgs.bash pkgs.git ];
+          text = ''
+            : "''${CAOS_DATA:=$PWD/.caos-data}"
+            CAOS_DATA="$(readlink -m "$CAOS_DATA")"
+            export CAOS_DATA
+            mkdir -p "$CAOS_DATA"
+
+            NET=caos-net
+            NAME=caos-stack
+            REGISTRY_PORT=5000
+            REGISTRY=localhost:$REGISTRY_PORT
+            REGISTRY_REPO=$REGISTRY/caos
+
+            # Load the stack image only when this exact build isn't already in
+            # docker. The tag is content-addressed (sha1 of the image's
+            # immutable store path), so an unchanged build skips the
+            # multi-second `docker load`; a changed build has a new store path,
+            # hence a new tag, and loads.
+            load_once() {
+              local name="$1" image="$2" src_tag old_tag repo_tag
+              src_tag="$name-src:$(printf '%s' "$image" | sha1sum | cut -c1-12)"
+              if docker image inspect "$src_tag" >/dev/null 2>&1; then
+                echo "==> $name image already loaded — skipping docker load" >&2
+              else
+                echo "==> loading $name image into docker" >&2
+                docker load -i "$image"
+                docker tag "$name:latest" "$src_tag"
+              fi
+              # ALWAYS re-point `:latest`, which is the tag `docker run` names.
+              # The sentinel says the image is PRESENT, never that `:latest`
+              # still points at it: any other load of this repo moves that tag —
+              # a second checkout, an older `caosd`, a `docker load` by hand —
+              # and then the skip above runs the WRONG image, silently. That is
+              # not hypothetical: it left a stack running a `serve` from before
+              # the core-seeder-runner existed, so every seeded key fell through
+              # to the generic runner and died pulling `seeded:latest`.
+              docker tag "$src_tag" "$name:latest"
+
+              # This function owns the content-addressed source tags. Retire
+              # superseded ones here instead of rediscovering them at cleanup.
+              #
+              # SELECT THE REPO IN BASH, NOT IN THE ENGINE. `image ls <repo>`
+              # matches IMAGES, and podman then prints every NAME of a matched
+              # image — so asking for `<name>-src` also lists `<name>:latest`,
+              # which is the SAME image under a second tag. This loop then
+              # deleted the tag `docker run` names, and the very next command
+              # (`docker image inspect <name>:latest`) died with "image not
+              # known". Podman also spells a local repository `localhost/<name>`,
+              # so a raw compare against $src_tag never matches even its own
+              # tag — every run untagged everything it had just loaded.
+              while IFS= read -r old_tag; do
+                repo_tag=''${old_tag#localhost/}
+                case "$repo_tag" in
+                  "$name-src:"*) ;;
+                  *) continue ;;
+                esac
+                if [ "$repo_tag" != "$src_tag" ]; then
+                  docker image rm "$old_tag" >/dev/null 2>&1 || true
+                fi
+              done < <(docker image ls --format '{{.Repository}}:{{.Tag}}')
+            }
+
+            die() { # <message>
+              echo "caosd: $1" >&2
+              # 2>&1 THEN >&2: serve writes everything to stderr, so redirecting
+              # docker's stderr to /dev/null would discard the entire diagnosis.
+              docker logs "$NAME" 2>&1 >&2 || true
+              exit 1
+            }
+
+            # NOTHING IS STAGED FROM THE STORE ANY MORE. This used to copy
+            # `server`, `runnerd` and `core-seeder-runner` into /state/bin, and
+            # to hand build-builtins the flake's prebuilt images and a client
+            # repo — because the container had no nix and could build nothing.
+            # It has nix now (stack/bootstrap), so the daemons, the clean
+            # images and the publish client all come from one `nix build`
+            # INSIDE, off a tree we copy in. What crosses the boundary is 4 MB
+            # of source instead of 1.6 GB of tarballs, and `nix build` out here
+            # no longer has to produce any of them.
+
+            # ---- explode packs into loose objects, and ONLY here ---------
+            # The server keeps every object loose and writes no packs
+            # (design/loose-object-store.md). A pack in a server repo predates
+            # that, or came from a server of an older build: a dev stack runs
+            # its own branch's build against the repo every dev stack shares.
+            # Packs cost every read (gix probes each pack's index; the dev repo
+            # once reached 8,583 and a 2.5-minute suite took 68), so each `up`
+            # turns any it finds into loose objects (stack/explode-packs).
+            #
+            # WHY THIS IS THE ONLY SAFE PLACE. Exploding REWRITES the object
+            # store, and this repo's whole config exists to stop anything doing
+            # that behind a live reader's back: `gc.auto 0`, `receive.autogc
+            # false` and `maintenance.geometric-repack.enabled false` are three
+            # settings with one job. A server holds its repo open as a
+            # `gix::ThreadSafeRepository` for its lifetime, and when that
+            # object database re-consolidates against packs that moved under
+            # it, gix asserts and the request thread panics — the caller gets a
+            # body-less 500 and the log says nothing (see the server config
+            # above).
+            #
+            # Here, nothing is reading: `up` has just removed the stack, and we
+            # refuse if any worker is still alive. So this is the one moment a
+            # rewrite is safe, and it covers BOTH repos — the host's own, and
+            # the one every dev stack shares.
+            #
+            # IN A CONTAINER, for both, even though the host repo is a plain
+            # bind. It keeps one mechanism rather than two, and it is the only
+            # way to reach the dev repo at all — that one lives in a named
+            # volume, which on macOS is inside the engine's VM and has no host
+            # path. It also means this command needs no `git` of its own, which
+            # is why it carries almost no runtime inputs.
+            DEV_VOLUME=caos-vol-caos-dev
+
+            # Is anything alive that could be READING a server repo? Two
+            # sources, and both are needed — the same pair `image-cleanup`
+            # checks before it wipes:
+            #
+            #   the stack container   holds $CAOS_DATA/stack/git open. `up`
+            #                         removes it just above, but this function
+            #                         must not depend on its one caller having
+            #                         done so.
+            #   anything runnerd started   carries its owner label, and a dev
+            #                         stack IS a worker, so that one filter
+            #                         covers every holder of the dev repo.
+            caos_containers_running() {
+              local running
+              running=$(
+                if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)" = true ]; then
+                  echo "$NAME"
+                fi
+                docker ps --filter label=caos.runnerd.owner --format '{{.Names}}'
+              )
+              [ -n "$running" ]
+            }
+
+            # EVERY WORKER LEFT ON THIS ENGINE IS AN ORPHAN once the stack
+            # container is removed. runnerd labels what it starts with its own
+            # container id; no replacement will ever reap them (it reaps only
+            # EXITED containers carrying ITS id, and the id is new on every
+            # `up`). A dev-stack worker orphaned by a restart kept running for
+            # three days on caosd-prod, and `caos_containers_running` then made
+            # every later `up` skip the consolidation: the shared dev repo went
+            # from 1 pack to 8,583, every object read got slower with each of
+            # them, and a suite that takes 2.5 minutes took 68. Removing them is
+            # not new damage: the server they were polling is gone, so no job
+            # they hold can finish.
+            remove_orphan_workers() {
+              local orphans
+              mapfile -t orphans < <(docker ps -aq --filter label=caos.runnerd.owner)
+              if [ "''${#orphans[@]}" -gt 0 ]; then
+                echo "==> removing ''${#orphans[@]} worker(s) orphaned by the stack just removed" >&2
+                docker rm -f "''${orphans[@]}" >/dev/null
+              fi
+            }
+
+            # The script is the staged tree's (below), so it is this revision's.
+            # A repo with no packs costs nothing; the first `up` after packs
+            # appear pays about 5 minutes per million objects.
+            explode_packs() {
+              # Skipped rather than fatal: a person running `up` while a suite
+              # is in flight wants a stack, not homework, and the next idle
+              # `up` will do it.
+              if caos_containers_running; then
+                echo "==> caos containers are still running — skipping exploding packs" >&2
+                return 0
+              fi
+              docker run --rm --entrypoint /bin/bash \
+                -v "$CAOS_DATA/stack:/host" -v "$DEV_VOLUME:/dev-stack" \
+                caos-stack:latest /host/tree/stack/explode-packs /host/git /dev-stack/git \
+                || die "exploding the server repos' packs"
+            }
+
+            # The registry and Redis are caches: git holds the image inputs and
+            # `up` republishes the irreducible std images. Clearing both avoids
+            # retaining a cached result that names a registry digest just removed.
+            # Require an idle stack instead of hiding stop/restart orchestration
+            # and recovery inside a cleanup command.
+            image_cleanup() {
+              local execute=no arg registry_size=0 image_id running
+
+              for arg in "$@"; do
+                case "$arg" in
+                  --execute) execute=yes ;;
+                  -h|--help)
+                    echo "usage: caosd image-cleanup [--execute]"
+                    return
+                    ;;
+                  *)
+                    echo "caosd image-cleanup: unknown argument '$arg'" >&2
+                    return 2
+                    ;;
+                esac
+              done
+
+              if [ -d "$CAOS_DATA/stack/registry" ]; then
+                registry_size=$(du -sh "$CAOS_DATA/stack/registry" | cut -f1)
+              fi
+              echo "caosd image-cleanup: registry $registry_size"
+              docker image ls --format '  local image {{.ID}}  {{.Size}}' \
+                "$REGISTRY_REPO" | sort -u
+              if [ "$execute" != yes ]; then
+                echo "caosd image-cleanup: dry run; run 'caosd down' then pass --execute"
+                return
+              fi
+
+              running=$(
+                if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)" = true ]; then
+                  echo "$NAME"
+                fi
+                # A dev stack is a WORKER now, so runnerd's own label covers it —
+                # there is no separate caos.test-stack label to look for.
+                docker ps --filter label=caos.runnerd.owner --format '{{.Names}}'
+              )
+              if [ -n "$running" ]; then
+                echo "caosd image-cleanup: CAOS is still running:" >&2
+                while IFS= read -r tag; do echo "  $tag" >&2; done <<< "$running"
+                echo "run 'caosd down' and wait for active workers before cleanup" >&2
+                return 1
+              fi
+
+              case "$CAOS_DATA" in
+                /|"")
+                  echo "caosd image-cleanup: refusing unsafe CAOS_DATA '$CAOS_DATA'" >&2
+                  return 1
+                  ;;
+              esac
+              rm -rf "$CAOS_DATA/stack/registry" "$CAOS_DATA/stack/redis"
+
+              while IFS= read -r image_id; do
+                [ -n "$image_id" ] || continue
+                docker image rm "$image_id" >/dev/null 2>&1 || true
+              done < <(docker image ls -q "$REGISTRY_REPO" | sort -u)
+
+              echo "caosd image-cleanup: cleared the registry, Redis, and unused local CAOS images"
+              echo "caosd image-cleanup: run 'caosd up' to republish std"
+            }
+
+            # The revision this caosd was built from, printed by `version` and
+            # by every usage banner. A stale binary on PATH is otherwise
+            # indistinguishable from a caos bug (see `caosRev`).
+            CAOS_REV=${caosRev}
+
+            usage() {
+              echo "caosd ($CAOS_REV)"
+              echo "usage: caosd [up [--iroh=false] [--runner-tickets]|down|reset|logs|ticket|runner-ticket <service>|doctor|image-cleanup|version]"
+            }
+
+            case "''${1:-up}" in
+            version)
+              echo "caosd $CAOS_REV"
+              exit 0
+              ;;
+            up)
+              # Match Docker's endpoint selection: DOCKER_CONTEXT overrides
+              # DOCKER_HOST, otherwise use the selected context. Keep the socket
+              # at its host path inside the stack too: runnerd passes that path
+              # back to the host engine when granting it to nested workers.
+              if [ -n "''${DOCKER_CONTEXT:-}" ]; then
+                engine_endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
+              elif [ -n "''${DOCKER_HOST:-}" ]; then
+                engine_endpoint=$DOCKER_HOST
+              else
+                engine_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+              fi
+              case "$engine_endpoint" in
+                unix:///*) engine_socket="''${engine_endpoint#unix://}" ;;
+                *) die "caosd up needs a local Unix Docker socket; active endpoint is $engine_endpoint" ;;
+              esac
+              [ -S "$engine_socket" ] || die "caosd up: Docker endpoint is not a socket: $engine_socket"
+              docker info >/dev/null
+
+              # REACHABLE BY TICKET UNLESS TOLD OTHERWISE. `caosd up` adds the
+              # `caos://` listener (design/iroh-transport.md), which publishes
+              # this machine's endpoint and answers anyone holding the ticket.
+              # `caosd up --iroh=false` (or CAOS_IROH=no) leaves it off; on, it
+              # persists its key under CAOS_DATA so one ticket keeps working —
+              # `caosd ticket` prints it. `--iroh` alone is accepted and means
+              # the default, so existing invocations keep working.
+              IROH=''${CAOS_IROH:-yes}
+              RUNNER_TICKETS=''${CAOS_RUNNER_TICKETS:-no}
+              for arg in "''${@:2}"; do
+                case "$arg" in
+                --iroh | --iroh=true | --iroh=yes) IROH=yes ;;
+                --iroh=false | --iroh=no) IROH=no ;;
+                --runner-tickets) RUNNER_TICKETS=yes ;;
+                *) die "caosd up: unknown argument '$arg'" ;;
+                esac
+              done
+              # A RELAY IS REQUIRED, and is refused here rather than defaulted.
+              # n0's relays are never used (caos_iroh::endpoint_builder), so a
+              # bring-up without one has nothing to fall back to — and a ticket
+              # carrying an unreachable relay keeps its endpoint id and token,
+              # so it is indistinguishable from the one already in an
+              # environment while every session against it times out in its
+              # setup phase.
+              if [ "$IROH" = yes ] && [ -z "''${CAOS_IROH_RELAY:-}" ]; then
+                die "caosd up --iroh needs a relay to be reached through, and there is
+  no default: n0's relays answer 503 from a cloud container's setup phase.
+  Run 'iroh-relay --dev' on a host you control (port 80 or 443 — no other
+  port is carried), then:
+
+    CAOS_IROH_RELAY=http://<host>/ caosd up --iroh
+
+  prod/caosd/configuration.nix has a unit for it. The relay a ticket carries
+  is what a client dials, so changing it invalidates tickets already handed
+  out — 'caosd ticket' prints the current one."
+              fi
+              # THE UDP PORT IS PUBLISHED, and it has to be: a client reaches
+              # this listener directly or pays a relay round trip on every
+              # request — measured at 0.4 ms against 174 ms, which turned a
+              # cached run from 38 ms into 4.6 s. The listener binds a FIXED port
+              # so the addresses in its ticket stay put (caos_iroh::DEFAULT_PORT);
+              # forwarding that port is what makes those addresses reachable from
+              # outside this container. Only when asked for, so an ordinary `up`
+              # opens nothing.
+              # AN ARRAY, so "no port" is NO ARGUMENT rather than an empty one: a
+              # quoted empty string here is an argument `docker run` rejects, and
+              # leaving it unquoted is a word-splitting bug shellcheck fails the
+              # build over. Not `[ … ] && …` either — under `set -e` a false test
+              # as the last command in its scope exits the script (AGENTS.md).
+              iroh_publish=()
+              if [ "$IROH" = yes ]; then iroh_publish=(-p 11204:11204/udp); fi
+              # The runner endpoints' ports, for the same reason as the client's:
+              # a runner pulling a 1.5 GB image through the relay is not usable.
+              if [ "$RUNNER_TICKETS" = yes ]; then
+                if [ "$IROH" != yes ]; then
+                  die "caosd up --runner-tickets needs --iroh: the runner endpoints use its relay"
+                fi
+                iroh_publish+=(-p 11205:11205/udp -p 11206:11206/udp -p 11207:11207/udp)
+              fi
+
+              # WHAT GOES IN THE TICKET: exactly what the operator names,
+              # and nothing else.
+              #
+              # This used to seed loopback and then add every local /32 the
+              # kernel reported, on the theory that a host's own addresses are a
+              # local fact worth publishing -- true on a LAN, and on a bare VPS
+              # it meant a public address needed no configuration.
+              #
+              # Behind NAT it is wrong, and expensively so. On the caosd-prod box
+              # the sweep found three: 10.42.1.140 (the VPC address, reachable
+              # only inside the VPC) and 10.200.0.1 and 10.200.1.1 -- the
+              # gateways of docker0 and of caos-net, a bridge caos creates
+              # itself. With loopback that is four entries naming nothing a
+              # client can reach, against one that works.
+              #
+              # Each of them costs something. caos-net's gateway moves when the
+              # bridge is recreated, so a ticket for a server whose identity has
+              # not changed does; 127.0.0.1 points a client at its own machine,
+              # which is a trap for anyone running a stack on the same port; a
+              # client on a colliding 10.x range probes its own neighbors; and
+              # all of it tells whoever holds the ticket what the internal
+              # addressing is.
+              #
+              # A guess that is right on a LAN and wrong everywhere else is not
+              # worth it. Name the address, or use the relay.
+              IROH_ADVERTISE="''${CAOS_IROH_ADVERTISE:-}"
+
+              # ONE container runs the whole daemon group (design/
+              # one-stack-image.md), and it BUILDS WHAT IT RUNS: its entrypoint
+              # is `stack/bootstrap`, which binds a persistent nix store, does
+              # one `nix build` of the tree's stack inputs, and execs
+              # `stack/serve` — which starts the daemons, publishes std, and
+              # starts the seeder with the tree that publish returned.
+              #
+              # SO THIS COMMAND CARRIES NO BUILD PRODUCTS. It used to substitute
+              # `caos-stack-inputs` at flake time and hand them in, which meant
+              # producing this very binary built all three clean images —
+              # including the 1.5 GB cargo one — and then those 1.6 GB had to
+              # cross into the container. Now the tree crosses instead: 4 MB.
+              #
+              # ALWAYS RECREATE. There is no longer anything to compare: the
+              # daemons are built inside from a tree we copy in on every run, so
+              # "did the binaries move" is a question this side cannot answer
+              # and does not need to. A warm `up` costs a container restart and
+              # a cache-hit nix build; the reuse logic it replaces (bins_staged,
+              # image-id compare, start-the-stopped-one) existed only to dodge
+              # that cost and got the stale-deploy cases wrong in the process.
+              load_once caos-stack ${hostStackImage}
+              docker network inspect "$NET" >/dev/null 2>&1 \
+                || docker network create "$NET" >/dev/null
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+
+              remove_orphan_workers
+
+              # Docker creates a missing bind source as root. Create it as the
+              # invoking user before tree staging writes it and explode_packs
+              # mounts it.
+              mkdir -p "$CAOS_DATA/stack"
+
+              # THE TREE, copied rather than mounted: a bind's source is
+              # resolved by the ENGINE, which on macOS is a VM that sees only
+              # the paths it has been given, while $CAOS_DATA is already shared
+              # with it — the same reason the binaries used to be staged here.
+              # `cp -RL` because a nix store path is a symlink farm and the
+              # container must get files (CLAUDE.md, "everything an image's
+              # contents puts on disk is a SYMLINK").
+              echo "==> staging the tree into $CAOS_DATA/stack/tree" >&2
+              rm -rf "$CAOS_DATA/stack/tree.new"
+              cp -RL ${self} "$CAOS_DATA/stack/tree.new"
+              chmod -R u+w "$CAOS_DATA/stack/tree.new"
+              rm -rf "$CAOS_DATA/stack/tree"
+              mv "$CAOS_DATA/stack/tree.new" "$CAOS_DATA/stack/tree"
+
+              explode_packs
+
+              echo "==> starting the stack (redis, registry, server, runnerd)" >&2
+              # Three aliases, one container: every name that resolved under
+              # compose still resolves — workers reach the server as
+              # `caos-server`, and the server pulls a delta's `base` as
+              # `caos-registry:5000` (design/one-stack-image.md, the netns
+              # section). Workers get their OWN netns on this bridge, which
+              # is what lets a test stack bind its own :80 — and is also why
+              # `caos-redis` has to exist as a NAME: a worker here shares no
+              # loopback with the stack, so the address the server uses
+              # (127.0.0.1) is meaningless to it.
+              #
+              # SYS_ADMIN and the store volume are for the bind in bootstrap
+              # (and apparmor=unconfined with it: Ubuntu's docker-default
+              # profile denies the mount regardless of the capability, as
+              # runnerd notes for the worker's bind):
+              # a volume cannot be mounted AT /nix, because this image's own
+              # userland lives there and would be shadowed. Not a widening —
+              # this container already holds the engine socket, which is
+              # root-equivalent over the engine.
+              docker run -d --name "$NAME" \
+                --network "$NET" \
+                --network-alias caos-server \
+                --network-alias caos-registry \
+                --network-alias caos-redis \
+                --cap-add SYS_ADMIN \
+                --security-opt apparmor=unconfined \
+                -p 9090:80 -p "$REGISTRY_PORT:5000" "''${iroh_publish[@]}" \
+                -v "$CAOS_DATA/stack:/state" \
+                -v caos-vol-mounted-nix:/mounted-nix \
+                --mount "type=bind,source=$engine_socket,target=$engine_socket" \
+                -e "DOCKER_HOST=unix://$engine_socket" \
+                -e CAOS_STACK_TREE=/state/tree \
+                -e CAOS_STACK_INPUTS_ATTR=caos-stack-inputs \
+                -e CAOS_STACK_STORE=/mounted-nix \
+                -e CAOS_STACK_STATE=/state \
+                -e CAOS_STACK_LOGS=/state/logs \
+                -e CAOS_STACK_READY=/state/stack.ready \
+                -e CAOS_CLIENT_REPO=/state/publish-client-repo \
+                -e CAOS_REGISTRY_HTTP=localhost:5000 \
+                -e CAOS_STACK_REDIS_PORT=6379 \
+                -e CAOS_STACK_REDIS_PERSIST=yes \
+                -e CAOS_STACK_REDIS_MAXMEM="''${CAOS_STACK_REDIS_MAXMEM:-}" \
+                -e CAOS_STACK_REGISTRY=yes \
+                -e CAOS_STACK_REDIS=yes \
+                -e CAOS_STACK_RUNNERD=yes \
+                -e CAOS_STACK_SEEDER=yes \
+                -e CAOS_STACK_IROH="$IROH" \
+                -e CAOS_STACK_IROH_ADVERTISE="$IROH_ADVERTISE" \
+                -e CAOS_STACK_RUNNER_TICKETS="$RUNNER_TICKETS" \
+                -e CAOS_IROH_RELAY="''${CAOS_IROH_RELAY:-}" \
+                -e CAOS_STACK_RUNNER_SERVER_URL=http://caos-server \
+                -e CAOS_STACK_RUNNER_REDIS_ADDR=caos-redis:6379 \
+                -e CAOS_REGISTRY_PULL_HOST="$REGISTRY" \
+                -e CAOS_DOCKER_NETWORK="$NET" \
+                -e "CAOS_RUNNER_SOCKET=$engine_socket" \
+                -e CAOS_PENDING_TIMEOUT_SECS=900 \
+                caos-stack:latest >/dev/null
+
+              # WAIT FOR THE READY FILE, not for :9090. The server answering is
+              # no longer the end of bring-up — std still has to be published
+              # and the seeder started from it — and serve touches this only
+              # once all of that is done. Waiting on the port instead would
+              # return a stack whose core has no answerer.
+              echo "==> waiting for the stack (build, publish, seed) ..." >&2
+              rm -f "$CAOS_DATA/stack/stack.ready"
+              ok=""
+              for _ in $(seq 1 1800); do
+                if [ -e "$CAOS_DATA/stack/stack.ready" ]; then
+                  ok=1
+                  break
+                fi
+                # serve dies as a group, so the container exiting IS the
+                # diagnosis — don't wait out the full timeout for it.
+                docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null \
+                  | grep -q true || die "the stack exited during bring-up"
+                sleep 1
+              done
+              [ -n "$ok" ] || die "the stack never finished bring-up"
+
+              # ---------------------------------------------------------------
+              # Publish this checkout to the stack it just started
+              # ---------------------------------------------------------------
+              # So a cloud session can run UNCOMMITTED work: one commit at
+              # `refs/caos/dev` carrying the working tree (for `std/`, reached
+              # by `:@@=git+caos://…&dir=std`) and the x86_64 client a container
+              # installs. Nothing new listens -- the server already serves git
+              # -- and the container reads it back with `git ls-remote` +
+              # `git fetch`.
+              #
+              # HERE, BECAUSE THIS IS THE CADENCE. `caosd up` is already the
+              # command that makes the server see this tree: it republishes std
+              # on every bring-up, which is why std files must be git-added
+              # before it runs. A publish tied to `nix build` instead would
+              # miss `std/` entirely, since std is compiled by caos itself and
+              # needs no nix build at all.
+              #
+              # THE CLIENT IS AN EVAL-TIME STORE PATH, not a `nix build` at
+              # runtime: this command has no nix on PATH and should not grow
+              # one. It is built for the CONTAINER's architecture rather than
+              # this machine's -- on x86_64 Linux that is `workspaceBins`,
+              # already built for the stack; on a Mac it is a real cross-build.
+              #
+              # Over PLAIN HTTP to the port just published, so this needs no
+              # `caos` remote, no ticket and no `git-remote-caos`: the server is
+              # right here and this is the same URL a local client uses.
+              #
+              # Never fatal. A stack that is up is the thing asked for; a
+              # publish that cannot happen (no checkout, a server not answering
+              # git yet) says so and leaves it.
+              if [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
+                dev_client=${clientForTarget "x86_64-unknown-linux-musl"}
+                dev_idx="$CAOS_DATA/stack/dev-publish.index"
+                rm -f "$dev_idx"
+                if GIT_INDEX_FILE="$dev_idx" sh -c '
+                     set -e
+                     git read-tree --empty
+                     git add -A
+                     for n in caos git-remote-caos; do
+                       b=$(git hash-object -w "'"$dev_client"'/bin/$n")
+                       git update-index --add --cacheinfo "100755,$b,dev-bin/$n"
+                     done
+                     git write-tree' > "$CAOS_DATA/stack/dev-tree" 2>/dev/null; then
+                  dev_tree="$(cat "$CAOS_DATA/stack/dev-tree")"
+                  dev_head="$(git rev-parse --verify --quiet HEAD || true)"
+                  dev_commit="$(printf 'caosd up: %s\n' "$(date -u +%FT%TZ)" \
+                    | git commit-tree "$dev_tree" ''${dev_head:+-p "$dev_head"})"
+                  # STDERR IS NOT DISCARDED. It was, and this publish then failed
+                  # silently for an hour behind "the stack is up regardless":
+                  # every session kept resolving a snapshot from before the
+                  # change under test, which reads as the change not working.
+                  # git's own message is thin (the server now says why), but a
+                  # line of it beats the one line that says nothing is wrong.
+                  if git push --quiet --force http://localhost:9090 \
+                       "$dev_commit:refs/caos/dev"; then
+                    echo "==> published this tree to refs/caos/dev ($dev_commit)" >&2
+                    # A cloud environment re-runs its setup only when the
+                    # setup text changes, so the line names the commit.
+                    echo "==> cloud setup line argument (replaces any older one):" >&2
+                    echo "      --dev-commit=$dev_commit" >&2
+                  else
+                    echo "==> could not publish to refs/caos/dev; the stack is up regardless" >&2
+                  fi
+                else
+                  echo "==> could not snapshot this checkout; skipping the dev publish" >&2
+                fi
+                rm -f "$dev_idx" "$CAOS_DATA/stack/dev-tree"
+              fi
+
+              echo "==> stack up. 'caosd logs' to follow, 'caosd down' to stop." >&2
+              ;;
+            down)
+              echo "==> stopping stack (CAOS_DATA kept; 'caosd reset' wipes it)" >&2
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+              ;;
+            reset)
+              echo "==> stopping stack, wiping CAOS_DATA state and the dev stacks' volume" >&2
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+              rm -rf "$CAOS_DATA/stack" "$CAOS_DATA/publish-client-repo"
+              # The dev stacks' repo is not under CAOS_DATA but in a named
+              # volume (see explode_packs). Workers mount it, and a volume in
+              # use cannot be removed, so they go first.
+              remove_orphan_workers
+              if docker volume inspect "$DEV_VOLUME" >/dev/null 2>&1; then
+                docker volume rm "$DEV_VOLUME" >/dev/null \
+                  || die "removing the dev stacks' volume $DEV_VOLUME"
+              fi
+              ;;
+            logs)
+              # The group's members log to files (one container, four daemons —
+              # `docker logs` would interleave them); serve's own output is the
+              # container's.
+              tail -n +1 -f "$CAOS_DATA"/stack/logs/*.log
+              ;;
+            ticket)
+              # What a client needs to reach this stack, and the whole of it:
+              # `git remote add caos <ticket>` in any worktree
+              # (design/iroh-transport.md).
+              #
+              # READ FROM THE FILE the listener published, rather than computed
+              # here. Two reasons: this command carries no build products by
+              # design (see `up`), so it has no `caos-iroh` to run; and the
+              # listener's own state is the only place the answer can come from
+              # without a second implementation to disagree with it.
+              ticket="$CAOS_DATA/stack/iroh/ticket"
+              if [ ! -e "$ticket" ]; then
+                die "no ticket here. Bring the stack up with 'caosd up --iroh' (or CAOS_IROH=yes)"
+              fi
+              cat "$ticket"
+              ;;
+            runner-ticket)
+              # One of the three a runner on another machine pins a local port
+              # to (prod/runner). Read from the listener's file, as `ticket` is.
+              case "''${2:-}" in
+              server | registry | redis) ;;
+              *) die "usage: caosd runner-ticket <server|registry|redis>" ;;
+              esac
+              ticket="$CAOS_DATA/stack/iroh-runner/$2/ticket"
+              if [ ! -e "$ticket" ]; then
+                die "no $2 runner ticket here. Bring the stack up with 'caosd up --runner-tickets' (or CAOS_RUNNER_TICKETS=yes)"
+              fi
+              cat "$ticket"
+              ;;
+            doctor)
+              # Is every stored object's history stored? The server's own check
+              # (`server doctor`), run by hand: it reads every object, minutes
+              # on a long-lived store, which is why no start pays for it.
+              # Read-only and safe beside the live server: objects are never
+              # deleted, and each is stored only after everything it references.
+              #
+              # In the running stack, with the binary that is serving: bootstrap
+              # builds the stack inputs inside the container and execs serve
+              # (PID 1) with CAOS_STACK_BIN, so that is where to find it.
+              if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)" != true ]; then
+                die "the stack is not running; 'caosd up' first"
+              fi
+              # shellcheck disable=SC2016
+              docker exec "$NAME" bash -c '
+                bin=$(tr "\0" "\n" < /proc/1/environ | sed -n "s/^CAOS_STACK_BIN=//p")
+                CAOS_GIT_DIR="$CAOS_STACK_STATE/git" exec "$bin/server" doctor
+              '
+              ;;
+            image-cleanup)
+              shift
+              image_cleanup "$@"
+              ;;
+            *)
+              echo "caosd: unknown command '$1'" >&2
+              usage >&2
+              exit 2
+              ;;
+            esac
+          '';
+        };
+
+        # `nix run .#hermes-gateway`: a Hermes gateway wired to a caos server,
+        # run on its own rather than inside `caosd` (integrations/hermes/gateway
+        # says how, and what it reads). Null where hermes-agent has no build
+        # for this system, so the outputs below simply omit it.
+        #
+        # The anthropic group is not optional: Hermes's own lazy-install
+        # refuses to write into a Nix-built interpreter, so the provider SDK has
+        # to be in the package. `full` would carry azure, bedrock, matrix and
+        # more that nothing here uses.
+        hermesGateway =
+          if hermes-agent.packages ? ${system} then
+            pkgs.writeShellApplication {
+              name = "hermes-gateway";
+              runtimeInputs = [
+                (hermes-agent.packages.${system}.minimal.override {
+                  extraDependencyGroups = [ "anthropic" ];
+                })
+                # The bridge to a desktop over iroh: `listen-tcp` here,
+                # `connect-tcp` on the client, both the stock binary.
+                pkgs.dumbpipe
+                # caos-mcp-launch's `git ls-remote`, and the script's own tools.
+                pkgs.gitMinimal
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.gawk
+              ];
+              text = ''
+                export SSL_CERT_FILE=''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}
+                exec bash ${./integrations/hermes/gateway} \
+                  --profile=${./integrations/hermes} \
+                  --cli=${caos-cli}/bin/caos-cli "$@"
+              '';
+            }
+          else
+            null;
+
+        deltaRunner = import ./integrations/delta/connector/package.nix {
+          inherit pkgs;
+          prelude = ./std/go/prelude;
+        };
+      in
+      {
+        packages = nixpkgs.lib.optionalAttrs (hermesGateway != null) { hermes-gateway = hermesGateway; } // {
+          delta-runner = deltaRunner;
+          # The client a cloud container can actually exec, built for the
+          # container's architecture rather than this machine's. `caosd up`
+          # pushes it into caosd; see `clientForTarget`.
+          caos-client-x86_64-linux = clientForTarget "x86_64-unknown-linux-musl";
+          caos-client-aarch64-linux = clientForTarget "aarch64-unknown-linux-musl";
+
+          # `nix run github:softmax-universe/caos#deploy-caosd-prod` on a fresh box.
+          # Go rather than shell: this program's job is quoting a nix
+          # expression and branching on host facts, which is precisely where
+          # `set -euo pipefail` scripts go wrong (CLAUDE.md lists the three
+          # constructs). It reuses caos/w for the error policy via a relative
+          # `replace`, so src is the repo root with modRoot below it.
+          deploy-caosd-prod = pkgs.buildGoModule {
+            pname = "deploy-caosd-prod";
+            version = "0.1.0";
+            src = ./.;
+            modRoot = "prod/caosd/deploy";
+            # The module is `caos-deploy`, so go names the binary that; the
+            # flake attribute is the role it deploys. mainProgram is what makes
+            # `nix run ...#deploy-caosd-prod` find it.
+            meta.mainProgram = "caos-deploy";
+            # Bake in the flake this driver came from, so `nix run <ref>#...`
+            # applies the host config from <ref> rather than from main.
+            ldflags = [ "-X main.defaultFlake=path:${self}" ];
+            # NOTE: the vendor tree includes caos/w through the `replace`, so this
+            # hash moves whenever std/go/prelude changes, not only go.mod. The
+            # cache workflow builds this on every push and is what notices.
+            vendorHash = "sha256-D2Tg239wTsZ1zz7Nkj7ZidEeQ5/hRv7fRg7Qc4r09SA=";
+          };
+
+          # The watchdog-prod host's program (prod/watchdog): probes, the
+          # Datadog poller and the Claude session runner, one binary. Same
+          # shape as the deploy driver above, same caos/w error policy.
+          # The gateway a prod/runner host reaches its server's services
+          # through (`iroh-vhost pin`). Its own flake builds the same file.
+          iroh-vhost = pkgs.callPackage ./tools/iroh-vhost/package.nix { };
+
+          caos-watchdog = pkgs.buildGoModule {
+            pname = "caos-watchdog";
+            version = "0.1.0";
+            src = ./.;
+            modRoot = "prod/watchdog";
+            meta.mainProgram = "caos-watchdog";
+            vendorHash = "sha256-hpilWVREkwmhu9LczVyfYMPZuaZRtm1iNJk62n+aRO4=";
+          };
+
+          # `nix build` (no attr) yields the PINNED host tools: caos-cli,
+          # caos, caosd, and (on Linux) caos-runnerd in one result/bin. This is the
+          # explicit build step — its `caosd` bakes the exact server/runnerd/
+          # worker image store paths from THIS checkout, so `result/bin/caosd up`
+          # runs that fixed stack and never changes when you edit code. Rebuild
+          # (another `nix build`) is the only thing that moves it. The workspace
+          # binaries stay available as `.#caos`.
+          default = caos-tools;
+          inherit caos server runnerd caos-cli caosd caos-tools;
+          # The workspace stamped for the TEST world — what dev/stack-up builds
+          # a dev stack from, so a host client cannot drive it (and vice versa).
+          caos-test-world = testWorkspaceBins;
+
+          # The two stack-bring-up aggregates (see `stackInputs`): one nix
+          # build each, and both are handed to the same build-builtins.
+          caos-stack-inputs = stackInputs "caos-stack-inputs" workspaceBins;
+          caos-test-stack-inputs = stackInputs "caos-test-stack-inputs" testWorkspaceBins;
+          # Agent-harness worker binaries (run as curry(runner, bin)).
+          inherit worker-deep-deps;
+          # The staged /worker binaries (std/runner, std/cargo) and the rustc
+          # orchestrator (curry(runner, worker1)) — build-builtins.sh needs
+          # the binaries exposed.
+          inherit worker-runner worker-cargo worker-rustc;
+
+          # Image tarballs (build with `nix build`, then `docker load < result`).
+          caos-worker-flake-builder-docker = workerFlakeBuilderImage;
+          caos-worker-runner-docker = workerRunnerImage;
+          # The cargo worker, host-built and streamed like the flake-builder
+          # and the runner: std/cargo is no longer a published flake tree, so
+          # its image comes from here (see the cargoDef call above).
+          caos-worker-cargo-docker = workerCargoImage;
+          # The nix primitive's image (design/nix-bootstrap.md).
+          caos-worker-nix-docker = workerNixImage;
+
+          # The flake-builder contract (design/flake-images.md): handed a tree,
+          # the builder builds `#caosImage`. What this flake defines under that
+          # name is now the BUILD ENVIRONMENT, not the test stack — the stack
+          # is assembled from compiled binaries by caos-tools/build.sh, which
+          # is what lets the tree handed here be the reduced one.
+          #
+          # `#depsImage` is GONE, not renamed. It carried a source-independent
+          # closure across a tree hash that moved on every source edit; the
+          # reduced tree holds that hash still, so there is nothing left to
+          # carry. (design/flake-deps-image.md is retired with it.)
+          caosImage = builderImage;
+        };
+
+        apps = nixpkgs.lib.optionalAttrs (hermesGateway != null) {
+          # A Hermes gateway for a caos server, on its own (not part of caosd).
+          hermes-gateway = {
+            type = "app";
+            program = "${hermesGateway}/bin/hermes-gateway";
+          };
+        } // {
+          # Bring the whole stack up in the foreground (Ctrl-C tears it down).
+          caosd = {
+            type = "app";
+            program = "${caosd}/bin/caosd";
+          };
+
+        };
+
+        # No `checks` output at all. test, clippy, doc and fmt all run in
+        # tests/unit-{test,clippy,doc,fmt}, through the cargo worker, and
+        # `caos-cli run-tool test` is the only runner anyone invokes —
+        # there is no CI here, and
+        # CLAUDE.md's pre-commit step is nix build + caosd up + run-tool test.
+        #
+        # Every one of them had a reason to move, and the tests had the
+        # sharpest: git_transport_tests and chat::tests spawn git, which the
+        # worker's PATH carries (bake.env's gitMinimal) and a nix builder's
+        # does not, so that check had been silently red — on origin/main and
+        # before a56df5a. `doc` was red too, on two rustdoc links. A check
+        # nobody runs is a check that goes quietly red; one runner, and it is
+        # the one with the environment the work needs.
+
+        devShells.default = craneLib.devShell {
+          # Brings the pinned toolchain (rustc, cargo, clippy, rustfmt) onto PATH.
+          packages = [
+            pkgs.cargo-watch
+            pkgs.rust-analyzer
+            # rust-src is IDE-only (stdlib source for navigation), so it rides
+            # here rather than in the build toolchain — where it would land in
+            # every worker image for 51 MiB of nothing.
+            pkgs.rust-bin.stable.latest.rust-src
+            # NOTE: `caosd` is deliberately NOT on the dev-shell PATH. It used to
+            # be a launcher that ran `nix run .#caosd` against the live tree, so
+            # every `caosd up` silently rebuilt the image closure from whatever
+            # was checked out. The pinned workflow is explicit instead: run
+            # `nix build` to produce ./result/bin/caosd (baked to this checkout),
+            # then `./result/bin/caosd up`. The stack only moves when you rebuild.
+            # `fly` CLI: auth (`fly auth token`), org/region lookup, and operating
+            # the fly backend (apps, machines, logs). caosd itself talks to the
+            # Machines API + registry over HTTP and does not need this.
+            pkgs.flyctl
+            pkgs.jless
+            # The host-side Go programs are run, not built: `go run
+            # integrations/claude-code/drive/drive.go`, and the same for cloud/
+            # bootstrap.go, install.go and session.go when testing them by hand.
+            # They are stdlib-only single files with no go.mod, so this is the
+            # whole toolchain they need.
+            pkgs.go
+          ];
+        };
+      }
+    )
+    # nixosConfigurations is NOT per-system, so it cannot live inside
+    # eachDefaultSystem above -- it is merged alongside it. These are machine
+    # ROLES, named <daemon>-<environment>: a fresh box becomes one with
+    #
+    #   nix run github:softmax-universe/caos#deploy-caosd-prod
+    #
+    # and NOT with a bare `nixos-rebuild switch --flake ...#caosd-prod`, which
+    # fails on the per-machine caos.advertiseAddress the driver supplies.
+    #
+    # Each host takes its binaries from THIS flake's outputs, so the running
+    # stack and the checkout are the same revision by construction, pinned by
+    # flake.lock -- no separate `nix build`, no second lockfile to drift.
+    // {
+      nixosConfigurations.caosd-prod = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/amazon-image.nix"
+          ./prod/caosd/configuration.nix
+          {
+            networking.hostName = "caosd-prod";
+            caos.package = self.packages.x86_64-linux.caos-tools;
+            # caos.advertiseAddress is deliberately NOT set here: it differs
+            # per machine, so deploy.sh reads it off the host and layers it on.
+          }
+        ];
+      };
+
+      # Compute for caosd-prod on another machine (prod/runner). Pure, like
+      # the watchdog: the server is named by tickets fetched at boot, so every
+      # runner host is this one config.
+      nixosConfigurations.runner-prod = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/amazon-image.nix"
+          ./prod/runner/configuration.nix
+          {
+            networking.hostName = "runner-prod";
+            caos.runner.runnerd = self.packages.x86_64-linux.runnerd;
+            caos.runner.irohVhost = self.packages.x86_64-linux.iroh-vhost;
+          }
+        ];
+      };
+
+      # The box that watches caosd-prod. Pure: `nixos-rebuild switch --flake
+      # ...#watchdog-prod` works, because the one per-fleet fact (which
+      # instance to watch) is pinned here rather than read off a host.
+      nixosConfigurations.watchdog-prod = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/amazon-image.nix"
+          ./prod/watchdog/configuration.nix
+          {
+            networking.hostName = "watchdog-prod";
+            # The responder's Claude Code: see the claude-code input.
+            nixpkgs.overlays = [
+              (final: prev: { claude-code = claude-code.packages.${prev.stdenv.hostPlatform.system}.default; })
+            ];
+            caos.watchdog.package = self.packages.x86_64-linux.caos-watchdog;
+            caos.watchdog.clientTools = self.packages.x86_64-linux.caos-tools;
+            # caosd-prod, the one production server (prod/README.md).
+            caos.watchdog.targetInstance = "i-0c0aae25be3e44d8e";
+            # The run probe executes THIS checkout's std/hello on the server.
+            # A dirty tree still names its HEAD; the server fetches from
+            # GitHub, so whatever is deployed must be pushed.
+            caos.watchdog.helloRev = self.rev or (nixpkgs.lib.removeSuffix "-dirty" self.dirtyRev);
+          }
+        ];
+      };
+    };
+}

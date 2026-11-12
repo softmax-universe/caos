@@ -571,12 +571,52 @@ fn eval_value(
         if var.is_empty() || var.split_whitespace().count() != 1 {
             return Err(format!("eval-path: malformed variable reference {line:?}"));
         }
-        return env
-            .get(var)
-            .cloned()
-            .ok_or_else(|| format!("eval-path: undefined variable ${var}"));
+        return lookup_var(host, env, var);
     }
     eval_command(host, input_tree, line, env)
+}
+
+/// The object a `$VAR` or `$VAR/<path>` reference names (`reference` is what
+/// follows the `$`).
+///
+/// `$VAR/<path>` is the object at `<path>` inside `$VAR`'s result, reached by
+/// [`eval_path`] — so it descends THROUGH EVALUATION, exactly as a `:@@=`
+/// locator's `dir=` does: a `.caos-expr` met on the way is applied. This is what
+/// lets a line name something inside what an earlier line produced, without
+/// repeating how that was reached: a consumer that mounted caos names
+/// `$T/caos-core/deep-deps` instead of writing its pin a third time
+/// (design/nix-bootstrap.md).
+fn lookup_var(
+    host: &dyn EvalHost,
+    env: &HashMap<String, (String, String)>,
+    reference: &str,
+) -> Result<(String, String), String> {
+    let (var, path) = match reference.split_once('/') {
+        Some((var, path)) => (var, Some(path)),
+        None => (reference, None),
+    };
+    let (kind, oid) = env
+        .get(var)
+        .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
+    let Some(path) = path else {
+        return Ok((kind.clone(), oid.clone()));
+    };
+    if path.split('/').any(|c| c == "..") {
+        return Err(format!(
+            "eval-path: ${reference} climbs out of ${var} with `..`; a path inside a \
+             variable names only what is in it"
+        ));
+    }
+    let tree = match kind.as_str() {
+        "tree" => oid.clone(),
+        "commit" => commit_tree(host, oid)?,
+        other => {
+            return Err(format!(
+                "eval-path: ${reference} looks inside ${var}, which is a {other}, not a tree"
+            ))
+        }
+    };
+    eval_path(host, &tree, path).map_err(|e| format!("eval-path: ${reference}: {e}"))
 }
 
 /// Evaluate a single `run --base:<t>=<image> …` or `curry --base:<t>=<image> …`

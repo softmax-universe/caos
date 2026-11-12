@@ -249,6 +249,45 @@ func readOutputPath(path string) (string, error) {
 	return found, nil
 }
 
+// The directory of a client repo that holds its pin: `caos-std/` when that
+// directory carries a flake.lock, the repo root otherwise.
+//
+// A repo may keep the flake and the root expression in `caos-std/` (the
+// loader's `--output-path=.` then replaces that directory with caos' std), so
+// that what the loader is keyed on -- the directory it is run over -- does not
+// change every time the session does. Both layouts are supported: a repo that
+// builds with its own root flake keeps the pin at the root.
+func pinDir(repoDir string) string {
+	nested := filepath.Join(repoDir, "caos-std")
+	if _, err := os.Stat(filepath.Join(nested, "flake.lock")); err == nil {
+		return nested
+	}
+	return repoDir
+}
+
+// Where the mounted std is in the SESSION's tree, given where the pin lives
+// and the loader's --output-path. `.` means "here": the directory holding the
+// expression is what is replaced, so std is at that directory's own path. At
+// the repo root there is no such path -- the loader would replace the whole
+// session with std -- which nothing downstream can use.
+func stdMount(repoDir, dir, outputPath string) (string, error) {
+	rel, err := filepath.Rel(repoDir, dir)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.ToSlash(rel)
+	if outputPath == "." {
+		if rel == "." {
+			return "", fmt.Errorf("--output-path=. at the repo root would replace the whole session tree with caos' std, leaving no path to it; keep the expression in caos-std/ to mount there")
+		}
+		return rel, nil
+	}
+	if rel == "." {
+		return outputPath, nil
+	}
+	return rel + "/" + outputPath, nil
+}
+
 // The checkout is already on disk when this runs: `Cloned from seed bundle`
 // precedes `Running setup script` in the environment's own log. `-e .git`
 // rather than a directory test, because a worktree's .git is a FILE.

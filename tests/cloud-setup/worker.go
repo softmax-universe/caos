@@ -403,6 +403,34 @@ func main() {
 				"the refusal of %s does not say %q:\n%s", bad.arg, bad.says, refusal)
 		}
 
+		w.Step("a pin kept in caos-std/ is read from there, and the seed repoints it there")
+		// The loader mounts at `.` in this layout, so std is at the directory that
+		// holds the expression, and the seed has to rewrite THAT expression and lock.
+		nested := fixtureNestedRepo("/tmp/repo-nested")
+		nestedHead := git(nested, "rev-parse", "HEAD")
+		nestedBootstrap := exec.Command("go", "run", filepath.Join(cloud, "bootstrap.go"),
+			"--base="+base, "--server="+ticket, "--dev-commit="+devRev,
+			"--secret-readers="+readers, "--dev-tree="+devTree,
+			"--prefix=/tmp/prefix4", "--share-dir=/tmp/share4", "--homes=/tmp/home4")
+		nestedBootstrap.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+nested)
+		nestedBootstrap.Dir = "/tmp"
+		nestedOut, err := nestedBootstrap.CombinedOutput()
+		w.True(err == nil, "stage 1 failed on a pin kept in caos-std/: %v\n%s", err, nestedOut)
+		nestedDev := stamp("/tmp/share4/dev-stamp")
+		w.True(nestedDev["std_path"] == "caos-std" && nestedDev["repo"] == nested,
+			"a loader mounting at . in caos-std/ does not put std at caos-std: %v", nestedDev)
+		nestedSeed := nestedDev["seed"]
+		nestedExpr := git(nested, "show", nestedSeed+":caos-std/.caos-expr")
+		for _, dir := range []string{"std/flake-input-loader", "std"} {
+			want := ":@@=git+" + ticket + "?rev=" + devRev + "&dir=" + dir
+			w.True(strings.Contains(nestedExpr, want),
+				"the seed's caos-std/.caos-expr does not reach the dev server for %s:\n%s", dir, nestedExpr)
+		}
+		w.True(git(nested, "diff", "--name-only", nestedHead, nestedSeed) == "caos-std/.caos-expr\ncaos-std/flake.lock",
+			"the seed differs from HEAD in more than the pin in caos-std/:\n%s",
+			git(nested, "diff", "--stat", nestedHead, nestedSeed))
+		w.True(git(nested, "status", "--porcelain") == "", "stage 1 left the nested checkout dirty")
+
 		w.Step("stage 1 leaves a session ready to start")
 		devSettings := readJSON("/tmp/home1/.claude/settings.json")
 		w.True(strings.Contains(hookCommand(devSettings, "UserPromptSubmit"), "'--llm-step:@@=git+caos://local?rev="+devRev+"&dir=std/llm-step'"),

@@ -2129,12 +2129,24 @@ fn root_callback(
     if new == old {
         return Ok((block, None));
     }
+    // New content that is not a commit: named by hash so far, never read.
+    let content = match &new {
+        Some((mode, oid)) if *mode != Mode::Commit => Some(oid.clone()),
+        _ => None,
+    };
     let rebuilt = root::replace(state.store_mut(), &base_tree, &components, new, &message)?;
     // A gitlink's commit is not part of the closure of the tree that names it,
     // so each commit made on the way goes up on its own, deepest first, before
     // the proposal that names them.
     for commit in &rebuilt.commits {
-        state.push_code(commit)?;
+        state.publish_code(commit)?;
+    }
+    // With no gitlink on the way the content sits in the session's own tree,
+    // which git pushes: there, and only there, it has to be local.
+    if rebuilt.commits.is_empty() {
+        if let Some(content) = &content {
+            state.fetch_object(content)?;
+        }
     }
     let proposal = mint_source_tree_commit(state, &rebuilt.tree, &base, &message)?;
     state.push_code(&proposal)?;

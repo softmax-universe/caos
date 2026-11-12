@@ -2111,10 +2111,16 @@ fn root_callback(
             // commit it replaces.
             (Mode::Tree, Some((Mode::Commit, parent))) => {
                 let parent = parent.clone();
-                let minted = mint_source_tree_commit(state, &entry.oid, &parent, &message)?;
-                // The object API, not a git push: a push packs from the local
-                // graph, which no longer holds the parent's history.
-                state.publish_commit(&minted)?;
+                // The new tree is named BY HASH and never read; of the
+                // parent, only its own headers are.
+                let signature = inherited_signature(state.store(), &parent)?;
+                let minted = state.store_mut().commit(
+                    &entry.oid,
+                    std::slice::from_ref(&parent),
+                    &format!("{message}\n"),
+                    &signature,
+                )?;
+                state.publish_code(&minted)?;
                 Some((Mode::Commit, minted))
             }
             _ => Some((mode, entry.oid)),

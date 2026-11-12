@@ -72,8 +72,8 @@ pub const EXPR_VAR: &str = "CAOS_EXPR";
 /// `graft`'s reserved arg naming the tree it grafts into.
 pub const GRAFT_IN_ARG: &str = "in";
 /// The file, at a tree's root, listing the paths in it that were MOUNTED —
-/// grafted in as finished values (by `graft`, or by `std/flake-input-loader`)
-/// rather than checked in. One path per line, relative to that root, sorted. A
+/// grafted in as finished values (by the `mount` verb, or by
+/// `std/flake-input-loader`) rather than checked in. One path per line, relative to that root, sorted. A
 /// tree transform that rewrites a tree (deep-deps) treats each as opaque.
 pub const MOUNTS_FILE: &str = ".caos-mounts";
 

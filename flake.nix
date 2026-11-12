@@ -548,7 +548,7 @@
               inherit src;
               toolchain = mkRustToolchain linuxPkgs;
             };
-        workerCargoImage = pkgs.dockerTools.buildLayeredImage {
+        mkCargoImage = extraCommands: pkgs.dockerTools.buildLayeredImage {
           name = "caos-worker-cargo";
           tag = "latest";
           # CLEAN, exactly like the runner: no caos, no user db, no /tmp — and

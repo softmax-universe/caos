@@ -2255,10 +2255,7 @@ fn pin_result_in(git_dir: &str, refname: &str, hash: &str) -> Result<(), HttpErr
 /// accepted because Docker resolves by the digest; a bare tag or digest-like
 /// image id is not a registry locator pinned by the manifest digest required by
 /// the spec.
-fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), String> {
-    if allow_seeded && (reference == "seeded" || reference.starts_with("seeded-")) {
-        return Ok(());
-    }
+fn validate_docker_reference(reference: &str) -> Result<(), String> {
     if reference.is_empty() || reference.starts_with('-') {
         return Err(format!("invalid docker image: {reference:?}"));
     }

@@ -20,7 +20,7 @@
 # the whole core. (The flake builds from rust/, std/cargo, std/flake-builder, its
 # own files and the small integrations/prod/tools it names; nothing else.)
 EMPTY=graft --keep=x
-NIXIN=graft --in:@=. --tests=$EMPTY --dev=$EMPTY --design=$EMPTY --examples=$EMPTY --spec=$EMPTY --.github=$EMPTY
+NIXIN=graft --in:@=. --tests=$EMPTY --dev=$EMPTY --design=$EMPTY --examples=$EMPTY --spec=$EMPTY --.github=$EMPTY --README.md=x --AGENTS.md=x --CLAUDE.md=x --SPEC.md=x
 
 # The three images, built CLEAN: they depend on nothing in the workspace.
 RUNNERCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-runner-docker

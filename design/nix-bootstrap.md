@@ -1,6 +1,11 @@
 # Bootstrapping the core with a nix primitive (no seeder)
 
-Status: proposal. Nothing here is implemented.
+Status: **implemented**, as the stack of PRs that landed it: the design note, `graft` and
+`mount`, `$VAR/<path>`, the loader's `--mounts`, deep-deps stopping at mounts, the
+`nix=v1` primitive, removing the host/test world, the root expression building the
+core, deleting the seeder, and deleting the server's seeded-sentinel code. The
+proposal below is kept as written; "What differed" at the end lists where the
+implementation departed from it and why.
 
 ## Problem
 

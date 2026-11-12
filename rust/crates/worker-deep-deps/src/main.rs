@@ -47,16 +47,106 @@ fn main() -> ExitCode {
     run_worker("deep-deps", run)
 }
 
+/// The file at the tree's root listing the paths in it that were MOUNTED —
+/// grafted in as finished values by the evaluator's `graft` or by
+/// `std/flake-input-loader` (`caos_eval::MOUNTS_FILE`, same name and format:
+/// one path per line, relative to the root).
+const MOUNTS_FILE: &str = ".caos-mounts";
+
 fn run() -> Result<(), String> {
     let input = arg("in");
-    // The whole tree, in full: this pass reads every directory, and one
-    // recursive fetch is one round trip instead of one per directory.
-    caos(["get", "-r", &input])?;
+    let mounts = fetch(&input)?;
 
     let staged = scratch("out")?;
     let mut memo: HashMap<String, PathBuf> = HashMap::new();
-    deepen(&input, "", &staged, &mut memo, &mut Vec::new())?;
+    let mut pass = Pass {
+        base: &input,
+        mounts: &mounts,
+        memo: &mut memo,
+        visiting: Vec::new(),
+    };
+    pass.deepen("", &staged)?;
     caos(["put", path(&staged), "/cas/out"])
+}
+
+/// Materialize what this pass reads, and return the tree's mounts.
+///
+/// A MOUNT IS A FINISHED TREE (design/nix-bootstrap.md): it was evaluated —
+/// deepened — where it came from, so every `DEEP-DEPS/` in it is already filled
+/// and its `DEPS` name paths that only mean something THERE (std's
+/// `../../rust/crates/…`, from inside a consumer's `caos-std/`). So it is never
+/// walked, never deepened again, and never fetched: it is carried across by
+/// reference. That also keeps this pass from materializing a mounted core's
+/// image deltas, which are hundreds of MB and have no `DEPS` to find.
+///
+/// Without a `.caos-mounts` the whole tree is fetched in one recursive round
+/// trip, as before.
+fn fetch(input: &str) -> Result<Vec<String>, String> {
+    caos(["get", input])?;
+    let list = Path::new(input).join(MOUNTS_FILE);
+    if !list.exists() {
+        caos(["get", "-r", input])?;
+        return Ok(Vec::new());
+    }
+    caos(["get", path(&list)])?;
+    let text = fs::read_to_string(&list).map_err(|e| format!("reading {MOUNTS_FILE}: {e}"))?;
+    let mut mounts = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mount = normalize(line)?;
+        if mount.is_empty() {
+            return Err(format!("{MOUNTS_FILE} lists the root itself"));
+        }
+        mounts.push(mount);
+    }
+    fetch_except(input, "", &mounts)?;
+    Ok(mounts)
+}
+
+/// Fetch the directory at `rel` and everything below it EXCEPT the mounts: in
+/// one recursive round trip where no mount lies below, else level by level
+/// down to the mounts' parents.
+fn fetch_except(base: &str, rel: &str, mounts: &[String]) -> Result<(), String> {
+    let dir = full(base, rel);
+    if !mounts.iter().any(|m| strictly_under(m, rel)) {
+        return caos(["get", "-r", &dir]);
+    }
+    caos(["get", &dir])?;
+    for entry in entries(&dir)? {
+        let child = join(rel, &file_name(&entry));
+        if mounts.contains(&child) {
+            continue;
+        }
+        let meta =
+            fs::symlink_metadata(&entry).map_err(|e| format!("stat {}: {e}", entry.display()))?;
+        if meta.is_dir() {
+            fetch_except(base, &child, mounts)?;
+        } else if file_name(&entry) == "DEPS" {
+            caos(["get", path(&entry)])?; // the one file this pass reads
+        }
+    }
+    Ok(())
+}
+
+/// The mount `p` is at or below, if any.
+fn mount_of<'m>(mounts: &'m [String], p: &str) -> Option<&'m String> {
+    mounts.iter().find(|m| p == m.as_str() || strictly_under(p, m))
+}
+
+/// Whether `p` lies strictly below the directory `dir` (`""` is the root).
+fn strictly_under(p: &str, dir: &str) -> bool {
+    if dir.is_empty() {
+        !p.is_empty()
+    } else {
+        p.len() > dir.len() && p.starts_with(dir) && p.as_bytes()[dir.len()] == b'/'
+    }
+}
+
+fn full(base: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{rel}")
+    }
 }
 
 /// Deepen the directory at `rel` within the materialized tree at `base`, staging

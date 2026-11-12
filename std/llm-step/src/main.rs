@@ -2140,11 +2140,7 @@ fn mint_source_tree_commit(
     parent: &Oid,
     message: &str,
 ) -> Result<Oid, String> {
-    // The tree is fetched so a later merge of this commit finds it locally.
     state.fetch_object(tree)?;
-    // Of the parent, only its own headers are read: one object, not a git
-    // fetch, which would bring the parent's whole history.
-    state.seed_commit(parent)?;
     let signature = inherited_signature(state.store(), parent)?;
     let commit = state.store_mut().commit(
         tree,

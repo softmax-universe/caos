@@ -2338,6 +2338,37 @@ fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
         .map_err(|e| HttpError::new(500, format!("converting git image {image}: {e}")))
 }
 
+/// The image that runs the nix primitive `base` (`nix:v1`): THIS STACK'S own
+/// flake-builder, whose /worker has a `nix` stage that builds a flake
+/// attribute and adds nothing (design/nix-bootstrap.md).
+///
+/// Which stack ran it is deliberately not part of the job's key — that is the
+/// point of the primitive — so the image is looked up here, at dispatch, and
+/// never written into an ArgTree. `stack/serve` names the file
+/// (`CAOS_NIX_IMAGE_FILE`) and `build-builtins.sh` writes the git image hash
+/// into it; it is read per job, so a re-publish takes effect without a
+/// restart.
+fn nix_image(base: &str) -> Result<String, HttpError> {
+    let version = &base[caos_eval::NIX_SCHEME.len()..];
+    caos_eval::nix_base(version).map_err(|e| HttpError::new(400, e))?;
+    let Ok(file) = std::env::var("CAOS_NIX_IMAGE_FILE") else {
+        return Err(HttpError::new(
+            503,
+            format!("{base}: this stack runs no nix primitive (CAOS_NIX_IMAGE_FILE is unset)"),
+        ));
+    };
+    let image = std::fs::read_to_string(&file)
+        .map_err(|e| HttpError::new(503, format!("{base}: reading {file}: {e}")))?;
+    let image = image.trim();
+    if image.len() != 40 || !image.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(HttpError::new(
+            503,
+            format!("{base}: {file} holds {image:?}, not a git image hash"),
+        ));
+    }
+    Ok(image.to_string())
+}
+
 /// The lock for one cache key, minted on first use. A redis cache read followed
 /// by a redis cache write is CHECK-THEN-ACT, and this server answers requests on
 /// a thread pool: when a suite fans out, every client asks for the same image at

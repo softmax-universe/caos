@@ -61,17 +61,20 @@ LOCK
 
 # The consumer's root expression, as TEXT — the only thing the loader sees of
 # it, and the only place a rev is pinned.
-expr_pinning() { # <rev> -> a /cas path
-  printf 'run --base:@=loader --in:@=. --expr=$CAOS_EXPR --input=demo --input-tree:@@=%s?rev=%s&dir=std --output-path=vendor/demo-std\n' \
-    "$REPO" "$1" > /tmp/expr
-  caos put /tmp/expr "/cas/expr-$1" >/dev/null || fail "publishing the expression"
-  echo "/cas/expr-$1"
+expr_pinning() { # <rev> [<output-path>] -> a /cas path
+  local out=${2:-vendor/demo-std} key
+  key=$(printf '%s' "$out" | tr -c 'a-z0-9' _)
+  printf 'run --base:@=loader --in:@=. --expr=$CAOS_EXPR --input=demo --input-tree:@@=%s?rev=%s&dir=std --output-path=%s\n' \
+    "$REPO" "$1" "$out" > /tmp/expr
+  caos put /tmp/expr "/cas/expr-$1-$key" >/dev/null || fail "publishing the expression"
+  echo "/cas/expr-$1-$key"
 }
 
-load() { # <rev-the-expression-pins> -> the ArgTree to run
+load() { # <rev-the-expression-pins> [<output-path>] -> the ArgTree to run
+  local out=${2:-vendor/demo-std}
   caos curry --base:@=/cas/args/loader \
-    --expr:@="$(expr_pinning "$1")" --input=demo \
-    --input-tree:@="$(input_tree)" --output-path=vendor/demo-std
+    --expr:@="$(expr_pinning "$1" "$out")" --input=demo \
+    --input-tree:@="$(input_tree)" --output-path="$out"
 }
 
 case "$stage" in

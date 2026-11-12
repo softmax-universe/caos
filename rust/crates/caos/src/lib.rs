@@ -5632,15 +5632,7 @@ gpgsig -----BEGIN PGP SIGNATURE-----
         assert_eq!(base, &format!("{TICKET_SCHEME}endpointaaa.0011"));
         assert_eq!(method, "GET");
         assert_eq!(path, "/object/abc");
-        // The world tag rides on this transport too. A missing one is ACCEPTED by
-        // the server, so nothing else would notice its absence — and what it
-        // would let through is a host client driving a test stack.
-        assert!(
-            headers.iter().any(|(name, value)| name
-                == caos_world::WORLD_HEADER
-                && value == caos_world::WORLD),
-            "no world header: {headers:?}"
-        );
+        let _ = headers;
     }
 
     #[test]

@@ -368,15 +368,15 @@ concurrency.
   that true is the RESULT CACHE'S NAMESPACE.** The binary is not in the key and
   cannot be: a worker image's `/bin/caos` is copied in by the flake-builder
   (`std/flake-builder/worker`: `cp /bin/caos "$l/usr/bin/caos"`), and the
-  flake-builder is itself reached through a seeded sentinel whose ArgTree is
-  `{base: docker://seeded…, in: <std entry tree>}` — checked-in text and nothing
-  else, with the binary appearing only in the seeder's ANSWER. Downstream is
-  fine (a std entry's `base` is the flake-builder delta, which literally
-  contains `layer00/bin/caos`), so the whole chain hangs on those five seeded
-  keys moving. They don't — `run_work_request` reads redis BEFORE dispatching to
-  any runner, so the fresh seed record is never asked and the previous deploy's
-  delta comes back. Every entry then bases on it, consistently, which is why
-  nothing disagrees. What closes it is `CAOS_CACHE_NAMESPACE`: the nix out path
+  flake-builder is itself part of the core. The core used to be answered by a
+  seeder under keys that named only a sentinel and checked-in text, with the
+  binary appearing only in the answer, so a rebuilt `caos` left those keys
+  unmoved and `run_work_request` (which reads redis BEFORE dispatching) handed
+  back the previous deploy's delta. The core is built by the `nix=v1` primitive
+  now, under a key that names the flake it is built from, so that particular
+  hole is closed at its source; the namespace is kept until the stack has run
+  without it, and dropping it is a later step. What it does today is
+  `CAOS_CACHE_NAMESPACE`: the nix out path
   of the stack inputs, prefixed onto `caos:result:` keys only, set by
   `stack/bootstrap` for the host stack and by `dev/stack-up` for a dev one.
   A different build is a different namespace, so it cannot read the old answers.

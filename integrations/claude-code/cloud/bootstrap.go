@@ -527,7 +527,7 @@ func installHelper(prefix, slug, tag string) {
 // UNREFERENCED, via commit-tree into a throwaway index: nothing points at it, so
 // `git push` cannot carry it and the ticket it contains -- a credential -- stays
 // out of every pushable ref.
-func seedCommit(repoDir, server, sha string) string {
+func seedCommit(repoDir, pinRel, server, sha string) string {
 	index, err := os.CreateTemp("", "caos-seed-index")
 	if err != nil {
 		fatal("could not make a seed index: %v", err)

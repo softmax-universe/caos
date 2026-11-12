@@ -158,6 +158,7 @@ pub(crate) fn eval_endpoint(
     query: &str,
     secrets: &crate::secrets::Context,
     token: Option<&str>,
+    parent: Option<&str>,
 ) -> Result<Vec<u8>, HttpError> {
     let by_hash = query_param(query, "root:hash");
     let by_locator = query_param(query, "root:@@");

@@ -97,12 +97,7 @@ build)
   [ -e /tmp/ws/flake.lock ] \
     || fail "no flake.lock: the flake tree carries none and no --lock was bound"
   tag="caos-registry:5000/caos:flake-$H"
-  # Single-user, unsandboxed nix: root in a container with no nixbld group and
-  # no privilege to build a sandbox.
-  nixf() {
-    nix --extra-experimental-features "nix-command flakes" \
-      --option build-users-group "" --option sandbox false "$@"
-  }
+
   # Unsandboxed builders run with HOME=/homeless-shelter; a builder that
   # writes $HOME (go builds do — e.g. a flake compiling the slimmed docker
   # client) leaves that directory behind, and nix (2.35) then refuses to

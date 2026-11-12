@@ -142,6 +142,12 @@ fn run(args: &[String]) -> Result<(), String> {
             (Some(name), Some(arg_tree), None) => caos::caos_trace_child(&http()?, name, arg_tree),
             _ => Err(usage(args)),
         },
+        // `job-req` — print the request hash of the job this worker is running,
+        // for a client on another stack to take as CAOS_TRACE_PARENT.
+        Some("job-req") => match args.get(2) {
+            None => caos::caos_job_req(),
+            Some(_) => Err(usage(args)),
+        },
         // `ref-set <ref> (--new[:@]=<v> | --delete) (--expected[:@]=<v> |
         // --force)` — compare-and-swap a named mutable ref under refs/heads/
         // (design/refs.md). `ref-get` is dispatched in `main`, for its exit

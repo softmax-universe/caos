@@ -208,8 +208,8 @@ fn finish() -> Result<(), String> {
     let runtime = if Path::new(&output_runner).exists() {
         Arg::Path(&output_runner)
     } else {
-        default_runner = read_arg("runner")?;
-        Arg::Hash(&default_runner)
+        default_runner = read_image("runner")?;
+        default_runner.as_arg()
     };
     let curried = caos_curry(runtime, &[("worker1", Arg::Path(&bin))])?;
     caos(["get-hash", &curried, "/cas/out"])

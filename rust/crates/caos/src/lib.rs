@@ -3081,6 +3081,11 @@ fn build_arg_entries(
             // indistinguishable from a local path arg.
             ArgType::Remote => eval_remote_arg(t, value, &Secrets::default())
                 .map_err(|e| format!("`{name}`: {e}"))?,
+            ArgType::Nix => {
+                return Err(format!(
+                    "`{name}`: :nix= names the nix primitive and is only a --base"
+                ))
+            }
         };
 
         entries.push(Entry {

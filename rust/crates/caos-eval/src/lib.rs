@@ -745,8 +745,7 @@ fn eval_graft(
         mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
     }
     entries.retain(|e| {
-        entry_name(e) != MOUNTS_FILE.as_bytes()
-            && !grafted.iter().any(|g| g.filename == e.filename)
+        entry_name(e) != MOUNTS_FILE.as_bytes() && !grafted.iter().any(|g| g.filename == e.filename)
     });
     entries.extend(grafted);
     let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();

@@ -414,17 +414,22 @@
         # the mode when it rebuilds the layer, so nix never holds a setuid file.
         # The static pieces (user db, /usr/bin/env, /tmp) are checked in at
         # stack/core-layers/static, since they never move.
-        coreLayerCaos = pkgs.runCommand "caos-core-layer-caos" { } ''
-          mkdir -p $out/bin
-          install -m 755 ${workspaceBins}/bin/caos $out/bin/caos
-          printf '{"mode":"4755","uid":0,"gid":0}' > $out/bin/caos.caosmeta
+        #
+        # ALL OF THEM IN ONE OUTPUT, `caos-core-parts`, because each `nix=v1` job
+        # runs in a fresh container and five jobs that each depend on the
+        # workspace built it five times (measured: 330 to 450 s each, serially,
+        # about 31 of a 46 minute cold core). One output is one job and one
+        # build. The root expression names the pieces by path
+        # (`$PARTS/caos-layer`, `$PARTS/worker-runner-layer`, ...).
+        caosCoreParts = pkgs.runCommand "caos-core-parts" { } ''
+          mkdir -p $out/caos-layer/bin $out/worker-runner-layer $out/worker-cargo-layer
+          install -m 755 ${workspaceBins}/bin/caos $out/caos-layer/bin/caos
+          printf '{"mode":"4755","uid":0,"gid":0}' > $out/caos-layer/bin/caos.caosmeta
+          install -m 755 ${workspaceBins}/bin/worker-runner $out/worker-runner-layer/worker
+          install -m 755 ${workspaceBins}/bin/worker-cargo $out/worker-cargo-layer/worker
+          install -m 755 ${workspaceBins}/bin/worker-deep-deps $out/worker-deep-deps
+          install -m 755 ${workspaceBins}/bin/worker-rustc $out/worker-rustc
         '';
-        coreLayerWorker =
-          name:
-          pkgs.runCommand "caos-core-layer-${name}" { } ''
-            mkdir -p $out
-            install -m 755 ${workspaceBins}/bin/${name} $out/worker
-          '';
 
         # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
         # the one script that builds a flake attribute and adds nothing to it.

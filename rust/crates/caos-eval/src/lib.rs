@@ -35,21 +35,14 @@
 //! curry --base=$NAME --worker1:@=path       # the value (any verb, or a bare $NAME)
 //! ```
 //!
-<<<<<<< 3736f83846cfd26d9a605cb14404620a2cdcafea
-//! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`, `graft`) are
-//! lowercase, so a line is an assignment iff it starts `NAME=<verb>`.
-//! A `run` value evaluates to the run's result; a `curry` value to the curried
-//! ArgTree; a `graft` value to `--in` with the named entries set (and recorded
-//! in `.caos-mounts`). `--base=$NAME` names the object a prior line produced,
-//! and `$NAME/<path>` (anywhere `$NAME` may appear) the object at `<path>`
-//! inside it, reached through evaluation like any other descent.
-=======
 //! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`, `graft`,
 //! `mount`) are lowercase, so a line is an assignment iff it starts
 //! `NAME=<verb>`. A `run` value evaluates to the run's result; a `curry` value
 //! to the curried ArgTree; a `graft` value to `--in` with the named entries set;
-//! a `mount` value to the same, with the names also recorded in `.caos-mounts`. `--base=$NAME` names the object a prior line produced.
->>>>>>> 2283827543f4463a12cf7d0cc842a7d38fcd057c
+//! a `mount` value to the same, with the names also recorded in `.caos-mounts`.
+//! `--base=$NAME` names the object a prior line produced, and `$NAME/<path>`
+//! (anywhere `$NAME` may appear) the object at `<path>` inside it, reached
+//! through evaluation like any other descent.
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from

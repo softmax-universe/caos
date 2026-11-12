@@ -3219,6 +3219,19 @@ fn ticket_of(
         .map_err(|e| HttpError::new(500, e))
 }
 
+/// The trace ticket of a session: the root every one of its tool calls hangs
+/// off, so `caos-cli watch <ticket>` shows what the session is doing.
+///
+/// Derived from the session id alone, the way [`ticket_of`] derives a call's
+/// ticket from its content, so anything that knows the session can name it
+/// without asking a server. It shares no input with a call's own ticket: a call
+/// stays traceable by itself, and the session names it as a child.
+pub(crate) fn session_trace_root(config: &Config, session: &str) -> Result<String, HttpError> {
+    store_git_blob(config, &caos_world::session_trace_material(session))
+        .map(|id| id.to_string())
+        .map_err(|e| HttpError::new(500, e))
+}
+
 fn eval_expression(
     config: &Config,
     expression: &Expression,

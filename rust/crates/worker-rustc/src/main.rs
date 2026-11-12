@@ -105,7 +105,7 @@ fn start() -> Result<(), String> {
     // The default runner arrives the SAME way and is not normally a caller's
     // argument: rustc DEPENDS on it and curries onto it itself. A tool that
     // needs extra runtime capabilities can pass the distinct `output-runner`
-    // arg; do not rebind `runner`, which is already part of the seeded rustc
+    // arg; do not rebind `runner`, which is already part of rustc's own
     // curry and also determines where this factory executes.
     let runner = read_image("runner")?;
 

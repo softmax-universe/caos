@@ -30,13 +30,15 @@
 //! NAME=run   --base:<type>=<image> [--k=v | --k:@=path]
 //! NAME=curry --base:<type>=<image> [--k=v | --k:@=path]
 //! NAME=<<TERM … TERM                        # a here-string: NAME is a literal blob
-//! curry --base=$NAME --worker1:@=path       # the value (a run/curry, or a bare $NAME)
+//! NAME=graft [--in:<type>=<tree>] --name[:<type>]=value …
+//! curry --base=$NAME --worker1:@=path       # the value (a run/curry/graft, or a bare $NAME)
 //! ```
 //!
-//! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`) are
-//! lowercase, so a line is an assignment iff it starts `NAME=run`/`NAME=curry`.
+//! Variable names are `[A-Z][A-Z0-9_]*`; the verbs (`run`, `curry`, `graft`) are
+//! lowercase, so a line is an assignment iff it starts `NAME=<verb>`.
 //! A `run` value evaluates to the run's result; a `curry` value to the curried
-//! ArgTree. `--base=$NAME` names the object a prior line produced.
+//! ArgTree; a `graft` value to `--in` with the named entries set (and recorded
+//! in `.caos-mounts`). `--base=$NAME` names the object a prior line produced.
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from

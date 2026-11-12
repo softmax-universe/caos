@@ -3,4 +3,3 @@
 ../../std/hello hello
 ../../caos-core/rustc rustc
 ../../caos-core/cargo cargo
-# (throwaway: a fresh stack for the full run)

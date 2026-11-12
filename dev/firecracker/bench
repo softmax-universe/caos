@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Run the SAME job on several runner pools and compare client-side latency.
+#
+#   dev/firecracker/runnerd docker &        # the control pool
+#   dev/firecracker/runnerd firecracker &   # the pool under test
+#   dev/firecracker/bench -n 20 -p 4        # docker vs firecracker, 20 jobs each, 4 at a time
+#   dev/firecracker/bench -n 10 -- --base:@=std/hello --greeting=hi
+#
+# Each job differs from every other only by `--bench-run=<unique>`, so each is a
+# genuine cache miss that RUNS, while everything it depends on (the image, its
+# build) stays a hit and is not being measured. Pools are run in alternating
+# rounds, so drift on the host (another suite starting, a cache warming) lands
+# on both sides instead of on whichever pool happened to go second.
+#
+# What is timed is `caos-cli run` end to end: submit, dispatch, worker start
+# (container or VM — or a WARM runner already up for that image, which is the
+# point of the runner protocol and so is measured as-is), the job, the result.
+# For the VM's own split, see the pool's log: runnerd prints
+# `firecracker prepare <ms>, vm <ms>` per VM.
+#
+# Options:
+#   -n N      jobs per pool (default 10)
+#   -p P      concurrent jobs per round (default 1)
+#   -P pools  space-separated pool names (default "docker firecracker")
+#   -- ARGS   the job (default: --base:@=std/hello --greeting=bench)
+set -euo pipefail
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
+
+n=10
+par=1
+pools="docker firecracker"
+while getopts "n:p:P:" opt; do
+  case "$opt" in
+    n) n="$OPTARG" ;;
+    p) par="$OPTARG" ;;
+    P) pools="$OPTARG" ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+job=("$@")
+if [ "${#job[@]}" -eq 0 ]; then
+  job=(--base:@=std/hello --greeting=bench)
+fi
+
+cli="${CAOS_CLI:-$repo/result/bin/caos-cli}"
+export CAOS_SERVER_URL="${CAOS_SERVER_URL:-http://127.0.0.1:9090}"
+out="$(mktemp -d "${TMPDIR:-/tmp}/caos-bench.XXXXXX")"
+run_id="$(date +%s)-$$"
+echo "bench: ${job[*]} | $n jobs/pool, $par at a time | results in $out" >&2
+
+# One job: print "<pool> <ok|fail> <ms>" and keep its output for a post-mortem.
+one() { # <pool> <index>
+  local pool="$1" i="$2" start end status
+  start=$(date +%s%N)
+  if "$cli" run "${job[@]}" --required-pool="$pool" --bench-run="$run_id-$pool-$i" \
+    >"$out/$pool-$i.log" 2>&1; then
+    status=ok
+  else
+    status=fail
+  fi
+  end=$(date +%s%N)
+  echo "$pool $status $(((end - start) / 1000000))"
+}
+
+done_jobs=0
+while [ "$done_jobs" -lt "$n" ]; do
+  batch=$((n - done_jobs < par ? n - done_jobs : par))
+  for pool in $pools; do
+    pids=()
+    for ((k = 0; k < batch; k++)); do
+      one "$pool" $((done_jobs + k)) >>"$out/times" &
+      pids+=($!)
+    done
+    for pid in "${pids[@]}"; do
+      wait "$pid"
+    done
+  done
+  done_jobs=$((done_jobs + batch))
+  echo "bench: $done_jobs/$n" >&2
+done
+
+printf '%-12s %4s %5s %8s %8s %8s %8s %8s\n' pool ok fail min p50 p90 max mean
+for pool in $pools; do
+  fails="$(grep -c "^$pool fail " "$out/times" || true)"
+  grep "^$pool ok " "$out/times" | while read -r _ _ ms; do echo "$ms"; done | sort -n >"$out/$pool.ms"
+  count="$(wc -l <"$out/$pool.ms")"
+  if [ "$count" -eq 0 ]; then
+    printf '%-12s %4s %5s   (no successful jobs — see %s/%s-*.log)\n' "$pool" 0 "$fails" "$out" "$pool"
+    continue
+  fi
+  at() { sed -n "$(( ($1 * (count - 1)) / 100 + 1 ))p" "$out/$pool.ms"; }
+  mean="$(awk '{ s += $1 } END { printf "%d", s / NR }' "$out/$pool.ms")"
+  printf '%-12s %4s %5s %8s %8s %8s %8s %8s\n' "$pool" "$count" "$fails" \
+    "$(at 0)" "$(at 50)" "$(at 90)" "$(at 100)" "$mean"
+done
+echo "(milliseconds, client-side, per job)"

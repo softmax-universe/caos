@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Run a runnerd on THIS host as a dedicated pool next to the stack's own:
+#
+#   dev/firecracker/runnerd                 # firecracker runtime, pool "firecracker"
+#   dev/firecracker/runnerd docker          # docker runtime, pool "docker"
+#   CAOS_RUNNER_SLOTS=8 dev/firecracker/runnerd
+#
+# The docker form is the benchmark's control: the same runnerd, placement and
+# slot count as the firecracker pool, differing only in the runtime — rather
+# than the stack's shared generic pool, whose other traffic would be noise.
+#
+# It takes only jobs carrying `--required-pool=<pool>` (design/runner-protocol.md:
+# the rendezvous is symmetric, so the generic docker pool never takes them and
+# this pool never takes anything else). That is what makes it safe to run next
+# to a live stack, and what lets a benchmark send the SAME job to either runtime.
+#
+# Needs dev/firecracker/setup-host first (taps for every slot), and /dev/kvm.
+# Everything else comes from the flake's `caos-fc-host` output, built here.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+
+runtime="${1:-firecracker}"
+case "$runtime" in
+  firecracker | docker) ;;
+  *)
+    echo "usage: $0 [firecracker|docker]" >&2
+    exit 2
+    ;;
+esac
+pool="${CAOS_POOL:-$runtime}"
+export CAOS_RUNNER_SLOTS="${CAOS_RUNNER_SLOTS:-4}"
+# The host stack publishes its server on :9090 (caosd up). The guests reach it
+# through the bridge; runnerd rewrites this loopback address for them.
+export CAOS_SERVER_URL="${CAOS_SERVER_URL:-http://127.0.0.1:9090}"
+# The stack's runner token, when it has one, is the caller's to export.
+
+host="$(nix build --no-link --print-out-paths "$repo#caos-fc-host")"
+export CAOS_RUNTIME="$runtime"
+export CAOS_RUNNER_REQUIRE="required-pool=$pool"
+# The stack's engine, for pulling and exporting images (and, for the docker
+# runtime, running them). Rootless docker here.
+if [ -z "${DOCKER_HOST:-}" ] && [ -S "/run/user/$(id -u)/docker.sock" ]; then
+  export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+fi
+if [ "$runtime" = docker ]; then
+  # Containers join the stack's network and find the server by name there,
+  # as the stack's own runnerd's do; runnerd itself polls the published port.
+  export CAOS_DOCKER_NETWORK="${CAOS_DOCKER_NETWORK:-caos-net}"
+  export CAOS_WORKER_SERVER_URL="${CAOS_WORKER_SERVER_URL:-http://caos-server}"
+  exec "$host/bin/runnerd"
+fi
+export CAOS_FC_KERNEL="${CAOS_FC_KERNEL:-$host/share/vmlinux}"
+export CAOS_FC_BIN="${CAOS_FC_BIN:-$host/bin/firecracker}"
+export CAOS_FC_MKFS="${CAOS_FC_MKFS:-$host/bin/mkfs.ext4}"
+export CAOS_FC_INIT="${CAOS_FC_INIT:-$host/bin/caos-fc-init}"
+# The conversion appends to a tarball with GNU tar.
+export PATH="$host/bin:$PATH"
+
+exec "$host/bin/runnerd"

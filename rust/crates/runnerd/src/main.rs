@@ -43,6 +43,8 @@
 //! they get their own netns on a bridge it has to be a name that resolves
 //! there. `stack/serve` supplies whichever the placement needs.
 
+mod firecracker;
+
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -110,8 +112,24 @@ const POLL_TTL: Duration = Duration::from_secs(60);
 /// Backoff after a failed poll (server down or restarting).
 const POLL_RETRY: Duration = Duration::from_secs(2);
 
+/// What a slot runs a job IN. The job, the image and the protocol are the same
+/// either way; see `firecracker.rs` for what the VM runtime rebuilds of an
+/// engine.
+enum Runtime {
+    Docker,
+    Firecracker(Box<firecracker::FcConfig>),
+}
+
 struct Config {
     server_url: String,
+    /// The server URL handed to WORKERS, from `CAOS_WORKER_SERVER_URL`,
+    /// defaulting to `server_url`. They differ when runnerd and its workers sit
+    /// on different networks: a host runnerd polls a published port on
+    /// loopback, while its containers resolve the stack by name on the engine
+    /// network (and a VM reaches the host through its bridge — the firecracker
+    /// runtime rewrites a loopback host to that itself).
+    worker_server_url: String,
+    runtime: Runtime,
     /// Address (host:port) of a redis a worker may use for its OWN caching,
     /// injected as `CAOS_WORKER_REDIS_ADDR` into every worker container. This
     /// is a courtesy, not a contract: unset means no worker is offered one, so
@@ -296,15 +314,37 @@ fn as_address(url: &str) -> String {
 
 fn main() {
     install_termination_handlers();
+    let slots: u32 = env_or("CAOS_RUNNER_SLOTS", "8").parse().unwrap_or(8);
+    let runtime = match env_or("CAOS_RUNTIME", "docker").as_str() {
+        "docker" => Runtime::Docker,
+        "firecracker" => match firecracker::FcConfig::from_env(slots) {
+            Ok(fc) => Runtime::Firecracker(Box::new(fc)),
+            Err(e) => {
+                eprintln!("caos-runnerd: firecracker runtime: {e}");
+                std::process::exit(2);
+            }
+        },
+        other => {
+            eprintln!("caos-runnerd: CAOS_RUNTIME={other:?} is neither docker nor firecracker");
+            std::process::exit(2);
+        }
+    };
+    let server_url = as_address(&env_or("CAOS_SERVER_URL", "http://caos-server"));
     let config = Arc::new(Config {
-        server_url: as_address(&env_or("CAOS_SERVER_URL", "http://caos-server")),
+        worker_server_url: std::env::var("CAOS_WORKER_SERVER_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|u| as_address(&u))
+            .unwrap_or_else(|| server_url.clone()),
+        server_url,
+        runtime,
         worker_redis_addr: std::env::var("CAOS_WORKER_REDIS_ADDR")
             .ok()
             .filter(|s| !s.is_empty()),
         token: std::env::var("CAOS_RUNNER_TOKEN")
             .ok()
             .filter(|t| !t.is_empty()),
-        slots: env_or("CAOS_RUNNER_SLOTS", "8").parse().unwrap_or(8),
+        slots,
         network: env_or("CAOS_DOCKER_NETWORK", "caos-net"),
         docker_bin: env_or("CAOS_DOCKER_BIN", "docker"),
         docker_args: std::env::var("CAOS_DOCKER_ARGS")
@@ -325,7 +365,14 @@ fn main() {
         "caos-runnerd: {} slots, server {}, network {}, requiring {:?}",
         config.slots, config.server_url, config.network, config.required
     );
-    reap_leftovers(&config);
+    match &config.runtime {
+        Runtime::Docker => reap_leftovers(&config),
+        Runtime::Firecracker(fc) => eprintln!(
+            "caos-runnerd: runtime {}; workers dial {}",
+            fc.describe(),
+            firecracker::guest_server_url(&config.worker_server_url, fc.host_ip())
+        ),
+    }
     let mut threads = Vec::new();
     for slot in 1..config.slots {
         let config = Arc::clone(&config);
@@ -429,7 +476,7 @@ fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
 fn slot_loop(config: &Config, slot: u32) {
     loop {
         match poll(config) {
-            Ok(Some(job)) => run_container(config, slot, &job),
+            Ok(Some(job)) => run_job(config, slot, &job),
             Ok(None) => {} // idle (or evicted, which we ignore): poll again
             Err(e) => {
                 eprintln!("runnerd slot {slot}: poll failed: {e}");
@@ -527,9 +574,25 @@ fn poll(config: &Config) -> Result<Option<Job>, String> {
     Ok(Some(parsed))
 }
 
-/// Run the job's container and wait it out. The container posts its own
-/// results; we only backstop a crash — nonzero exit means it may never have
-/// reported, so post a failure with the captured log (410 if it did report).
+/// Run a claimed job in this runnerd's runtime and wait it out. The worker
+/// posts its own results; we only backstop a crash — a nonzero exit means it
+/// may never have reported, so post a failure with the captured log (410 if
+/// it did report).
+fn run_job(config: &Config, slot: u32, job: &Job) {
+    let failure = match &config.runtime {
+        Runtime::Docker => run_container(config, slot, job),
+        Runtime::Firecracker(fc) => firecracker::run(config, fc, slot, job),
+    };
+    if let Some((error, log)) = failure {
+        eprintln!("runnerd slot {slot}: arg_tree {}: {error}", job.arg_tree);
+        if let Err(e) = post_failure(config, job, &error, &log) {
+            eprintln!("runnerd slot {slot}: reporting failure: {e}");
+        }
+    }
+}
+
+/// Run the job's container and wait it out; `Some((error, log))` when it
+/// exited nonzero or could not be run.
 ///
 /// Deliberately NOT `--rm`: an *attached* `docker run --rm` waits with
 /// `condition=removed`, i.e. `POST /containers/<id>/wait?condition=removed`,
@@ -539,7 +602,7 @@ fn poll(config: &Config) -> Result<Option<Job>, String> {
 /// turns that spin into a permanent one. So we take exit-wait only — which the
 /// engine answers from an event, not a poll — and delete the container
 /// ourselves afterwards.
-fn run_container(config: &Config, slot: u32, job: &Job) {
+fn run_container(config: &Config, slot: u32, job: &Job) -> Option<(String, String)> {
     eprintln!(
         "runnerd slot {slot}: arg_tree {} -> container ({})",
         job.arg_tree, job.image_ref
@@ -622,7 +685,10 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
         command.args(["-e", &format!("CAOS_WORKER_REDIS_ADDR={addr}")]);
     }
     let out = command
-        .args(["-e", &format!("CAOS_SERVER_URL={}", config.server_url)])
+        .args([
+            "-e",
+            &format!("CAOS_SERVER_URL={}", config.worker_server_url),
+        ])
         .args(["--entrypoint", CAOS_BIN])
         .arg(&job.image_ref)
         .arg("runner")
@@ -632,7 +698,7 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
     // plain `rm -f` is one DELETE the engine answers synchronously — none of
     // the auto-remove machinery, and nothing polls.
     remove_container(config, &name);
-    let failure = match out {
+    match out {
         Ok(out) => {
             // Relay the container's log (the runner relays its workers' output
             // to its stderr) so it survives the container's removal.
@@ -647,12 +713,6 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
             }
         }
         Err(e) => Some((format!("running {}: {e}", config.docker_bin), String::new())),
-    };
-    if let Some((error, log)) = failure {
-        eprintln!("runnerd slot {slot}: arg_tree {}: {error}", job.arg_tree);
-        if let Err(e) = post_failure(config, job, &error, &log) {
-            eprintln!("runnerd slot {slot}: reporting failure: {e}");
-        }
     }
 }
 

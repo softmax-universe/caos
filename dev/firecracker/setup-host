@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Host networking for runnerd's firecracker runtime — the only part of it that
+# needs root, so it is done ONCE, here, and never by runnerd itself.
+#
+#   as-root --why "firecracker worker networking" -- dev/firecracker/setup-host
+#
+# Creates, idempotently:
+#   - bridge $CAOS_FC_BRIDGE (caosfc0) at $CAOS_FC_HOST_IP/$CAOS_FC_PREFIX_LEN
+#     (10.231.0.1/24): the guests' gateway, and how they reach the stack's
+#     published ports (a loopback CAOS_SERVER_URL is rewritten to this address)
+#   - taps ${CAOS_FC_TAP_PREFIX}0..N-1 (caosfc-tap*) on that bridge, OWNED BY
+#     the invoking user, so an unprivileged runnerd can attach them
+#   - IPv4 forwarding and a MASQUERADE for the guests' subnet, because workers
+#     are not network-free (AGENTS.md): they fetch flake inputs and call APIs
+#   - INPUT/FORWARD accepts for the bridge, ahead of the host firewall (on
+#     NixOS, `nixos-fw` drops anything not from a trusted interface)
+#
+# None of this persists across a reboot. For a permanent setup on NixOS, put
+# the same in the host config (networking.bridges, a systemd-networkd tap
+# netdev with User=, networking.nat, networking.firewall.trustedInterfaces).
+#
+# Teardown: dev/firecracker/setup-host --down
+set -euo pipefail
+
+slots="${CAOS_RUNNER_SLOTS:-8}"
+bridge="${CAOS_FC_BRIDGE:-caosfc0}"
+host_ip="${CAOS_FC_HOST_IP:-10.231.0.1}"
+prefix_len="${CAOS_FC_PREFIX_LEN:-24}"
+tap_prefix="${CAOS_FC_TAP_PREFIX:-caosfc-tap}"
+owner="${AS_ROOT_USER:-${SUDO_USER:-}}"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "setup-host: run as root (as-root --why ... -- $0)" >&2
+  exit 1
+fi
+if [ -z "$owner" ]; then
+  echo "setup-host: cannot tell which user the taps are for; set AS_ROOT_USER" >&2
+  exit 1
+fi
+
+# The subnet, for the NAT rule: host_ip with the host bits cleared.
+IFS=. read -r a b c d <<<"$host_ip"
+ip_n=$(( (a << 24) | (b << 16) | (c << 8) | d ))
+mask=$(( (0xffffffff << (32 - prefix_len)) & 0xffffffff ))
+net_n=$(( ip_n & mask ))
+subnet="$(( (net_n >> 24) & 255 )).$(( (net_n >> 16) & 255 )).$(( (net_n >> 8) & 255 )).$(( net_n & 255 ))/$prefix_len"
+
+# Add an iptables rule unless it is already there.
+ensure_rule() { # <table> <chain> <rule...>
+  local table="$1" chain="$2"
+  shift 2
+  if ! iptables -t "$table" -C "$chain" "$@" 2>/dev/null; then
+    iptables -t "$table" -I "$chain" 1 "$@"
+  fi
+}
+
+drop_rule() { # <table> <chain> <rule...>
+  local table="$1" chain="$2"
+  shift 2
+  while iptables -t "$table" -C "$chain" "$@" 2>/dev/null; do
+    iptables -t "$table" -D "$chain" "$@"
+  done
+}
+
+if [ "${1:-}" = "--down" ]; then
+  for tap in /sys/class/net/"$tap_prefix"*; do
+    if [ -e "$tap" ]; then
+      ip link del "$(basename "$tap")"
+    fi
+  done
+  if [ -e "/sys/class/net/$bridge" ]; then
+    ip link del "$bridge"
+  fi
+  drop_rule nat POSTROUTING -s "$subnet" ! -o "$bridge" -j MASQUERADE
+  drop_rule filter INPUT -i "$bridge" -j ACCEPT
+  drop_rule filter FORWARD -i "$bridge" -j ACCEPT
+  drop_rule filter FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  echo "setup-host: removed $bridge, its taps and rules"
+  exit 0
+fi
+
+if [ ! -e "/sys/class/net/$bridge" ]; then
+  ip link add "$bridge" type bridge
+fi
+ip addr replace "$host_ip/$prefix_len" dev "$bridge"
+ip link set "$bridge" up
+
+for ((i = 0; i < slots; i++)); do
+  tap="$tap_prefix$i"
+  if [ ! -e "/sys/class/net/$tap" ]; then
+    ip tuntap add dev "$tap" mode tap user "$owner"
+  fi
+  ip link set "$tap" master "$bridge"
+  ip link set "$tap" up
+done
+
+sysctl -qw net.ipv4.ip_forward=1
+ensure_rule nat POSTROUTING -s "$subnet" ! -o "$bridge" -j MASQUERADE
+ensure_rule filter INPUT -i "$bridge" -j ACCEPT
+ensure_rule filter FORWARD -i "$bridge" -j ACCEPT
+ensure_rule filter FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+echo "setup-host: $bridge $host_ip/$prefix_len, taps $tap_prefix{0..$((slots - 1))} for $owner, NAT $subnet"

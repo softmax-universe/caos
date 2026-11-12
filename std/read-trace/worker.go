@@ -133,7 +133,7 @@ func main() {
 func read() {
 	hash := optArg("hash", "")
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(hash) {
-		say("not a hash: %s\n\nPass the 40-character ArgTree hash from the `caos-test` report's \"full trace\" line.", hash)
+		say("not a hash: %s\n\nPass the 40-character ArgTree hash from the `trace:` line at the end of a tool result.", hash)
 		return
 	}
 	top, err := strconv.Atoi(optArg("top", "25"))
@@ -153,7 +153,7 @@ func read() {
 		return
 	}
 	if body == nil {
-		say("nothing recorded under %s\n\nTrace records live in the server's redis, one per ArgTree. This hash has none: it never ran on this server, or it is not the ArgTree hash (the report prints it in its \"full trace\" line).", hash)
+		say("nothing recorded under %s\n\nTrace records live in the server's redis, one per ArgTree. This hash has none: it never ran on this server, or it is not the ArgTree hash (a tool result ends with it, in its `trace:` line).", hash)
 		return
 	}
 	var root node

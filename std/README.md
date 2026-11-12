@@ -27,7 +27,7 @@ path prints its parameters, which is the description this table abbreviates.
 | `caos-session-list` | List the recorded sessions on the server, newest first: time of the last message, id, tip hash, title and who has each. The tip hash is what `caos-session` takes. |
 | `caos-test` | Run the whole suite — unit tests and every `tests/<name>` — on the tree's stack, building and starting it if it is not up. |
 | `caos-test-result` | Print one test's COMPLETE record from a `caos-test` run, where the report carries only an excerpt. |
-| `read-trace` | Print the trace of a run (`/status/<hash>?all=1`) from the ArgTree hash `caos-test` prints in its "full trace" line: timings per node, the slowest nodes, and with `perf` the workers' out-trace data. |
+| `read-trace` | Print the trace of a run (`/status/<hash>?all=1`) from the ArgTree hash a tool result ends with (its `trace:` line): timings per node, the slowest nodes, and with `perf` the workers' out-trace data. |
 | `merge` | Three-way merge another commit (a hash, or the path of an imported source tree) into the source tree you name with `source-tree`. |
 | `import-source` | Import an HTTPS Git repository as a new snapshot at an unused session path (a source tree). The remote is observed when the call starts, so a fresh `into` is how you see a branch's current head. |
 | `publish-source` | Publish a source tree's exact commit to an HTTPS Git repository branch, preserving history; leased on the remote head observed at the start. Does not open a PR (`github` does). |

@@ -1264,7 +1264,7 @@ fn drive_call(
             )? {
                 progress::TryAppend::HeadChanged(_) => Ok(true),
                 progress::TryAppend::Appended(_) => {
-                    dispatch_started(state, request, call, &record)?;
+                    dispatch_started(request, call, &record)?;
                     Ok(false)
                 }
             }

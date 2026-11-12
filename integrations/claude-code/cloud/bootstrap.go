@@ -764,7 +764,11 @@ func main() {
 
 	seed := ""
 	if devRev != "" {
-		seed = seedCommit(repoDir, a.server, devRev)
+		pinRel := ""
+		if rel, err := filepath.Rel(repoDir, dir); err == nil && rel != "." {
+			pinRel = filepath.ToSlash(rel) + "/"
+		}
+		seed = seedCommit(repoDir, pinRel, a.server, devRev)
 	}
 
 	// Unshallowed here: the dev seed commit is pushed below, and a push packs its

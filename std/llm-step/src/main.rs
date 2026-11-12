@@ -1436,10 +1436,11 @@ fn materialize_source_tree(
     if let Some(paths) = memo.get(commit).cloned() {
         return Ok(paths);
     }
-    state.fetch_object(commit)?;
-    let tree = state.store().tree_of(commit)?;
+    // `resolve` peels the commit to its tree over the object API. A git fetch
+    // of the commit would bring its whole history along just to read one
+    // commit object; whatever needs ancestry later fetches it for itself.
     let ws = fresh("source_tree");
-    caos(["get-hash", tree.as_str(), &ws])?;
+    caos(["resolve", commit.as_str(), ".", &ws])?;
     let wc = fresh("source-tree-commit");
     caos(["get-hash", commit.as_str(), &wc])?;
     memo.insert(commit.clone(), (ws.clone(), wc.clone()));

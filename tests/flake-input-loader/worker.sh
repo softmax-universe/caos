@@ -109,6 +109,27 @@ spliced)
     || fail "the mount is not the input tree that was passed in"
   echo "  ok: the mount is the input tree's own oid" >&2
 
+  [ "$(cat "$R/.caos-mounts")" = "vendor/demo-std" ] \
+    || fail ".caos-mounts does not list the mount: $(cat "$R/.caos-mounts" 2>&1)"
+  echo "  ok: .caos-mounts lists the mount" >&2
+
+  echo "== --mounts puts several parts of one input in several places ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load_mounts 'thing:vendor/a,other:b')" \
+    --then:hash="$(next mounted --input:@=/cas/input)"
+  ;;
+
+mounted)
+  R=/cas/args/result; caos get -r "$R" || fail "reading the mounted tree"
+  caos get -r /cas/args/input
+  [ "$(caos hash "$R/vendor/a")" = "$(caos hash /cas/args/input/thing)" ] \
+    || fail "vendor/a is not the input's thing/"
+  [ "$(caos hash "$R/b")" = "$(caos hash /cas/args/input/other)" ] \
+    || fail "b is not the input's other/"
+  [ "$(cat "$R/sibling.txt")" = "keep me" ] || fail "a sibling was lost"
+  [ "$(cat "$R/.caos-mounts")" = "$(printf 'b\nvendor/a')" ] \
+    || fail ".caos-mounts: $(cat "$R/.caos-mounts" 2>&1)"
+  echo "  ok: both parts mounted by oid, siblings kept, both listed" >&2
+
   echo "== '.' replaces the consumer's tree with the input ==" >&2
   caos run-then "$(consumer)" --run:hash="$(load "$SHA" .)" \
     --then:hash="$(next replaced --input:@=/cas/args/input)"

@@ -325,6 +325,53 @@ impl State<GitStore> {
     }
 }
 
+fn server_url() -> Result<String, String> {
+    let base =
+        std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
+    Ok(base.trim_end_matches('/').to_string())
+}
+
+fn server_has_object(object: &Oid) -> Result<bool, String> {
+    let url = format!("{}/object/{object}", server_url()?);
+    let response = minreq::head(&url)
+        .with_timeout(30)
+        .send()
+        .map_err(|error| format!("HEAD {url}: {error}"))?;
+    match response.status_code {
+        200..=299 => Ok(true),
+        404 => Ok(false),
+        status => Err(format!("HEAD {url}: {status} {}", response.reason_phrase)),
+    }
+}
+
+/// One object from the server's object API: what the store reads a missing
+/// object with, in place of a git fetch of that object's whole closure.
+fn fetch_single_object(oid: &Oid) -> Result<(ObjectKind, Vec<u8>), String> {
+    let url = format!("{}/object/{oid}", server_url()?);
+    let response = minreq::get(&url)
+        .with_timeout(30)
+        .send()
+        .map_err(|error| format!("GET {url}: {error}"))?;
+    if !(200..=299).contains(&response.status_code) {
+        return Err(format!(
+            "GET {url}: {} {}",
+            response.status_code, response.reason_phrase
+        ));
+    }
+    let bytes = response.as_bytes();
+    let header_end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| format!("GET {url}: no object header"))?;
+    let kind = match bytes[..header_end].split(|byte| *byte == b' ').next() {
+        Some(b"blob") => ObjectKind::Blob,
+        Some(b"tree") => ObjectKind::Tree,
+        Some(b"commit") => ObjectKind::Commit,
+        _ => return Err(format!("GET {url}: unknown object kind")),
+    };
+    Ok((kind, bytes[header_end + 1..].to_vec()))
+}
+
 fn require_server_object(commit: &Oid, object: &Oid) -> Result<(), String> {
     let base =
         std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;

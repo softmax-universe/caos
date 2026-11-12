@@ -1850,6 +1850,8 @@ sandbox = false''
           # and the runner: std/cargo is no longer a published flake tree, so
           # its image comes from here (see the cargoDef call above).
           caos-worker-cargo-docker = workerCargoImage;
+          # The nix primitive's image (design/nix-bootstrap.md).
+          caos-worker-nix-docker = workerNixImage;
 
           # The flake-builder contract (design/flake-images.md): handed a tree,
           # the builder builds `#caosImage`. What this flake defines under that

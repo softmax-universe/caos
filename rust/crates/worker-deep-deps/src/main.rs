@@ -190,7 +190,7 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
     for (name, _) in &subdirs {
         let child = into.join(name);
         fs::create_dir_all(&child).map_err(|e| format!("creating {}: {e}", child.display()))?;
-        self.deepen(&join(rel, name), &child)?;
+        deepen(pass, &join(rel, name), &child)?;
     }
 
     let Some(deps) = deps_file else {

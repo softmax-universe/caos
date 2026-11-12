@@ -284,6 +284,11 @@ func pinMoved(installed string) bool {
 	return true
 }
 
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // The `caos` input as bootstrap.go stamps it, `owner/repo@rev`, by readLock's
 // node walk: the input name maps to a node KEY, and only that node's `locked`
 // section is authoritative.

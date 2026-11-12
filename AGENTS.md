@@ -313,7 +313,7 @@ concurrency.
   them.** `/caos-dev/bin` was the symlink `std/caos-test` reads to find the
   client it just built, so the stack that started second repointed it and the
   first drove its own server with the OTHER build's `caos-cli`.
-  `/caos-dev/publish-client-repo` was two publishers staging `seed-deep-deps`
+  `/caos-dev/publish-client-repo` was two publishers staging their binaries
   into one repo under one name — reproduced as `ln: failed to create symbolic
   link '/caos-dev/publish-client-repo/layer-additions/usr/bin/env': File
   exists`, which killed a whole bring-up. `/caos-dev/stack.ready` is `rm -f`'d

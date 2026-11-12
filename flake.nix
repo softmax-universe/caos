@@ -1701,6 +1701,36 @@ sandbox = false''
       {
         packages = nixpkgs.lib.optionalAttrs (hermesGateway != null) { hermes-gateway = hermesGateway; } // {
           delta-runner = deltaRunner;
+        } // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Everything a host needs to run runnerd's firecracker runtime
+          # (`CAOS_RUNTIME=firecracker`, rust/crates/runnerd/src/firecracker.rs),
+          # one directory: runnerd and the guest init it injects into each
+          # converted rootfs, firecracker, the mkfs that builds rootfs images
+          # straight from a tarball (e2fsprogs >= 1.47.1), GNU tar, and the
+          # guest kernel. `dev/firecracker/runnerd` runs from it.
+          #
+          # The kernel is the Firecracker project's own CI build (virtio-blk,
+          # virtio-net, ext4, overlayfs and IP autoconfig built in, so no
+          # initramfs), from the bucket its getting-started guide uses, pinned
+          # by hash. A nixpkgs kernel would carry virtio as modules and need an
+          # initramfs, or a custom-config kernel build.
+          caos-fc-host =
+            let
+              kernel = pkgs.fetchurl {
+                url = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155";
+                hash = "sha256-4g5G0MNsVcDRAU6yBXYXGz89kiJg2feSAXrv9Trz1PI=";
+              };
+            in
+            assert pkgs.stdenv.hostPlatform.isx86_64;
+            pkgs.runCommand "caos-fc-host" { } ''
+              mkdir -p $out/bin $out/share
+              ln -s ${workspaceBins}/bin/runnerd ${workspaceBins}/bin/caos-fc-init $out/bin/
+              ln -s ${pkgs.firecracker}/bin/firecracker $out/bin/
+              ln -s ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 $out/bin/
+              ln -s ${pkgs.gnutar}/bin/tar $out/bin/
+              ln -s ${kernel} $out/share/vmlinux
+            '';
+        } // {
           # The client a cloud container can actually exec, built for the
           # container's architecture rather than this machine's. `caosd up`
           # pushes it into caosd; see `clientForTarget`.

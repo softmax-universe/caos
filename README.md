@@ -840,27 +840,27 @@ driving `caos tui` had to declare caos' entry points under the names this
 client happened to use, which is exactly the ambient library the rest of this
 section removes.
 
-The five entries that cannot be built by the machinery they ARE — `flake-builder`
-(a flake built by the flake-builder), `cargo`, `runner`, `rustc` and `deep-deps`
-— name a `docker://seeded…` sentinel instead of a builder.
-`stack/build-builtins.sh` hand-builds what each expression would have produced
-and prints a tree of seed records; the core-seeder-runner answers those exact
-keys, spawning no container.
+The core — `flake-builder`, `cargo`, `runner`, `rustc` and `deep-deps` — is
+the part that cannot be built by the machinery it IS, and it is no longer
+seeded. The repo's root `.caos-expr` builds it from the tree's own flake with the
+`nix=v1` primitive (`run --base:nix=v1 --in=<flake> --attr=<attr>`, which builds
+a flake attribute with the stack's own nix and adds nothing), assembles the
+rustc and deep-deps curries as expression lines, and grafts the result into the
+evaluated tree at `caos-core/`. A `DEPS` line names a core item like any other
+dependency (`../../caos-core/rustc rustc`). Nothing names a core item by a
+commit hash, and whichever caos commit a tree is, it builds ITS core; see
+[design/nix-bootstrap.md](design/nix-bootstrap.md).
 
-It is not run by hand in normal use, and it does not publish to a ref.
-`stack/serve` is its only caller: it publishes once the server and registry are
-up, and starts the seeder with the tree the publish returned — two adjacent
-steps with a value between them, so there is no name a second stack could
-overwrite. Bringing a stack up IS publishing; there is no separate command.
+The one image a stack still builds itself is the primitive's own, because it
+cannot be built by the primitive. `stack/build-builtins.sh` streams it to the
+registry and names it for the server. It is not run by hand: `stack/serve` is
+its only caller, once the server and registry are up. Bringing a stack up IS
+publishing; there is no separate command, and there is nothing to seed.
 
-```bash
-./stack/build-builtins.sh                 # bootstrap the seeded core, by hand
-```
-
-It takes no arguments. The five entries it seeds are interdependent — cargo's
-record is keyed on flake-builder's delta, rustc's on runner's and cargo's — so
-a subset would not be a smaller bootstrap but a seed tree missing records,
-whose jobs park until a 503 that blames capacity.
+The first evaluation after an edit under `rust/`, `std/cargo`, `std/flake-builder`
+or the flake builds the whole core inside the primitive, which takes 30 to 50
+minutes on a cold cache. Edits to `tests/`, `dev/` and `design/` do not touch it.
+See AGENTS.md.
 
 ## Local testing
 

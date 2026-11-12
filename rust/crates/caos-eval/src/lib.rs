@@ -1470,9 +1470,9 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_without_in_starts_from_the_empty_tree() {
+    fn mount_without_in_starts_from_the_empty_tree() {
         let host = Memory::default();
-        let out = eval_in(&host, &[("a", "A")], "graft --y=2 --x=1\n").unwrap();
+        let out = eval_in(&host, &[("a", "A")], "mount --y=2 --x=1\n").unwrap();
         let got = listing(&host, &out);
         assert_eq!(
             got,

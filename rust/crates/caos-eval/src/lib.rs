@@ -771,7 +771,10 @@ fn eval_graft(
         }
     };
     let mut mounts = std::collections::BTreeSet::new();
-    if let Some(existing) = entries.iter().find(|e| entry_name(e) == MOUNTS_FILE.as_bytes()) {
+    if let Some(existing) = entries
+        .iter()
+        .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
+    {
         for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
             let line = line.trim();
             if !line.is_empty() {
@@ -784,8 +787,7 @@ fn eval_graft(
         mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
     }
     entries.retain(|e| {
-        entry_name(e) != MOUNTS_FILE.as_bytes()
-            && !grafted.iter().any(|g| g.filename == e.filename)
+        entry_name(e) != MOUNTS_FILE.as_bytes() && !grafted.iter().any(|g| g.filename == e.filename)
     });
     entries.extend(grafted);
     let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
@@ -1440,7 +1442,11 @@ mod evaluated_tests {
             host.put(gix::objs::Kind::Blob, expr.as_bytes().to_vec()),
         )];
         for &(name, body) in files {
-            entries.push((name, false, host.put(gix::objs::Kind::Blob, body.as_bytes().to_vec())));
+            entries.push((
+                name,
+                false,
+                host.put(gix::objs::Kind::Blob, body.as_bytes().to_vec()),
+            ));
         }
         let root = host.tree(entries);
         let (kind, oid) = eval_path(host, &root.to_string(), "")?;

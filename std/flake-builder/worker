@@ -269,6 +269,68 @@ stack)
   caos put "$img" /cas/out
   ;;
 
+nix)
+  # THE PRIMITIVE: build `--attr` of the flake `--in`, and return what nix
+  # built with NOTHING ADDED — no /bin/caos, no layer, no entrypoint rewrite.
+  # That is what lets the job's key leave the stack out ({base: nix:v1, in,
+  # attr}): the output is a function of the flake and its lock, whichever
+  # stack's nix ran it (design/nix-bootstrap.md, "What has to be true").
+  #
+  #   a docker-archive tarball (an image attr) -> a CLEAN git-docker delta
+  #     {base: docker://<pushed>, config.json}, config verbatim;
+  #   anything else (a package)               -> its store path as a tree.
+  caos get -r /cas/args/in
+  attr=$(cat /cas/args/attr)
+  case "$attr" in
+    "" | -* | *[!A-Za-z0-9._+-]*) fail "--attr must be a flake attribute path, got: $attr" ;;
+  esac
+  [ -e /cas/args/in/flake.nix ] || fail "no flake.nix in --in"
+  # A LOCKED flake only: an unlocked input would make the output depend on
+  # when it ran, and the key could not say so.
+  [ -e /cas/args/in/flake.lock ] || fail "no flake.lock in --in: nix=v1 builds only a locked flake"
+  mkdir /tmp/ws
+  cp -rL /cas/args/in/. /tmp/ws/
+  chmod -R u+w /tmp/ws
+
+  # An image attr already pushed for this exact flake tree is answered from the
+  # registry; the tag says which tree and attr it came from.
+  H=$(printf '%s %s' "$(caos hash /cas/args/in)" "$attr" | sha1sum | cut -d' ' -f1)
+  tag="caos-registry:5000/caos:nix-$H"
+  emit_image() {
+    local digest
+    digest=$(sk inspect --tls-verify=false --format '{{.Digest}}' "docker://$tag") \
+      || fail "reading the pushed digest"
+    mkdir -p /tmp/res
+    printf 'docker://caos-registry:5000/caos@%s' "$digest" > /tmp/res/base
+    sk inspect --tls-verify=false --config "docker://$tag" > /tmp/res/config.json \
+      || fail "reading the image config"
+    caos put /tmp/res /cas/out
+  }
+  if sk inspect --tls-verify=false "docker://$tag" >/dev/null 2>&1; then
+    echo "nix: registry hit for $tag" >&2
+    emit_image
+    exit 0
+  fi
+
+  nix_build_flake "$attr" /tmp/built || fail "nix build of path:/tmp/ws#$attr"
+  built=$(readlink -f /tmp/built)
+  if [ -f "$built" ]; then
+    case "$built" in
+      *.tar.gz) gunzip -c "$built" > /tmp/img.tar ;;
+      *.tar) cp "$built" /tmp/img.tar ;;
+      *) fail "$attr built a file that is not a docker archive: $built" ;;
+    esac
+    sk copy --dest-tls-verify=false "docker-archive:/tmp/img.tar" "docker://$tag" >&2 \
+      || fail "pushing $tag"
+    emit_image
+  else
+    # The store path, dereferenced: a tree of plain files and directories,
+    # exec bits kept, nothing pointing back into this container's store.
+    cp -rL "$built" /tmp/res
+    caos put /tmp/res /cas/out
+  fi
+  ;;
+
 *)
   fail "unknown --stage: $stage"
   ;;

@@ -1033,7 +1033,12 @@ impl ObjectStore for GitStore {
     }
 
     fn write_commit(&mut self, commit: &CommitInfo) -> Result<Oid, StoreError> {
-        self.write_object(ObjectKind::Commit, &encode_commit_bytes(commit))
+        let oid = self.write_object(ObjectKind::Commit, &encode_commit_bytes(commit))?;
+        // Writing a commit the store already holds whole makes it no less so.
+        if !self.has_local_complete(&oid) {
+            self.written_commits.borrow_mut().insert(oid.clone());
+        }
+        Ok(oid)
     }
 }
 

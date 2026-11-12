@@ -157,6 +157,7 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
         let ticket = compute::start_expression(config, "run", &params, &secrets)
             .map_err(|e| e.message().to_string())?;
         let ticket = String::from_utf8_lossy(&ticket).trim().to_string();
+        record_call(config, &session, &args, &ticket);
         return Ok(text_result(
             format!(
                 "ticket: {ticket}\n\nAsk for it with result(ticket=\"{ticket}\"). It is \
@@ -175,6 +176,7 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
     let ticket = compute::start_expression(config, "run", &params, &secrets)
         .map_err(|e| e.message().to_string())?;
     let ticket = String::from_utf8_lossy(&ticket).trim().to_string();
+    record_call(config, &session, &args, &ticket);
     let answer = compute::wait_ticket(config, &ticket).map_err(|e| e.message().to_string())?;
     let stepped = started.elapsed().as_secs_f64();
     let answer = String::from_utf8_lossy(&answer);
@@ -188,6 +190,46 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
     eprintln!("mcp {name}: {timing}");
     append_text(&mut result, timing);
     Ok(result)
+}
+
+/// Hang a started call off its session's trace, so `caos-cli watch` on the
+/// session's trace ticket (`help` prints it) shows every call it makes. Best
+/// effort like every trace write: a call never fails because it could not be
+/// listed.
+fn record_call(config: &Config, session: &str, args: &Value, ticket: &str) {
+    match compute::session_trace_root(config, session) {
+        Ok(root) => crate::status::session_call(config, &root, &call_label(args), ticket),
+        Err(error) => eprintln!("warning: no trace root for {session}: {}", error.message()),
+    }
+}
+
+/// What a call is, for a line of the session's live view: the tool, its
+/// arguments cut short, and the id Claude Code gave the call, which is how a
+/// node is matched to the transcript.
+fn call_label(args: &Value) -> String {
+    const VALUE_CHARS: usize = 40;
+    let tool = args.get("path").and_then(Value::as_str).unwrap_or("?");
+    let mut label = tool.to_string();
+    if let Some(declared) = args.get("arguments").and_then(Value::as_object) {
+        for (name, value) in declared {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            let text = text.replace('\n', " ");
+            let shown: String = text.chars().take(VALUE_CHARS).collect();
+            let cut = if text.chars().count() > VALUE_CHARS {
+                "…"
+            } else {
+                ""
+            };
+            label.push_str(&format!(" {name}={shown}{cut}"));
+        }
+    }
+    if let Some(id) = args.get("caos_tool_use_id").and_then(Value::as_str) {
+        label.push_str(&format!(" [{id}]"));
+    }
+    label
 }
 
 /// The server's part of a call's timing line: how long the call took here, how
@@ -417,7 +459,14 @@ fn overview(config: &Config, caller: &Caller, claude_session: Option<&str>) -> V
             Err(error) => {
                 format!("session: Claude Code session {claude_session:?} is unusable: {error}\n")
             }
-            Ok(id) => format!("session: {id}\nsession head: {}\n", head_of(config, &id)),
+            Ok(id) => {
+                let trace = compute::session_trace_root(config, &id)
+                    .unwrap_or_else(|error| format!("<unavailable: {}>", error.message()));
+                format!(
+                    "session: {id}\nsession head: {}\nsession trace: {trace} (caos-cli watch {trace})\n",
+                    head_of(config, &id)
+                )
+            }
         },
     };
     let step = match caller.step {
@@ -452,6 +501,27 @@ fn head_of(config: &Config, session: &str) -> String {
 mod tests {
     use super::*;
     use caos_world::mcp::PROTOCOL_VERSION;
+
+    /// A node of the session's live view says which tool, with what, and which
+    /// Claude Code call it was, and a long value does not flood the line.
+    #[test]
+    fn a_call_is_labelled_by_tool_arguments_and_call_id() {
+        let args = json!({
+            "path": "caos-std/grep",
+            "arguments": {"pattern": "unimplemented!", "content": "x".repeat(100)},
+            "caos_session": "s",
+            "caos_tool_use_id": "toolu_1",
+        });
+        let label = call_label(&args);
+        assert!(label.starts_with("caos-std/grep "), "{label}");
+        assert!(label.contains(" pattern=unimplemented!"), "{label}");
+        assert!(
+            label.contains(&format!(" content={}…", "x".repeat(40))),
+            "{label}"
+        );
+        assert!(label.ends_with(" [toolu_1]"), "{label}");
+        assert!(!label.contains("caos_session"), "{label}");
+    }
 
     /// The handshake and the list touch no server state, so they can be
     /// checked without a `Config`.

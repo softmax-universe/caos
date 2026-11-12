@@ -352,19 +352,12 @@ op_run_tests() {
     fail "the suite did not produce a report (exit $status)"
   fi
 
-  # THE TRACE COMMAND GOES IN THE REPORT, not just on stderr above: this job's
-  # stderr is relayed only when it FAILS, and the run you most want to take apart
-  # is a green one that was slower than it should have been. The result tree is
-  # a checkout, so its files are read-only.
+  # WHERE THE STACK'S OWN LOGS ARE goes in the report, since this job's stderr is
+  # relayed only when it FAILS. (There is no trace line: the call's trace is the
+  # `trace:` hash the tool result already ends with.) The result tree is a
+  # checkout, so its files are read-only.
   chmod u+w /tmp/suite/report
   {
-    echo
-    echo "full trace (the host reads the dev stack's records — a trace key carries"
-    echo "no cache namespace, so both stacks write to the one redis):"
-    echo "  curl -s localhost:9090/status/$suite_req?all=1 | jless"
-    echo
-    echo "and while a run is in flight, CAOS_WATCH_LINES=0 shows every node"
-    echo "instead of the first 16."
     echo
     if [ -f "$RUN/logs/runnerd.log" ]; then
       echo "runnerd: $(grep -c 'running job' "$RUN/logs/runnerd.log" || true) claimed," \

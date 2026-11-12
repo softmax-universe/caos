@@ -479,6 +479,19 @@
                 # Root: the nix store is root-owned.
                 "CAOS_WORKER_UID=0"
                 "CAOS_WORKER_GID=0"
+                # A PERSISTENT STORE. Each job used to start with the image's
+                # own /nix and rebuild the toolchain, the ~176 crate
+                # dependencies and the workspace from nothing, so a cold core
+                # took ~48 minutes (measured, design/nix-bootstrap.md). The
+                # caosd runner backs this path with a named volume that is
+                # seeded from the image's /nix the first time and kept after, and
+                # shared by every job that asks, so a derivation built once is a
+                # store hit for the next job and the next stack. Only the caosd
+                # runner grants it, and only to jobs carrying
+                # `--required-caosd=true`, which the root expression's `nix=v1`
+                # lines do. nix serializes concurrent builds in one store with its
+                # own locks.
+                "CAOS_GRANT_VOLUMES=/nix"
               ];
             };
             # An in-image `nix build` needs the closure REGISTERED, not merely

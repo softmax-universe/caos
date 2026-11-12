@@ -4,6 +4,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 use session_protocol::v3::apply::{apply, inherited_signature, mint, Transition};
+use session_protocol::v3::oid::ObjectKind;
 use session_protocol::v3::paths;
 use session_protocol::v3::tree::encode_commit_bytes;
 use session_protocol::v3::view::Session;

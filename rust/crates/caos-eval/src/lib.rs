@@ -729,7 +729,10 @@ fn eval_graft(
         }
     };
     let mut mounts = std::collections::BTreeSet::new();
-    if let Some(existing) = entries.iter().find(|e| entry_name(e) == MOUNTS_FILE.as_bytes()) {
+    if let Some(existing) = entries
+        .iter()
+        .find(|e| entry_name(e) == MOUNTS_FILE.as_bytes())
+    {
         for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
             let line = line.trim();
             if !line.is_empty() {

@@ -216,6 +216,7 @@ fn usage(args: &[String]) -> String {
          {prog} ref-set <ref> (--new=<hash> | --new:@=<cas-path> | --delete)\n      (--expected=<hash|absent> | --expected:@=<cas-path> | --force)\n  \
          {prog} ref-then <ref> [--expected=<hash|absent> | --expected:@=<cas-path>]\n      [--timeout=<secs>] [--then:<type>=<image>] [--catch]\n  \
          {prog} trace-child <name> <arg-tree-hash>\n  \
+         {prog} job-req\n  \
          {prog} prepare-request --base:<type>=<image-or-arg tree> [--name=value | --name:@=path ...]\n  \
          {prog} resolve-image <hex hash | docker://<ref>>\n  \
          {prog} curry [--unbind=<name> ...] --base:<type>=<arg tree> [--name=value | --name:@=path ...]\n    \

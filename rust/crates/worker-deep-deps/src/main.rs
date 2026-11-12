@@ -165,9 +165,8 @@ struct Pass<'a> {
     visiting: Vec<String>,
 }
 
-impl Pass<'_> {
-    fn deepen(&mut self, rel: &str, into: &Path) -> Result<(), String> {
-    let base = self.base;
+fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
+    let base = pass.base;
     let dir = full(base, rel);
 
     let mut deps_file: Option<PathBuf> = None;

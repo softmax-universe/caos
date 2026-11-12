@@ -135,8 +135,8 @@ func fixtureRepoAt(dir string, nested bool) string {
   "version": 7
 }
 `
-	write(filepath.Join(dir, ".caos-expr"), expr, 0o644)
-	write(filepath.Join(dir, "flake.lock"), lock, 0o644)
+	write(filepath.Join(pins, ".caos-expr"), expr, 0o644)
+	write(filepath.Join(pins, "flake.lock"), lock, 0o644)
 	write(filepath.Join(dir, "AGENTS.md"), "a client repo\n", 0o644)
 	git(dir, "init", "-q", "-b", "main")
 	git(dir, "add", "-A")

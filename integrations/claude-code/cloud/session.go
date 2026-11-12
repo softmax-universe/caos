@@ -261,7 +261,14 @@ func pinMoved(installed string) bool {
 	}
 	// A lock that no longer reads is a checkout a fresh setup would refuse, which
 	// is as stale as one that moved.
-	now, err := lockedCaos(filepath.Join(top, "flake.lock"))
+	// The pin lives in `caos-std/` when a repo keeps its expression there, and
+	// at the checkout's root otherwise (see pinDir in bootstrap.go, which this
+	// file cannot share: each is a `go run` file of its own).
+	lockPath := filepath.Join(top, "flake.lock")
+	if nested := filepath.Join(top, "caos-std", "flake.lock"); fileExists(nested) {
+		lockPath = nested
+	}
+	now, err := lockedCaos(lockPath)
 	if err != nil {
 		now = "nothing readable (" + err.Error() + ")"
 	}
@@ -275,6 +282,11 @@ func pinMoved(installed string) bool {
 		"Every caos call in this session is refused. Change the environment's setup\n"+
 		"line (the date on its first line will do), then start a new session.\n", installed, now))
 	return true
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // The `caos` input as bootstrap.go stamps it, `owner/repo@rev`, by readLock's

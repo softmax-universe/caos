@@ -15,7 +15,7 @@ tools a model calls are under `std/`.)
 
 A worked pass from an agent session. Import caos's `main` once, UNEDITED, as
 `imports/caos/main` (`caos-std/import-source` with `root=imports/caos`,
-`source=https://github.com/Metta-AI/caos`, `into=main`). That import is where you RUN the tools from. If you
+`source=https://github.com/softmax-universe/caos`, `into=main`). That import is where you RUN the tools from. If you
 are changing caos, `copy` it to `feature/<name>` and edit THAT: it is the tree
 under test, not the place the tools run.
 

@@ -34,7 +34,7 @@
 //! `CAOS_RUNNER_SOCKET` (an engine socket, granted only to images that declare
 //! `CAOS_GRANT_ENGINE_SOCKET=1` in their own config env; `CAOS_GRANT_VOLUMES`
 //! is declared the same way and backs the listed mountpoints with persistent
-//! named volumes), and
+//! named volumes — but ONLY by the caosd runner, see below), and
 //! `CAOS_WORKER_REDIS_ADDR` (a redis a worker may use for its own caching,
 //! injected into the containers; unset means none is offered).
 //!
@@ -42,6 +42,16 @@
 //! same reason: where workers share the stack's netns it is loopback, and where
 //! they get their own netns on a bridge it has to be a name that resolves
 //! there. `stack/serve` supplies whichever the placement needs.
+//!
+//! PERSISTENT VOLUMES ARE GRANTED BY THE CAOSD RUNNER ALONE. Named volumes are
+//! the central host's storage — the shared nix store above all — so a runnerd
+//! grants them only when it is the caosd runner: started on that host with
+//! `CAOS_RUNNER_REQUIRE=required-caosd=true`. A job that must run there
+//! carries the same arg (`--required-caosd=true`, caos_world
+//! `REQUIRED_CAOSD_ARG`), and because the arg is `required*` the server never
+//! offers it to any other runner. So a plain runnerd — on this machine or any
+//! other — mounts no volumes into anything and is safe to run anywhere, while
+//! the jobs that need the central host run there.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -130,6 +140,12 @@ struct Config {
     /// anything: a runner requiring it simply never matches ordinary work,
     /// which is the point.
     required: std::collections::BTreeMap<String, String>,
+    /// Whether this runnerd honors `CAOS_GRANT_VOLUMES` at all: true exactly
+    /// when it is the caosd runner (`grants_volumes`). Derived from
+    /// `required` rather than configured beside it, so the two cannot disagree
+    /// — a runner that grants volumes is one the server only ever hands jobs
+    /// that asked for them.
+    volumes: bool,
     slots: u32,
     network: String,
     docker_bin: String,
@@ -296,6 +312,8 @@ fn as_address(url: &str) -> String {
 
 fn main() {
     install_termination_handlers();
+    let required = required_args(&env_or("CAOS_RUNNER_REQUIRE", ""));
+    let volumes = grants_volumes(&required);
     let config = Arc::new(Config {
         server_url: as_address(&env_or("CAOS_SERVER_URL", "http://caos-server")),
         worker_redis_addr: std::env::var("CAOS_WORKER_REDIS_ADDR")
@@ -316,14 +334,23 @@ fn main() {
         socket: std::env::var("CAOS_RUNNER_SOCKET")
             .ok()
             .filter(|s| !s.is_empty()),
-        required: required_args(&env_or("CAOS_RUNNER_REQUIRE", "")),
+        required,
+        volumes,
     });
     // The required set is part of this line because it is what decides which
     // jobs this process can ever see, and `stack/serve` greps this line to know
     // runnerd is up.
     eprintln!(
-        "caos-runnerd: {} slots, server {}, network {}, requiring {:?}",
-        config.slots, config.server_url, config.network, config.required
+        "caos-runnerd: {} slots, server {}, network {}, requiring {:?}, {}",
+        config.slots,
+        config.server_url,
+        config.network,
+        config.required,
+        if config.volumes {
+            "granting persistent volumes (the caosd runner)"
+        } else {
+            "granting no persistent volumes"
+        }
     );
     reap_leftovers(&config);
     let mut threads = Vec::new();
@@ -411,7 +438,7 @@ fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
     }
     if !grants.volumes.is_empty() {
         eprintln!(
-            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}; granting {}",
+            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}={} (granted by the caosd runner only)",
             grants.volumes.join(" ")
         );
     }
@@ -480,6 +507,16 @@ fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// Is a runnerd with this required set the caosd runner — the one runner that
+/// grants persistent volumes? Exactly when it requires
+/// `required-caosd=true`: the server then hands it ONLY jobs carrying that
+/// arg, and no other runner gets those jobs, so "this runner grants volumes"
+/// and "this job asked for them" are the same statement.
+fn grants_volumes(required: &std::collections::BTreeMap<String, String>) -> bool {
+    required.get(caos_world::REQUIRED_CAOSD_ARG)
+        == Some(&blob_oid(caos_world::REQUIRED_CAOSD_VALUE))
 }
 
 /// One long-poll. `Some(job)` to run; `None` on idle/evicted.
@@ -612,8 +649,24 @@ fn run_container(config: &Config, slot: u32, job: &Job) {
     for dev in &grants.devices {
         command.args(["--device", dev]);
     }
-    for path in &grants.volumes {
-        command.args(["-v", &format!("{}:{path}", volume_name(path))]);
+    // Only by the caosd runner (`grants_volumes`). Anywhere else an image's
+    // request is refused rather than half-honored: these volumes are THIS
+    // host's storage, and a job that needs them has to say so with
+    // `--required-caosd=true` so it is routed to the host that has them.
+    // The worker sees the mountpoints absent, and says what it is missing.
+    if config.volumes {
+        for path in &grants.volumes {
+            command.args(["-v", &format!("{}:{path}", volume_name(path))]);
+        }
+    } else if !grants.volumes.is_empty() {
+        eprintln!(
+            "runnerd slot {slot}: {} declares {VOLUME_GRANT_ENV}={}, but this runner is not \
+             the caosd runner; granting none (the job must carry --{}={})",
+            job.image_ref,
+            grants.volumes.join(" "),
+            caos_world::REQUIRED_CAOSD_ARG,
+            caos_world::REQUIRED_CAOSD_VALUE,
+        );
     }
     // A worker's own scratch cache, when this deployment offers one. Passed
     // only when set, so an unset address reaches the worker as an ABSENT env
@@ -752,5 +805,25 @@ fn post_failure(config: &Config, job: &Job, error: &str, log: &str) -> Result<()
             "result post failed ({code}): {}",
             resp.as_str().unwrap_or("")
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grants_volumes, required_args};
+
+    #[test]
+    fn only_the_caosd_runner_grants_volumes() {
+        // A plain runnerd, here or on any other machine.
+        assert!(!grants_volumes(&required_args("")));
+        // A runner that requires something else entirely.
+        assert!(!grants_volumes(&required_args("required-pool=seeded")));
+        // The right name with the wrong value names a runner no job asks for.
+        assert!(!grants_volumes(&required_args("required-caosd=yes")));
+        // The caosd runner, alone or alongside another requirement.
+        assert!(grants_volumes(&required_args("required-caosd=true")));
+        assert!(grants_volumes(&required_args(
+            "required-pool=x,required-caosd=true"
+        )));
     }
 }

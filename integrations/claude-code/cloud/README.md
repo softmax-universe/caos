@@ -50,7 +50,7 @@ server. Before it, nothing tested any of this but a four-minute cloud round trip
 ## The session starts from a CLIENT repo, not from the code
 
 The repository a session opens is a **caos client repo** — a handful of text
-files that pin a caos and mount its `std/`. `Metta-AI/caos-session` is the one
+files that pin a caos and mount its `std/`. `softmax-universe/caos-session` is the one
 to fork; its shape is spelled out under *Configuring the environment* below,
 so this does not depend on being able to open it. The code to work on is
 **imported into the session** by the agent's `caos-std/import-source` tool — the
@@ -129,27 +129,37 @@ See [`../drive`](../drive) for starting one.
 
 ## Configuring the environment
 
-**Repository**: a caos client repo — fork `Metta-AI/caos-session` and point the
+**Repository**: a caos client repo — fork `softmax-universe/caos-session` and point the
 environment at your fork. It is four things, and nothing else:
 
 ```
-flake.nix / flake.lock   a `caos` input pinned by revision — the version knob
-.caos-expr               one line, mounting that input's std/ at --output-path
+caos-std/flake.nix       a `caos` input pinned by revision — the version knob
+caos-std/flake.lock      (the flake and its lock live beside the expression)
+caos-std/.caos-expr      one line, mounting that input's std/ here (--output-path=.)
 AGENTS.md (+ CLAUDE.md)  what the agent is told at the start of every session
-.gitignore               the mount point, which must not exist as a real directory
 ```
 
-The root expression is the `std/flake-input-loader` line from
+The expression is the `std/flake-input-loader` line from
 [`design/flake-inputs.md`](../../../design/flake-inputs.md) ("Consumer root"),
 on **one** line — `eval` splits on lines, so a trailing `\` is a token rather
 than a continuation.
+
+**Where the pin lives.** Setup reads the pin from `caos-std/` when that
+directory has a `flake.lock`, and from the repository root otherwise, so both
+layouts work. The `caos-std/` layout is the one to prefer for a session: the
+loader is then run over a directory that does not change as the session does,
+so it is answered from cache instead of re-run before every tool call. A repo
+that builds with a flake of its own keeps the older layout — `flake.nix`,
+`flake.lock` and `.caos-expr` at the root with `--output-path=caos-std`, and a
+`.gitignore` for the mount point, which must not exist as a real directory.
+A `.` at the root is refused: it would replace the whole session with std.
 
 **Setup script**: paste these two lines into the environment's "Setup script"
 field (swap `main` for a branch or commit to test a change to the *bootstrap
 scripts* — everything else is read back out of it):
 
 ```
-B=https://raw.githubusercontent.com/Metta-AI/caos/main
+B=https://raw.githubusercontent.com/softmax-universe/caos/main
 curl -fsSL "$B/integrations/claude-code/cloud/bootstrap.go" -o /tmp/caos-bootstrap.go
 go run /tmp/caos-bootstrap.go --base="$B" --server=caos://<ticket> \
   --secret-readers=<key>
@@ -208,7 +218,7 @@ A third line on the setup command runs the session against the caos on your
 machine, with no push and no CI:
 
 ```
-B=https://raw.githubusercontent.com/Metta-AI/caos/main
+B=https://raw.githubusercontent.com/softmax-universe/caos/main
 curl -fsSL "$B/integrations/claude-code/cloud/bootstrap.go" -o /tmp/caos-bootstrap.go
 go run /tmp/caos-bootstrap.go --base="$B" --server=caos://<ticket> \
   --dev-commit=<sha>

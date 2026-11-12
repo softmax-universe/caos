@@ -1221,7 +1221,7 @@ fn drive_call(
         }
         Target::Files => (None, state.head().clone(), cfg.clone()),
     };
-    let (ws, wc) = materialize_source_tree(state, &commit)?;
+    let (ws, wc) = materialize_source_tree(&commit)?;
     let mut scoped_call = call.clone();
     if path_is_scoped(&call.name) {
         scoped_call.input["path"] = json!(tool_path_in_scope(call, name.as_deref())?);
@@ -1264,7 +1264,7 @@ fn drive_call(
             )? {
                 progress::TryAppend::HeadChanged(_) => Ok(true),
                 progress::TryAppend::Appended(_) => {
-                    dispatch_started(state, request, call, &record)?;
+                    dispatch_started(request, call, &record)?;
                     Ok(false)
                 }
             }
@@ -1424,10 +1424,7 @@ fn inline_files_path(call: &Call) -> Option<(&'static str, String)> {
     Some((key, path.to_string()))
 }
 
-fn materialize_source_tree(
-    state: &mut progress::State,
-    commit: &Oid,
-) -> Result<(String, String), String> {
+fn materialize_source_tree(commit: &Oid) -> Result<(String, String), String> {
     static MATERIALIZED: OnceLock<Mutex<HashMap<Oid, (String, String)>>> = OnceLock::new();
     let mut memo = MATERIALIZED
         .get_or_init(Default::default)
@@ -1436,10 +1433,11 @@ fn materialize_source_tree(
     if let Some(paths) = memo.get(commit).cloned() {
         return Ok(paths);
     }
-    state.fetch_object(commit)?;
-    let tree = state.store().tree_of(commit)?;
+    // `resolve` peels the commit to its tree over the object API. A git fetch
+    // of the commit would bring its whole history along just to read one
+    // commit object; whatever needs ancestry later fetches it for itself.
     let ws = fresh("source_tree");
-    caos(["get-hash", tree.as_str(), &ws])?;
+    caos(["resolve", commit.as_str(), ".", &ws])?;
     let wc = fresh("source-tree-commit");
     caos(["get-hash", commit.as_str(), &wc])?;
     memo.insert(commit.clone(), (ws.clone(), wc.clone()));
@@ -1724,7 +1722,7 @@ fn launch_resolved_tool(
     )? {
         progress::TryAppend::HeadChanged(_) => resume(cfg, state, turn),
         progress::TryAppend::Appended(_) => {
-            dispatch_started(state, &turn.request, &call, &started)
+            dispatch_started(&turn.request, &call, &started)
         }
     }
 }
@@ -1836,21 +1834,16 @@ fn launch_root_tool(
         },
     )? {
         progress::TryAppend::HeadChanged(_) => resume(cfg, state, turn),
-        progress::TryAppend::Appended(_) => dispatch_started(state, &turn.request, call, &started),
+        progress::TryAppend::Appended(_) => dispatch_started(&turn.request, call, &started),
     }
 }
 
-fn dispatch_started(
-    state: &mut progress::State,
-    request: &Oid,
-    call: &Call,
-    record: &CallRecord,
-) -> Result<(), String> {
+fn dispatch_started(request: &Oid, call: &Call, record: &CallRecord) -> Result<(), String> {
     let commit = record
         .input_commit
         .as_ref()
         .ok_or("compute tool.start has no input source tree")?;
-    let (ws, wc) = materialize_source_tree(state, commit)?;
+    let (ws, wc) = materialize_source_tree(commit)?;
     let mut extras = vec![
         ("current-tool", Arg::Lit(call.name.as_str())),
         ("ws", Arg::Path(ws.as_str())),
@@ -2097,8 +2090,9 @@ fn root_callback(
     let new = if result.deleted {
         None
     } else {
+        // Read, not fetched: only which object the result's `root` names is
+        // wanted, and that object is then named by hash, never opened.
         let result_tree = Oid::parse(&cas_hash(&arg("result"))?, "root tool result")?;
-        state.fetch_object(&result_tree)?;
         let entry = state
             .store()
             .read_tree(&result_tree)
@@ -2117,8 +2111,16 @@ fn root_callback(
             // commit it replaces.
             (Mode::Tree, Some((Mode::Commit, parent))) => {
                 let parent = parent.clone();
-                let minted = mint_source_tree_commit(state, &entry.oid, &parent, &message)?;
-                state.push_code(&minted)?;
+                // The new tree is named BY HASH and never read; of the
+                // parent, only its own headers are.
+                let signature = inherited_signature(state.store(), &parent)?;
+                let minted = state.store_mut().commit(
+                    &entry.oid,
+                    std::slice::from_ref(&parent),
+                    &format!("{message}\n"),
+                    &signature,
+                )?;
+                state.publish_code(&minted)?;
                 Some((Mode::Commit, minted))
             }
             _ => Some((mode, entry.oid)),
@@ -2127,12 +2129,24 @@ fn root_callback(
     if new == old {
         return Ok((block, None));
     }
+    // New content that is not a commit: named by hash so far, never read.
+    let content = match &new {
+        Some((mode, oid)) if *mode != Mode::Commit => Some(oid.clone()),
+        _ => None,
+    };
     let rebuilt = root::replace(state.store_mut(), &base_tree, &components, new, &message)?;
     // A gitlink's commit is not part of the closure of the tree that names it,
     // so each commit made on the way goes up on its own, deepest first, before
     // the proposal that names them.
     for commit in &rebuilt.commits {
-        state.push_code(commit)?;
+        state.publish_code(commit)?;
+    }
+    // With no gitlink on the way the content sits in the session's own tree,
+    // which git pushes: there, and only there, it has to be local.
+    if rebuilt.commits.is_empty() {
+        if let Some(content) = &content {
+            state.fetch_object(content)?;
+        }
     }
     let proposal = mint_source_tree_commit(state, &rebuilt.tree, &base, &message)?;
     state.push_code(&proposal)?;
@@ -3249,7 +3263,7 @@ fn source_tree_paths(state: &mut progress::State) -> Result<Vec<String>, String>
     let source_trees = state.session()?.source_trees()?;
     let mut paths = Vec::with_capacity(source_trees.len());
     for source_tree in source_trees.values() {
-        paths.push(materialize_source_tree(state, &source_tree.commit)?.0);
+        paths.push(materialize_source_tree(&source_tree.commit)?.0);
     }
     Ok(paths)
 }

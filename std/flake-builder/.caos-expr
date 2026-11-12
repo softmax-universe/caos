@@ -9,4 +9,15 @@
 # hand-built delta). If the seeder is absent the job hits the generic runner and
 # fails loudly on a bogus image — an honest "bootstrap broken" signal, never a
 # silent wrong answer.
-run --base:docker=seeded --in:@=. --lock:@=DEEP-DEPS/flake.lock --required-pool=seeded
+#
+# THE VALUE IS A CURRY binding `--required-caosd=true`, so every build — a
+# caller's `run --base:@=DEEP-DEPS/flake-builder --in:@=.` — carries it
+# without saying so: a curried base flattens into the job's arg tree. A build
+# pushes its result (and its deps memo) to `caos-registry:5000`, a name that
+# only resolves on the central host, so it must run on that host's caosd runner.
+# The image a build PRODUCES is unaffected and runs anywhere.
+#
+# std/cargo is one such `run`, answered by the seeder: its seed record in
+# stack/build-builtins.sh requires `required-caosd` for exactly this reason.
+IMAGE=run --base:docker=seeded --in:@=. --lock:@=DEEP-DEPS/flake.lock --required-pool=seeded
+curry --base=$IMAGE --required-caosd=true

@@ -15,7 +15,7 @@ functions, cached by redis
 - `CAOS_SECRETS_DIR` is the directory on your computer where you keep caos secrets
 - On your computer, make some secrets:
   - `mkdir $CAOS_SECRETS_DIR` and then cd there
-  - `nix run github:Metta-AI/caos#caos-cli -- secrets-init --dir=$CAOS_SECRETS_DIR`
+  - `nix run github:softmax-universe/caos#caos-cli -- secrets-init --dir=$CAOS_SECRETS_DIR`
   - Github:
     - If you need to make a github token
         - Go to https://github.com/settings/personal-access-tokens
@@ -25,7 +25,7 @@ functions, cached by redis
     - Put this into `$CAOS_SECRETS_DIR/github-token`, using your real github token as the value:
       ```
       value=<token>
-      reader:@@=git+https://github.com/Metta-AI/caos?ref=refs/heads/main&dir=std/github
+      reader:@@=git+https://github.com/softmax-universe/caos?ref=refs/heads/main&dir=std/github
       ```
       The first reader lets `llm-step` fetch a session's content from a private
       repository; the second lets `caos-std/github` use the token, and through
@@ -34,8 +34,8 @@ functions, cached by redis
       granted to std/github").
   - If you have a softmax token, do the same as above but:
     - Name the file `softmax-token`
-    - Set the reader to `reader:@@=git+https://github.com/Metta-AI/caos-softmax?ref=refs/heads/main&dir=tools/gota`
-  - `nix run github:Metta-AI/caos#caos-cli -- secrets-push --dir=. --server=$CAOS_SERVER`. This prints your `SECRET_READERS_KEY`
+    - Set the reader to `reader:@@=git+https://github.com/softmax-universe/caos-softmax?ref=refs/heads/main&dir=tools/gota`
+  - `nix run github:softmax-universe/caos#caos-cli -- secrets-push --dir=. --server=$CAOS_SERVER`. This prints your `SECRET_READERS_KEY`
 - For Claude Code:
   - Go go https://claude.ai/code. Click New
   - At the bottom, click Default > Cloud > Add Cloud env... and fill in the form:
@@ -44,12 +44,12 @@ functions, cached by redis
     - Setup script:
       ```
         echo last modified on 2026-10-01T1455PT
-        B=https://raw.githubusercontent.com/Metta-AI/caos/main
+        B=https://raw.githubusercontent.com/softmax-universe/caos/main
         curl -fsSL "$B/integrations/claude-code/cloud/bootstrap.go" -o /tmp/caos-bootstrap.go
         go run /tmp/caos-bootstrap.go --base="$B" \
           --server=<CAOS_SERVER> --secret-readers=<SECRET_READERS_KEY>
       ```
-  - From the repo picker (next to the env picker), choose `metta-ai/caos-session`
+  - From the repo picker (next to the env picker), choose `softmax-universe/caos-session`
 - For Hermes:
   - Run the hermes/caos gateway (`--help` lists its flags):
     ```
@@ -267,6 +267,18 @@ Environment overrides: `SERVER_ADDR` (`0.0.0.0:80`), `CAOS_GIT_DIR` (`/git`),
 `CAOS_REGISTRY_PULL_HOST` (`localhost:5000`), `CAOS_REDIS_ADDR`
 (`caos-redis:6379`), `CAOS_RUNNER_TOKEN` (unset = runner auth disabled).
 Worker-running knobs (network, docker binary, slots) live on `caos-runnerd`.
+
+A plain `caos-runnerd` (no `CAOS_RUNNER_REQUIRE`) runs whatever it is asked
+to that does not name a runner, and mounts none of its host's persistent
+volumes into any worker, so it can run on any machine that reaches the server.
+Jobs that must run on the central host carry `--required-caosd=true`:
+dev/test-stack (the host's volumes, redis and registry) and every flake-builder
+build (the registry, by name; std/flake-builder curries the arg onto its
+image). Only the caosd runner — a runnerd on the central host started with
+`CAOS_RUNNER_REQUIRE=required-caosd=true` — runs them, and it is the only
+runner that grants volumes. `stack/serve` starts both runners on the central
+host and splits `CAOS_RUNNER_SLOTS` between them, half each by default
+(`CAOS_STACK_CAOSD_SLOTS` sets the caosd runner's share).
 
 ### Compute
 
@@ -486,8 +498,8 @@ file in the directory is one secret:
 ```text
 # <d>/anthropic-api-key
 value=<the key>
-reader:@@=git+https://github.com/Metta-AI/caos?ref=refs/heads/main&dir=std/llm-step
-reader:@@=git+https://github.com/Metta-AI/caos?ref=refs/heads/main&dir=std/llm-call
+reader:@@=git+https://github.com/softmax-universe/caos?ref=refs/heads/main&dir=std/llm-step
+reader:@@=git+https://github.com/softmax-universe/caos?ref=refs/heads/main&dir=std/llm-call
 ```
 
 A reader names the image a secret is granted to: a path in a repository, at a
@@ -509,8 +521,8 @@ caos-cli secrets-push --dir=<d> --server=http://localhost:9090
 Neither needs caos installed, or a caos tree to run in. With nix:
 
 ```bash
-nix run github:Metta-AI/caos#caos-cli -- secrets-init --dir=<d>
-nix run github:Metta-AI/caos#caos-cli -- \
+nix run github:softmax-universe/caos#caos-cli -- secrets-init --dir=<d>
+nix run github:softmax-universe/caos#caos-cli -- \
   secrets-push --dir=<d> --server=caos://<ticket>
 ```
 
@@ -886,7 +898,7 @@ caos-cli run --base:@=std/hello --greeting=hi --who=world
 
 A `:@=` image is a path in the EVALUATED workspace tree, so `std/hello` works
 from this checkout with nothing declared. From elsewhere, reach it by locator —
-`--base:@@=git+https://github.com/Metta-AI/caos?rev=<sha>&dir=std/hello` — or
+`--base:@@=git+https://github.com/softmax-universe/caos?rev=<sha>&dir=std/hello` — or
 mount it and name the mount.
 
 ```bash

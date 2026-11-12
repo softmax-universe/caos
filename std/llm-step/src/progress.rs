@@ -90,7 +90,12 @@ impl State<GitStore> {
     pub fn scratch_store() -> Result<GitStore, String> {
         let server =
             std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
-        GitStore::scratch("llm-step-git", server.trim_end_matches('/'))
+        let store = GitStore::scratch("llm-step-git", server.trim_end_matches('/'))?;
+        // A read of one object is a read of one object: without this, a
+        // missing commit is fetched with its whole history and a missing
+        // tree with every file under it.
+        store.set_object_fetcher(Box::new(fetch_single_object));
+        Ok(store)
     }
 
     /// Publish a commit object after its referenced tree and parents are known
@@ -159,6 +164,56 @@ impl State<GitStore> {
         }
         crate::timing::phase("push code");
         Err(format!("publishing code ref {refname}: {last}"))
+    }
+
+    /// Publish a commit made here, with the trees made for it, over the
+    /// object API. Not a git push: a push packs from the local graph, and a
+    /// commit made from single objects has neither its parent's history nor
+    /// the trees it only names by hash.
+    pub fn publish_code(&mut self, commit: &Oid) -> Result<(), String> {
+        let tree = self.store.read_commit(commit).map_err(String::from)?.tree;
+        self.publish_tree(&tree)?;
+        self.publish_commit(commit)
+    }
+
+    /// Hand the server `tree` and whatever under it the server lacks. The walk
+    /// stops at the first tree the server holds, so it costs the depth of the
+    /// change, not the size of the tree.
+    fn publish_tree(&mut self, tree: &Oid) -> Result<(), String> {
+        if server_has_object(tree)? {
+            return Ok(());
+        }
+        let entries = self.store.read_tree(tree).map_err(String::from)?;
+        for entry in &entries {
+            if entry.mode == session_protocol::v3::Mode::Tree {
+                self.publish_tree(&entry.oid)?;
+            }
+        }
+        let content = session_protocol::v3::tree::encode_tree_bytes(&entries);
+        let mut body = format!("tree {}\0", content.len()).into_bytes();
+        body.extend_from_slice(&content);
+        let url = format!("{}/object/", server_url()?);
+        let response = minreq::post(&url)
+            .with_timeout(30)
+            .with_body(body)
+            .send()
+            .map_err(|error| format!("POST {url}: {error}"))?;
+        if !(200..=299).contains(&response.status_code) {
+            return Err(format!(
+                "POST {url}: {} {}",
+                response.status_code, response.reason_phrase
+            ));
+        }
+        let published = response
+            .as_str()
+            .map_err(|error| format!("POST {url}: {error}"))?;
+        if published.trim() != tree.as_str() {
+            return Err(format!(
+                "the server stored tree {tree} as {}",
+                published.trim()
+            ));
+        }
+        Ok(())
     }
 
     pub fn fetch_object(&mut self, oid: &Oid) -> Result<(), String> {
@@ -273,6 +328,54 @@ impl State<GitStore> {
             (None, None) => Ok(TryAppend::HeadChanged(observed_parent)),
         }
     }
+}
+
+fn server_url() -> Result<String, String> {
+    let base =
+        std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
+    Ok(base.trim_end_matches('/').to_string())
+}
+
+fn server_has_object(object: &Oid) -> Result<bool, String> {
+    let url = format!("{}/object/{object}", server_url()?);
+    let response = minreq::head(&url)
+        .with_timeout(30)
+        .send()
+        .map_err(|error| format!("HEAD {url}: {error}"))?;
+    match response.status_code {
+        200..=299 => Ok(true),
+        404 => Ok(false),
+        status => Err(format!("HEAD {url}: {status} {}", response.reason_phrase)),
+    }
+}
+
+/// One object from the server's object API: what the store reads a missing
+/// object with, in place of a git fetch of that object's whole closure.
+fn fetch_single_object(oid: &Oid) -> Result<(String, Vec<u8>), String> {
+    let url = format!("{}/object/{oid}", server_url()?);
+    let response = minreq::get(&url)
+        .with_timeout(30)
+        .send()
+        .map_err(|error| format!("GET {url}: {error}"))?;
+    if !(200..=299).contains(&response.status_code) {
+        return Err(format!(
+            "GET {url}: {} {}",
+            response.status_code, response.reason_phrase
+        ));
+    }
+    let bytes = response.as_bytes();
+    let header_end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| format!("GET {url}: no object header"))?;
+    let kind = bytes[..header_end]
+        .split(|byte| *byte == b' ')
+        .next()
+        .unwrap_or_default();
+    Ok((
+        String::from_utf8_lossy(kind).into_owned(),
+        bytes[header_end + 1..].to_vec(),
+    ))
 }
 
 fn require_server_object(commit: &Oid, object: &Oid) -> Result<(), String> {

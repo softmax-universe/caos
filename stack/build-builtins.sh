@@ -606,10 +606,18 @@ fi
 
 if [ -n "$cargo_delta" ] && [ -n "${hash_of[cargo]:-}" ] && [ -n "$fb_delta" ]; then
   # cargo: `run --base:@=DEEP-DEPS/flake-builder --in:@=.`. Resolving the mount yields
-  # the flake-builder image (fb_delta), so the caller's arg-tree `image` is that
-  # tree oid and `in` is the deepened cargo entry — both known here.
-  add_seed_record cargo \
-    "$(seed_required "$fb_delta" "${in_of[cargo]}")" "$cargo_delta"
+  # the flake-builder image (fb_delta) curried with `required-caosd=true`, and a
+  # curried base FLATTENS into the job's arg tree: `base` is still fb_delta,
+  # `in` is the deepened cargo entry, and `required-caosd` rides alongside.
+  #
+  # So the record must require `required-caosd` too. A `required*` arg is the
+  # JOB saying which runners it accepts (server runner::matches), and a
+  # record that lacks it is a seeder the job refuses — cargo would then wait
+  # out its pending deadline in silence with the seeder parked right there.
+  caosd_oid=$(printf 'true' | git -C "$CLIENT" hash-object -w --stdin)
+  cargo_required=$(seed_required "$fb_delta" "${in_of[cargo]}")
+  cargo_required="${cargo_required%\}},\"required-caosd\":\"$caosd_oid\"}"
+  add_seed_record cargo "$cargo_required" "$cargo_delta"
 fi
 
 # rustc/deep-deps: SEEDED core. Their `.caos-expr` is a distinct sentinel

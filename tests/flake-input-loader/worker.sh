@@ -61,17 +61,20 @@ LOCK
 
 # The consumer's root expression, as TEXT — the only thing the loader sees of
 # it, and the only place a rev is pinned.
-expr_pinning() { # <rev> -> a /cas path
-  printf 'run --base:@=loader --in:@=. --expr=$CAOS_EXPR --input=demo --input-tree:@@=%s?rev=%s&dir=std --output-path=vendor/demo-std\n' \
-    "$REPO" "$1" > /tmp/expr
-  caos put /tmp/expr "/cas/expr-$1" >/dev/null || fail "publishing the expression"
-  echo "/cas/expr-$1"
+expr_pinning() { # <rev> [<output-path>] -> a /cas path
+  local out=${2:-vendor/demo-std} key
+  key=$(printf '%s' "$out" | tr -c 'a-z0-9' _)
+  printf 'run --base:@=loader --in:@=. --expr=$CAOS_EXPR --input=demo --input-tree:@@=%s?rev=%s&dir=std --output-path=%s\n' \
+    "$REPO" "$1" "$out" > /tmp/expr
+  caos put /tmp/expr "/cas/expr-$1-$key" >/dev/null || fail "publishing the expression"
+  echo "/cas/expr-$1-$key"
 }
 
-load() { # <rev-the-expression-pins> -> the ArgTree to run
+load() { # <rev-the-expression-pins> [<output-path>] -> the ArgTree to run
+  local out=${2:-vendor/demo-std}
   caos curry --base:@=/cas/args/loader \
-    --expr:@="$(expr_pinning "$1")" --input=demo \
-    --input-tree:@="$(input_tree)" --output-path=vendor/demo-std
+    --expr:@="$(expr_pinning "$1" "$out")" --input=demo \
+    --input-tree:@="$(input_tree)" --output-path="$out"
 }
 
 case "$stage" in
@@ -98,6 +101,34 @@ spliced)
   [ "$(caos hash "$R/vendor/demo-std")" = "$(caos hash /cas/args/input)" ] \
     || fail "the mount is not the input tree that was passed in"
   echo "  ok: the mount is the input tree's own oid" >&2
+
+  echo "== '.' replaces the consumer's tree with the input ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load "$SHA" .)" \
+    --then:hash="$(next replaced --input:@=/cas/args/input)"
+  ;;
+
+replaced)
+  # The pin is still checked: a consumer that mounts at `.` loses its tree to
+  # the input, so this is the only thing standing between it and a stale pin.
+  R=/cas/args/result; caos get -r "$R" || fail "reading the replaced tree"
+  caos get /cas/args/input
+  [ "$(caos hash "$R")" = "$(caos hash /cas/args/input)" ] \
+    || fail "'.' did not return the input tree itself"
+  [ ! -e "$R/sibling.txt" ] || fail "'.' kept a sibling of the consumer's tree"
+  [ "$(cat "$R/thing/file")" = "from the input" ] || fail "'.' lost the input's content"
+  echo "  ok: '.' returned the input tree's own oid and nothing of the consumer" >&2
+
+  echo "== a drifted pin is refused at '.' too ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load "$OLD" .)" \
+    --then:hash="$(next dotdrifted)" --catch
+  ;;
+
+dotdrifted)
+  [ -e /cas/args/error ] || fail "a drifted pin was accepted at '.'"
+  caos get /cas/args/error
+  grep -q "is locked at $SHA in flake.lock" /cas/args/error \
+    || fail "wrong error for a drifted pin at '.': $(cat /cas/args/error)"
+  echo "  ok: the pin is checked before '.' replaces anything" >&2
 
   echo "== a pin that drifts from flake.lock is refused ==" >&2
   # `--catch` because the refusal IS the assertion.

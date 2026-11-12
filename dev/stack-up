@@ -78,7 +78,7 @@ done
 [ -n "$inputs" ] || fail "stack-up needs --inputs=<dir>; the caller builds, this does not"
 
 state=/caos-dev
-[ -d "$state" ] || fail "no $state — this image must declare it in CAOS_GRANT_VOLUMES"
+[ -d "$state" ] || fail "no $state — this image must declare it in CAOS_GRANT_VOLUMES, and the job must carry --required-caosd=true (only the caosd runner grants volumes)"
 [ -f flake.nix ] || fail "no flake.nix in $PWD; run me from a materialized workspace"
 
 # ---- this stack's own corner of the shared volume ---------------------------

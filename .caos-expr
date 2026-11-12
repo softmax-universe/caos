@@ -16,8 +16,8 @@
 # is cached per rev.
 
 # WHAT THE NIX BUILDS SEE: the repo with the directories the flake never reads
-# blanked, so an edit to a test, a dev script or a design note does not re-key
-# the whole core. (The flake builds from rust/, std/cargo, std/flake-builder, its
+# blanked, so an edit to a test, a dev script or a doc does not re-key the whole
+# core. (The flake builds from rust/, std/cargo, std/flake-builder, its
 # own files and the small integrations/prod/tools it names; nothing else.)
 EMPTY=graft --keep=x
 NIXIN=graft --in:@=. --tests=$EMPTY --dev=$EMPTY --design=$EMPTY --examples=$EMPTY --spec=$EMPTY --.github=$EMPTY --README.md=x --AGENTS.md=x --CLAUDE.md=x --SPEC.md=x

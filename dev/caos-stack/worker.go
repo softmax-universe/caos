@@ -17,6 +17,7 @@
 //	        environment whose setup installs that client and talks to that
 //	        stack, by tail-calling `drive`, with the reply as its `in`.
 //	done    the `then` of that: put the reply and the new environment's name.
+//	answer  the `then` of every other op: put the daemon's reply as the result.
 //
 // THE ENVIRONMENT IS MADE HERE AND NOT IN THE DAEMON, and that is a boundary. It
 // takes the claude-oauth-token, which only `drive` is granted (by its code
@@ -102,28 +103,43 @@ func main() {
 			makeEnv()
 		case "done":
 			done()
+		case "answer":
+			put(arg("result"))
 		default:
 			w.True(false, "unknown --stage: %s", stage)
 		}
 	})
 }
 
+// put answers with `text`: a result is a tree holding `stdout`
+// (design/tool-contract.md), as std/caos-test's answer is.
 func put(text string) {
-	w.Must(os.WriteFile("/tmp/out", []byte(text), 0o644))
-	caos("put", "/tmp/out", "/cas/out")
+	const dir = "/tmp/answer"
+	w.Must(os.MkdirAll(dir, 0o755))
+	w.Must(os.WriteFile(dir+"/stdout", []byte(text), 0o644))
+	caos("put", dir, "/cas/out")
 }
 
 func route() {
 	// List the tree one level — enough to look for the codebase's own files.
-	caos("get", "/cas/args/in")
-	_ = exec.Command("caos", "get", "/cas/args/in/dev").Run()
-	if _, err := os.Stat("/cas/args/in/flake.nix"); err != nil {
+	// `root` is the tree to bring up (design/tool-contract.md): a source tree's
+	// commit resolves to its code tree, which is what the daemon is keyed by.
+	if !has("root") {
+		put("caos-stack: nothing is at the root path: root is the source tree to bring up,\n" +
+			"such as sources/caos/02-layer\n")
+		return
+	}
+	const in = "/cas/caos-stack-tree"
+	caos("resolve", caos("hash", "/cas/args/root"), "", in)
+	caos("get", in)
+	_ = exec.Command("caos", "get", in+"/dev").Run()
+	if _, err := os.Stat(in + "/flake.nix"); err != nil {
 		put("caos-stack runs a caos dev stack built from the tree. This source tree is\n" +
 			"not the caos codebase (no flake.nix / dev/stack-up), so there is no stack\n" +
 			"for it to start or inspect.\ncaos-stack is specific to the caos codebase; run it there.\n")
 		return
 	}
-	if _, err := os.Stat("/cas/args/in/dev/stack-up"); err != nil {
+	if _, err := os.Stat(in + "/dev/stack-up"); err != nil {
 		put("caos-stack runs a caos dev stack built from the tree. This source tree is\n" +
 			"not the caos codebase (no flake.nix / dev/stack-up), so there is no stack\n" +
 			"for it to start or inspect.\ncaos-stack is specific to the caos codebase; run it there.\n")
@@ -138,9 +154,9 @@ func route() {
 		return
 	}
 
-	tree := caos("hash", "/cas/args/in")
+	tree := caos("hash", in)
 	args := []string{"prepare-request", "--base:@=/cas/args/daemon", "--affinity=" + tree,
-		"--op=" + op, "--in:@=/cas/args/in"}
+		"--op=" + op, "--in:@=" + in}
 	for _, name := range []string{"request-id", "relay", "advertise", "log", "cursor", "refs"} {
 		if has(name) {
 			args = append(args, "--"+name+":@=/cas/args/"+name)
@@ -152,7 +168,8 @@ func route() {
 		caos("run-request-then", request, "--then:hash="+next("env"))
 		return
 	}
-	caos("run-request-then", request)
+	// The daemon's reply is a blob; `answer` wraps it as the result tree.
+	caos("run-request-then", request, "--then:hash="+next("answer"))
 }
 
 // setupScript is a cloud environment's setup for a session that installs the

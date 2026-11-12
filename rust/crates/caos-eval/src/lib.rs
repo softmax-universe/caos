@@ -1361,6 +1361,12 @@ mod tests {
             parse_arg("--help=$HELP").unwrap(),
             ("help", ArgType::Literal, "$HELP")
         );
+        assert_eq!(
+            parse_arg("--base:nix=v1").unwrap(),
+            ("base", ArgType::Nix, "v1")
+        );
+        assert_eq!(super::nix_base("v1").unwrap(), "nix:v1");
+        assert!(super::nix_base("v2").is_err());
         assert!(parse_arg("--k:nope=v").is_err());
         assert!(parse_arg("--a/b=v").is_err());
         assert!(parse_arg("no-dashes=v").is_err());

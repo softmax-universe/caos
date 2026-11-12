@@ -422,7 +422,47 @@
             ];
             Env = [ "PATH=/bin" ];
           };
+        } // extra);
+        workerRunnerImage = mkRunnerImage { };
+
+        # The caos additions, as the commands that bake them into an image
+        # (design/nix-bootstrap.md, "The core images carry caos"). The core is
+        # built by the `nix=v1` primitive, which adds nothing to what nix built,
+        # so the three core flakes must produce RUNNABLE images themselves:
+        # /bin/caos (runnerd forces it as the entrypoint), the user db, the
+        # world-writable /tmp and, for runner and cargo, /worker. They run in
+        # `fakeRootCommands` (a fakeroot), where setuid and the 1777 mode land
+        # in the layer tar as written; the cargo image's `inflateWith` already
+        # runs there. What flake-builder builds gets the same pieces, from ITS
+        # own /bin/caos (std/flake-builder/worker), so anything built by
+        # flake-builder X carries caos X.
+        #
+        # `build-builtins.sh` still composes these onto the CLEAN images above
+        # for the seeded path, which is why these are separate attrs.
+        caosAdditions =
+          { worker ? null }:
+          ''
+            mkdir -p bin usr/bin etc tmp
+            install -m 4755 ${workspaceBins}/bin/caos bin/caos
+            ln -s /bin/env usr/bin/env
+            printf 'root:x:0:0:root:/root:/sbin/nologin\nworker:x:1000:1000:caos worker:/tmp:/sbin/nologin\n' > etc/passwd
+            printf 'root:x:0:\nworker:x:1000:\n' > etc/group
+            chmod 1777 tmp
+          ''
+          + pkgs.lib.optionalString (worker != null) ''
+            install -m 755 ${worker} worker
+          '';
+        coreRunnerImage = mkRunnerImage {
+          fakeRootCommands = caosAdditions { worker = "${workspaceBins}/bin/worker-runner"; };
         };
+        coreFlakeBuilderImage =
+          ((import ./std/flake-builder/flake.nix).outputs {
+            self = null;
+            inherit nixpkgs;
+          }).lib.${linuxSystem}.imageWith
+            {
+              fakeRootCommands = caosAdditions { };
+            };
 
         # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
         # the one script that builds a flake attribute and adds nothing to it.

@@ -1926,6 +1926,12 @@ sandbox = false''
           # and the runner: std/cargo is no longer a published flake tree, so
           # its image comes from here (see the cargoDef call above).
           caos-worker-cargo-docker = workerCargoImage;
+          # The same three, with the caos additions baked in, for the `nix=v1`
+          # primitive: the root expression builds the core from THESE, and
+          # nothing composes anything onto them afterwards.
+          caos-core-runner-docker = coreRunnerImage;
+          caos-core-flake-builder-docker = coreFlakeBuilderImage;
+          caos-core-cargo-docker = coreCargoImage;
           # The nix primitive's image (design/nix-bootstrap.md).
           caos-worker-nix-docker = workerNixImage;
 

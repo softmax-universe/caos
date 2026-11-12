@@ -479,19 +479,26 @@
                 # Root: the nix store is root-owned.
                 "CAOS_WORKER_UID=0"
                 "CAOS_WORKER_GID=0"
-                # A PERSISTENT STORE. Each job used to start with the image's
-                # own /nix and rebuild the toolchain, the ~176 crate
-                # dependencies and the workspace from nothing, so a cold core
-                # took ~48 minutes (measured, design/nix-bootstrap.md). The
-                # caosd runner backs this path with a named volume that is
-                # seeded from the image's /nix the first time and kept after, and
-                # shared by every job that asks, so a derivation built once is a
-                # store hit for the next job and the next stack. Only the caosd
-                # runner grants it, and only to jobs carrying
-                # `--required-caosd=true`, which the root expression's `nix=v1`
-                # lines do. nix serializes concurrent builds in one store with its
-                # own locks.
-                "CAOS_GRANT_VOLUMES=/nix"
+                # A PERSISTENT STORE, the way dev/devbox gets one. Each job used
+                # to start with the image's own /nix and rebuild the toolchain,
+                # the ~176 crate dependencies and the workspace from nothing, so
+                # a cold core took ~48 minutes (measured, design/nix-bootstrap.md).
+                # The caosd runner backs /mounted-nix with the host's shared nix
+                # store volume, and stack/nix-worker seeds it with whatever the
+                # image has that it lacks and binds it over /nix (that bind is why
+                # the SYS_ADMIN grant). Only the caosd runner grants either, and
+                # only to jobs carrying `--required-caosd=true`, which the root
+                # expression's `nix=v1` lines do. A derivation built once is then
+                # a store hit for the next job and the next stack, and nix
+                # serializes concurrent builds in one store with its own locks.
+                #
+                # THIS WIDENS WHAT A FLAKE BUILD CAN DO. The container already
+                # runs nix unsandboxed, as root; with SYS_ADMIN and no seccomp or
+                # apparmor confinement it is much nearer the host. Same grant as
+                # dev/devbox, which runs only this repo's own code; this runs
+                # whatever flake an evaluated tree names.
+                "CAOS_GRANT_VOLUMES=/mounted-nix"
+                "CAOS_GRANT_SYS_ADMIN=1"
               ];
             };
             # An in-image `nix build` needs the closure REGISTERED, not merely

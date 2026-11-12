@@ -7,7 +7,8 @@
 # relative to the DEPS file's OWN directory (so `../..` reaches parents), and
 # the name is the mount. There is no special `packages` root — it is a
 # whole-tree transform. We check the deepened shape, DAG sharing, incremental
-# recompute, FILE deps, cycle detection, and its use THROUGH evaluation.
+# recompute, FILE deps, cycle detection, its use THROUGH evaluation, and that a
+# MOUNT (listed in `.caos-mounts`) is carried across untouched.
 #
 # THE FIXTURE IS BUILT AND PUBLISHED, not committed: a worker has no git, and
 # `caos put` is how it makes a tree nameable. Each stage builds exactly the

@@ -1699,15 +1699,11 @@ pub fn server_request(base: &str, request: &ServerRequest) -> Result<ServerRespo
 
 fn server_request_inner(base: &str, request: &ServerRequest) -> Result<ServerResponse, String> {
     let base = base.trim_end_matches('/');
-    // THE WORLD TAG GOES ON EVERY REQUEST, whichever transport carries it, and
-    // it is stamped HERE rather than per-branch for that reason. A request
-    // without it is allowed through (`caos_world`: git's own traffic and health
-    // probes have none), so a transport that forgot to stamp it would not fail —
-    // it would silently let a host client drive a test stack, which is the exact
-    // crossing the tag exists to prevent.
-    let mut headers: Vec<(&str, String)> =
-        vec![(caos_world::WORLD_HEADER, caos_world::WORLD.to_string())];
-    headers.extend(request.headers.iter().map(|(n, v)| (*n, v.clone())));
+    let headers: Vec<(&str, String)> = request
+        .headers
+        .iter()
+        .map(|(n, v)| (*n, v.clone()))
+        .collect();
     let request = &ServerRequest {
         headers: &headers,
         ..*request

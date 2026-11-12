@@ -109,7 +109,7 @@ Caos runs well-defined binaries with well-defined inputs and well-defined enviro
 | `server` | `caos-server` | One daemon: object storage, compute, and a git smart-HTTP transport, over its own repo. See [server](#server). |
 | `runnerd` | `caos-runnerd` | The generic host agent: long-polls the server for jobs and runs worker containers. The server itself runs nothing. See `design/runner-protocol.md`. |
 | `worker-common` | — | Shared library for the Rust workers. |
-| `worker-runner` | — (`std/runner`'s `/worker`) | The in-image runner trampoline: receives a compiled worker binary as its `worker1` arg and execs it, so every compiled worker rides one shared image as `curry(std/runner, worker1=<binary>)`. |
+| `worker-runner` | — (`caos-core/runner`'s `/worker`) | The in-image runner trampoline: receives a compiled worker binary as its `worker1` arg and execs it, so every compiled worker rides one shared image as `curry(caos-core/runner, worker1=<binary>)`. |
 | `worker-rustc` | — (run as `curry(runner, worker1)`) | Builds a worker from Rust source. See [workers](#workers). |
 | `worker-bash-tool`, `worker-llm-call`, `worker-llm-step`, `worker-rgrep` | — (run as `curry(runner, worker1)`) | The agent harness: bounded bash, stateless LLM calls, durable LLM turns, and recursive grep. See `design/chat.md` for the current chat protocol and `design/agent-harness.md` for its historical rationale. |
 | `worker-cargo` | — (`std/cargo`'s `/worker`) | Whole-workspace `cargo check/build/test` as `std/cargo` (pinned toolchain + pre-compiled deps + this binary as `/worker`; its image is host-built and streamed like the runner, `caos-worker-cargo-docker` — see `std/cargo/` and `design/cargo-workers.md`) — the agent's `caos-build`/`caos-test` tools. |
@@ -203,7 +203,7 @@ Only a few images are nix-built here: the `flake-builder`
 (`caos-worker-cargo-docker`) — each host-built and streamed. Every other std
 worker is a flake-built worker image (`std/bash`, `std/merge` — complete flakes
 in `std/`, imaged on demand by the flake-builder) or a
-`curry(std/runner, worker1=<binary>)` over the runner —
+`curry(caos-core/runner, worker1=<binary>)` over the runner —
 see `design/flake-images.md`.
 
 > On macOS, see [Building on macOS](BUILDING_ON_MACOS.md).
@@ -786,13 +786,13 @@ A worker image is an image whose definition includes `/worker` — the
 executable `caos runner` execs. An *interpreter* image's `/worker` runs its
 argument (the `worker1` arg — like `python:3` runs a script), which is how
 the compiled workers below ride one shared image: each is
-`curry(std/runner, worker1=<binary>)`, and the binary reads `/cas/args` and
+`curry(caos-core/runner, worker1=<binary>)`, and the binary reads `/cas/args` and
 writes `/cas/out`. The Rust workers share `worker-common` (arg helpers,
 `caos`/`map_then`/`caos curry` wrappers, result staging).
 
 The example workers are TEST FIXTURES, not std entries: each test carries
 its worker's source (`tests/<name>/worker.rs`, single-file, linking only
-`worker-common`) and builds it with `std/rustc` at test start — memoized,
+`worker-common`) and builds it with `caos-core/rustc` at test start — memoized,
 one compile per source edit. `hello.rs` in `examples/consumer/` shows the
 same flow for consumers. The fixtures worth reading:
 

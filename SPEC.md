@@ -884,7 +884,7 @@ enters a cache key. See [flake inputs](design/flake-inputs.md).
   match git's notation anyway. So `merge` is a decomposed compute tool like
   `bash`/`build`/`test`; the file tools (`read`/`ls`/`write`/`edit`) are in-process.
 - Its image is a small git worker — a `std/merge` flake
-  (`nixpkgs.gitMinimal`) run as `curry(std/runner, worker1=<merge script>)`,
+  (`nixpkgs.gitMinimal`) run as `curry(caos-core/runner, worker1=<merge script>)`,
   the same flake-image pattern as `std/bash`. Not `std/cargo` (which has git
   but is a heavy image and the wrong home) and not folded into the bash-tool
   image (whose surface stays minimal). The script reconstructs a git odb from

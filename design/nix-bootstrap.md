@@ -93,9 +93,14 @@ available before any core exists.
   a line cannot reach into a variable, so a consumer would have to repeat its
   pin to name something inside what it just mounted.
 - **`graft`** replaces or adds entries in a tree:
-  `T=graft --in:@=. caos-core=$CORE` is the input tree with `caos-core/` set to
-  `$CORE`. (`std/flake-input-loader` does the same thing as a worker; it cannot
-  be used here, because it is rustc-built and so needs the core.)
+  `T=graft --in:@=. --caos-core=$CORE` is the input tree with `caos-core/` set
+  to `$CORE`; without `--in` it starts from the empty tree. **`mount`** is the
+  same, and also records each name in the result's `.caos-mounts`, saying that
+  entry is a finished tree (section 4). They are two verbs because assembling
+  a tree that is not a mount point (an image layer, the core itself) must not
+  leave a `.caos-mounts` file in it. (`std/flake-input-loader` mounts as a
+  worker; it cannot be used here, because it is rustc-built and so needs the
+  core.)
 
 ## 3. The caos repo
 

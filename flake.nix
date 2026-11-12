@@ -994,6 +994,8 @@ sandbox = false''
           workerFlakeBuilderImage
           workerRunnerImage
           workerCargoImage
+          # Not a std entry: the nix primitive's image (see workerNixImage).
+          workerNixImage
         ];
 
         # The worker binaries build-builtins.sh needs at publish, to curry onto

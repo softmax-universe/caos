@@ -191,7 +191,7 @@ impl Pass<'_> {
     for (name, _) in &subdirs {
         let child = into.join(name);
         fs::create_dir_all(&child).map_err(|e| format!("creating {}: {e}", child.display()))?;
-        deepen(base, &join(rel, name), &child, memo, visiting)?;
+        self.deepen(&join(rel, name), &child)?;
     }
 
     let Some(deps) = deps_file else {

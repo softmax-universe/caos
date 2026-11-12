@@ -2090,8 +2090,9 @@ fn root_callback(
     let new = if result.deleted {
         None
     } else {
+        // Read, not fetched: only which object the result's `root` names is
+        // wanted, and that object is then named by hash, never opened.
         let result_tree = Oid::parse(&cas_hash(&arg("result"))?, "root tool result")?;
-        state.fetch_object(&result_tree)?;
         let entry = state
             .store()
             .read_tree(&result_tree)

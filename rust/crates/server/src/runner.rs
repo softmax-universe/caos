@@ -51,27 +51,6 @@ fn pending_timeout() -> Duration {
     }))
 }
 
-/// How long a SEEDED sentinel waits before the server is willing to call a
-/// same-sentinel disagreement permanent (see [`seeded_verdict`]).
-///
-/// It exists only to cover the two windows in which a parked seeder poll is
-/// legitimately out of date: the core-seeder-runner rescans `refs/caos/seed`
-/// every 5s (`RESCAN`), and a poll it parked before a republish keeps
-/// advertising the OLD `required` until its 20s TTL turns over (`POLL_TTL`).
-/// Inside those 25s a mismatch is transient and failing would be wrong;
-/// outside them it never resolves on its own. Default 45s — most of a factor
-/// of two over the turnover, and a twentieth of the 900s pending timeout a
-/// stack sets. Raise it if you lengthen either seeder constant.
-fn seeded_grace() -> Duration {
-    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    Duration::from_secs(*SECS.get_or_init(|| {
-        std::env::var("CAOS_SEEDED_GRACE_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(45)
-    }))
-}
-
 /// How long an owner's lease lasts after its runner last renewed it. The runner
 /// renews every third of this, so three missed renewals are a lapse. Liveness
 /// is the runner's own traffic and is never inferred from a job being slow.

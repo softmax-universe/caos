@@ -320,6 +320,7 @@ fn main() {
         registry_pull_host: env_or("CAOS_REGISTRY_PULL_HOST", DEFAULT_REGISTRY_PULL_HOST),
         redis_addr: env_or("CAOS_REDIS_ADDR", DEFAULT_REDIS_ADDR),
         cache_namespace: env_or("CAOS_CACHE_NAMESPACE", ""),
+        trace_parents: env_or("CAOS_TRACE_PARENTS", "") == "yes",
         git_dir,
         secrets_git,
         repo,

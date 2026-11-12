@@ -704,12 +704,16 @@ func main() {
 	if !isSha(p.rev) {
 		fatal("the caos input is pinned to %q, which is not a full commit sha", p.rev)
 	}
-	p.stdPath, err = readOutputPath(filepath.Join(repoDir, ".caos-expr"))
+	outputPath, err := readOutputPath(filepath.Join(dir, ".caos-expr"))
+	if err == nil {
+		p.stdPath, err = stdMount(repoDir, dir, outputPath)
+	}
 	if err != nil {
 		fatal("%v\n"+
-			"  A caos-client repo's root expression loads the pinned input:\n"+
+			"  A caos-client repo's expression loads the pinned input, in caos-std/ (with\n"+
+			"  --output-path=.) or at the repo root (with --output-path=caos-std):\n"+
 			"  run --base:@@=...&dir=std/flake-input-loader --in:@=. --expr=$CAOS_EXPR \\\n"+
-			"      --input=caos --input-tree:@@=...&dir=std --output-path=caos-std", err)
+			"      --input=caos --input-tree:@@=...&dir=std --output-path=.", err)
 	}
 	say("%s pins caos %s at %s, and mounts its std at %s", repoDir, p.slug(), p.rev[:12], p.stdPath)
 

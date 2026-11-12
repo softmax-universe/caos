@@ -1071,6 +1071,11 @@ impl CodeOps for GitStore {
         let base_commit = self.read_commit(base).map_err(String::from)?;
         let ours_tree = self.tree_of(ours)?;
         let theirs_tree = self.tree_of(theirs)?;
+        // git merges files, and a commit can be read, or minted, without its
+        // tree ever being local.
+        for tree in [&base_commit.tree, &ours_tree, &theirs_tree] {
+            self.ensure_whole_tree(tree)?;
+        }
         self.merge_over(base, &base_commit, ours_tree, theirs_tree)
     }
 

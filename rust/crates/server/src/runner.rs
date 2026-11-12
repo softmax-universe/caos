@@ -428,81 +428,19 @@ pub(crate) fn dispatch(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let mut st = lock();
-                // A bool, not a borrow of the job: the grace block below needs
-                // `st` mutably, and `arg_tree` is the dispatch parameter anyway
-                // (a Job's copy of it never changes).
-                let Some(pending) = st
-                    .jobs
-                    .get(&id)
-                    .map(|j| matches!(j.phase, Phase::Pending { .. }))
-                else {
+                let Some(job) = st.jobs.get(&id) else {
                     // Resolved between the timeout and the lock; loop to drain
                     // the channel (the sender removed the job before sending).
                     continue;
                 };
-                let now = Instant::now();
-                // The grace point: still pending, and long enough past enqueue
-                // that a same-sentinel disagreement can no longer be a seeder
-                // mid-turnover. Fires at most once.
-                if pending && seeded_check.is_some_and(|at| now >= at) {
-                    seeded_check = None;
-                    match seeded_verdict(&st, id) {
-                        Some(why) => {
-                            remove_job(&mut st, id);
-                            drop(st);
-                            return Err(HttpError::new(
-                                503,
-                                // `docker://` back on the front: `image_ref` is
-                                // post-resolution and the scheme is stripped by
-                                // then, so the bare name reads as an image.
-                                format!(
-                                    "seeded sentinel docker://{image_ref} \
-                                     (arg_tree {arg_tree}) cannot be answered: {why}"
-                                ),
-                            ));
-                        }
-                        // Not provable — no seeder for this sentinel is parked
-                        // at all. Still worth SAYING so, because the alternative
-                        // is an idle machine and no output until the timeout.
-                        None => eprintln!(
-                            "caos-server: docker://{image_ref} (arg_tree {arg_tree}) has waited \
-                             {:?} with no seeder registered for it; waiting up to {:?}",
-                            seeded_grace(),
-                            pending_timeout()
-                        ),
-                    }
-                    continue;
-                }
-                let Some(job) = st.jobs.get(&id) else {
-                    continue;
-                };
                 match job.phase {
-                    Phase::Pending { deadline, .. } if now >= deadline => {
-                        // ONLY for a seeded job. A `required["base"]` match is
-                        // evidence of a seeder only when the image is a
-                        // sentinel; on an ordinary job it is just a warm runner
-                        // holding the same image, and calling that "the seeder"
-                        // would be a new wrong answer in place of the old one.
-                        let detail = if !seeded {
-                            String::new()
-                        } else {
-                            match seeded_verdict(&st, id) {
-                                Some(why) => format!(", the docker://{image_ref} sentinel: {why}"),
-                                // A seeded sentinel never reaches a generic
-                                // runner, so "no runner" is a misleading way to
-                                // say "nobody published a record under this key".
-                                None => format!(
-                                    ": no seeder ever registered the \
-                                     docker://{image_ref} sentinel"
-                                ),
-                            }
-                        };
+                    Phase::Pending { deadline, .. } if Instant::now() >= deadline => {
                         let job = remove_job(&mut st, id);
                         drop(st);
                         return Err(HttpError::new(
                             503,
                             format!(
-                                "no runner for arg_tree {} (waited {:?}){detail}",
+                                "no runner for arg_tree {} (waited {:?})",
                                 job.arg_tree,
                                 pending_timeout()
                             ),

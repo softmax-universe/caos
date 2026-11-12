@@ -161,41 +161,53 @@ impl State<GitStore> {
         Err(format!("publishing code ref {refname}: {last}"))
     }
 
-    /// Bring ONE commit object into the local store over the object API.
-    /// A git fetch of a commit brings its whole history; a caller that only
-    /// reads the commit's own headers needs none of it.
-    pub fn seed_commit(&mut self, commit: &Oid) -> Result<(), String> {
-        if self.store.has_local(commit)? {
+    /// Publish a commit made here, with the trees made for it, over the
+    /// object API. Not a git push: a push packs from the local graph, and a
+    /// commit made from single objects has neither its parent's history nor
+    /// the trees it only names by hash.
+    pub fn publish_code(&mut self, commit: &Oid) -> Result<(), String> {
+        let tree = self.store.read_commit(commit).map_err(String::from)?.tree;
+        self.publish_tree(&tree)?;
+        self.publish_commit(commit)
+    }
+
+    /// Hand the server `tree` and whatever under it the server lacks. The walk
+    /// stops at the first tree the server holds, so it costs the depth of the
+    /// change, not the size of the tree.
+    fn publish_tree(&mut self, tree: &Oid) -> Result<(), String> {
+        if server_has_object(tree)? {
             return Ok(());
         }
-        let base =
-            std::env::var("CAOS_SERVER_URL").map_err(|_| "CAOS_SERVER_URL not set".to_string())?;
-        let url = format!("{}/object/{commit}", base.trim_end_matches('/'));
-        let response = minreq::get(&url)
+        let entries = self.store.read_tree(tree).map_err(String::from)?;
+        for entry in &entries {
+            if entry.mode == session_protocol::v3::Mode::Tree {
+                self.publish_tree(&entry.oid)?;
+            }
+        }
+        let content = session_protocol::v3::tree::encode_tree_bytes(&entries);
+        let mut body = format!("tree {}\0", content.len()).into_bytes();
+        body.extend_from_slice(&content);
+        let url = format!("{}/object/", server_url()?);
+        let response = minreq::post(&url)
             .with_timeout(30)
+            .with_body(body)
             .send()
-            .map_err(|error| format!("GET {url}: {error}"))?;
+            .map_err(|error| format!("POST {url}: {error}"))?;
         if !(200..=299).contains(&response.status_code) {
             return Err(format!(
-                "GET {url}: {} {}",
+                "POST {url}: {} {}",
                 response.status_code, response.reason_phrase
             ));
         }
-        let bytes = response.as_bytes();
-        let header_end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or_else(|| format!("GET {url}: no object header"))?;
-        if !bytes[..header_end].starts_with(b"commit ") {
-            return Err(format!("{commit} is not a commit"));
+        let published = response
+            .as_str()
+            .map_err(|error| format!("POST {url}: {error}"))?;
+        if published.trim() != tree.as_str() {
+            return Err(format!(
+                "the server stored tree {tree} as {}",
+                published.trim()
+            ));
         }
-        let info = session_protocol::v3::tree::parse_commit_bytes(commit, &bytes[header_end + 1..])
-            .map_err(String::from)?;
-        let written = self.store.write_commit(&info).map_err(String::from)?;
-        if written != *commit {
-            return Err(format!("seeding {commit} wrote {written}"));
-        }
-        crate::timing::phase("seed commit");
         Ok(())
     }
 

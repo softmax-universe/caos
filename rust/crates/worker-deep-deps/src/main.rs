@@ -246,20 +246,20 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
         // subtree belongs. Copying the staged structure (all symlinks, so no
         // content moves) yields the identical tree, and identical trees are one
         // object.
-        if let Some(done) = self.memo.get(&target).cloned() {
+        if let Some(done) = pass.memo.get(&target).cloned() {
             copy_staged(&done, &at)?;
             continue;
         }
-        if self.visiting.contains(&target) {
+        if pass.visiting.contains(&target) {
             return Err(format!(
                 "dependency cycle: {} -> {target:?}",
-                self.visiting.join(" -> ")
+                pass.visiting.join(" -> ")
             ));
         }
-        self.visiting.push(target.clone());
+        pass.visiting.push(target.clone());
         fs::create_dir_all(&at).map_err(|e| format!("creating {}: {e}", at.display()))?;
-        self.deepen(&target, &at)?;
-        self.visiting.pop();
+        deepen(pass, &target, &at)?;
+        pass.visiting.pop();
         pass.memo.insert(target, at);
     }
     Ok(())

@@ -814,17 +814,15 @@ fn eval_expr_base(
     // A `$VAR` base names an object a prior assignment produced, whatever its
     // declared type — matched first, exactly as `eval_expr_args` does.
     if let Some(var) = value.strip_prefix('$').filter(|_| vars) {
-        let (kind, oid) = env
-            .get(var)
-            .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
+        let (kind, oid) = lookup_var(host, env, var)?;
         // A here-string is bytes, not a worker: naming one as the base would
         // form an ArgTree whose image is a text blob.
         if kind == "blob" {
             return Err(format!(
-                "eval-path: ${var} is a here-string (a blob), not an image"
+                "eval-path: ${var} is a blob (a here-string or a file), not an image"
             ));
         }
-        return Ok(oid.clone());
+        return Ok(oid);
     }
     match ty {
         // `:docker=<ref>` — a registry image, carried as the blob

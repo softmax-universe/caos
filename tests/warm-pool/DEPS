@@ -1,0 +1,4 @@
+# What this test reaches for (format `<path> <name>`).
+../../dev/warm-test warm-test
+# The image this worker test runs in: a dependency, not a harness.
+../../std/go go

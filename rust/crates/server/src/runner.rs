@@ -1375,6 +1375,43 @@ mod tests {
         assert!(!matches(&test_pool, &other));
     }
 
+    /// A pooled host's WARM runner (design/firecracker-runners.md, phase 0a).
+    /// Its follow-up poll is `parent ∪ {base}` with lineage `[parent]`, which is
+    /// what `caos runner` now sends. Before that it sent `{base}` with lineage
+    /// `[{}]`, and this pins down all three ways that shape went wrong.
+    #[test]
+    fn a_pooled_warm_runner_keeps_its_pool_and_its_parent() {
+        let oid = |s: &str| s.repeat(40 / s.len());
+        let parent = ArgTree::from([("required-pool".to_string(), oid("a"))]);
+        let mut warm = parent.clone();
+        warm.insert("base".to_string(), oid("b"));
+
+        let pooled_same_base = ArgTree::from([
+            ("base".to_string(), oid("b")),
+            ("required-pool".to_string(), oid("a")),
+        ]);
+        let unpooled_same_base = ArgTree::from([("base".to_string(), oid("b"))]);
+        let pooled_other_base = ArgTree::from([
+            ("base".to_string(), oid("c")),
+            ("required-pool".to_string(), oid("a")),
+        ]);
+
+        // It takes its own pool's next job, and nothing from outside the pool.
+        assert!(matches(&warm, &pooled_same_base));
+        assert!(!matches(&warm, &unpooled_same_base));
+        // A pool job it can't serve evicts it toward its parent.
+        assert!(!matches(&warm, &pooled_other_base));
+        assert!(matches(&parent, &pooled_other_base));
+
+        // The old shape: it rejected its own pool's work, accepted same-base
+        // work from outside the pool, and a generic lineage could never
+        // evict it for a pool job.
+        let old = ArgTree::from([("base".to_string(), oid("b"))]);
+        assert!(!matches(&old, &pooled_same_base));
+        assert!(matches(&old, &unpooled_same_base));
+        assert!(!matches(&ArgTree::new(), &pooled_other_base));
+    }
+
     // ---- keyed dispatch (design/daemons.md) ----
 
     fn keyed(instance: &str) -> ArgTree {

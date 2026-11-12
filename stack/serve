@@ -85,6 +85,12 @@
 #                             "The seed"), so a fresh stack has std without
 #                             publishing it.
 #   CAOS_RUNNER_SLOTS         the general pool's concurrency
+#   CAOS_STACK_POOLS          dedicated runner pools beside the general one, as
+#                             space-separated `name=slots` pairs. Each is a
+#                             runnerd requiring `required-pool=<name>`, so it
+#                             takes only jobs that name it and the general pool
+#                             takes none of them (design/firecracker-runners.md).
+#                             Unset or empty: none.
 #   CAOS_PENDING_TIMEOUT_SECS how long a job waits for a runner to exist
 #   CAOS_STACK_IROH           "yes" to answer `caos://` clients as well
 #                             (design/iroh-transport.md): an iroh endpoint that
@@ -338,6 +344,13 @@ start_runnerd() { # <log-name> <slots> <require>
 
 if [ "$CAOS_STACK_RUNNERD" = yes ]; then
   start_runnerd runnerd "${CAOS_RUNNER_SLOTS:-8}" ""
+  for pool in ${CAOS_STACK_POOLS:-}; do
+    case "$pool" in
+      *=*) ;;
+      *) fail "CAOS_STACK_POOLS entry $pool is not name=slots" ;;
+    esac
+    start_runnerd "runnerd-${pool%%=*}" "${pool#*=}" "required-pool=${pool%%=*}"
+  done
 fi
 
 # --- caos-iroh: the same server, reachable by ticket -------------------------

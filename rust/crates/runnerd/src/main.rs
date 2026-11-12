@@ -43,51 +43,11 @@
 //! they get their own netns on a bridge it has to be a name that resolves
 //! there. `stack/serve` supplies whichever the placement needs.
 
-use std::collections::HashMap;
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+mod docker;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
-
-/// The caos binary inside every compute image, forced as the entrypoint.
-const CAOS_BIN: &str = "/bin/caos";
-
-/// Fixed in-container path where a granted engine socket is bind-mounted
-/// (`CAOS_RUNNER_SOCKET`); advertised to the worker as `CAOS_ENGINE_SOCKET`.
-/// Its HOST path rides alongside as `CAOS_ENGINE_SOCKET_HOST`, for a worker
-/// that has to mount it into a container of its own — see `run_container`.
-const ENGINE_SOCKET_PATH: &str = "/run/caos/engine.sock";
-
-/// An image declares in its own config env that it hosts a caos stack and
-/// needs the engine socket (design/test-stack-image.md). Same shape as the
-/// `CAOS_WORKER_UID=0` root grant: the image states what containment it needs,
-/// and the runner decides whether to honor it. Before this, every worker in
-/// the pool got the socket because one image needed it.
-const SOCKET_GRANT_ENV: &str = "CAOS_GRANT_ENGINE_SOCKET";
-
-/// Declared the same way and read from the same place: the mountpoints an image
-/// wants backed by persistent named volumes. See `ImageGrants::volumes`.
-const VOLUME_GRANT_ENV: &str = "CAOS_GRANT_VOLUMES";
-
-/// Declared the same way: this image needs CAP_SYS_ADMIN. The one caller is an
-/// image that mounts a persistent store OVER its own — `mount --bind` is the
-/// only way to replace a directory whose replacement lives on a different
-/// filesystem (rename is EXDEV), and it needs the capability.
-const SYS_ADMIN_GRANT_ENV: &str = "CAOS_GRANT_SYS_ADMIN";
-
-/// Declared the same way: device nodes this image needs passed through.
-///
-/// The one caller wants `/dev/fuse`, because it runs a container engine of its
-/// own and that engine's overlay driver is `fuse-overlayfs` here. Without the
-/// device it falls back to `vfs`, which copies a whole rootfs per container
-/// instead of layering — measured at 1.84s against 0.25s for three starts of a
-/// 120 MB image, and the gap grows with image size.
-const DEVICE_GRANT_ENV: &str = "CAOS_GRANT_DEVICES";
-
-/// Label stamped on every worker container we start, so a restarted runnerd can
-/// find and delete the containers its predecessor left behind. Its value is
-/// `owner_id()`, not a constant: containers are not `--rm` any more, so the
-/// reaper is what keeps a crash from leaking them.
-const OWNER_LABEL: &str = "caos.runnerd.owner";
 
 /// Which runnerd owns a container. The hostname is this runnerd's container id
 /// under docker/podman — stable across process restarts inside one container,
@@ -95,7 +55,7 @@ const OWNER_LABEL: &str = "caos.runnerd.owner";
 /// runnerd delegating over `--remote` is a different container). Falls back to
 /// a literal, which only costs the reaper precision, never correctness: it only
 /// ever deletes containers already in `exited`.
-fn owner_id() -> String {
+pub(crate) fn owner_id() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|h| h.trim().to_string())
         .ok()
@@ -110,7 +70,9 @@ const POLL_TTL: Duration = Duration::from_secs(60);
 /// Backoff after a failed poll (server down or restarting).
 const POLL_RETRY: Duration = Duration::from_secs(2);
 
-struct Config {
+/// What every backend shares: where the server is, how to authenticate, which
+/// jobs this process accepts, and how many it runs at once.
+pub(crate) struct Common {
     server_url: String,
     /// Address (host:port) of a redis a worker may use for its OWN caching,
     /// injected as `CAOS_WORKER_REDIS_ADDR` into every worker container. This
@@ -131,94 +93,54 @@ struct Config {
     /// which is the point.
     required: std::collections::BTreeMap<String, String>,
     slots: u32,
-    network: String,
-    docker_bin: String,
-    /// Global args inserted *before* the `run` subcommand — e.g.
-    /// `--remote --url unix://…` so an INNER runnerd delegates to an outer
-    /// engine's API socket (the sibling/socket-delegation backend,
-    /// design/cargo-workers.md phase 4) instead of running a nested runtime.
-    docker_args: Vec<String>,
-    /// The engine socket this runnerd can grant. It is bind-mounted only into
-    /// worker containers whose IMAGE asks for it (`SOCKET_GRANT_ENV` in the
-    /// image's own config env) — the socket is root-equivalent over this
-    /// engine, so it is a per-image grant, declared by the image the same way
-    /// `CAOS_WORKER_UID=0` declares its root grant. Unset here means no worker
-    /// can be granted it at all, whatever the image claims.
-    socket: Option<String>,
-    /// Memo for `image_grants`: image ref -> what it declared. Refs are
-    /// content-addressed, so a cached answer cannot go stale, and the same
-    /// handful of images run over and over.
-    grants: Mutex<HashMap<String, ImageGrants>>,
 }
 
-/// What an image asks for in its own config env. Both are read from the IMAGE,
-/// never from a job or its args, so a caller cannot talk its way into either —
-/// only the image's author can, and an image is content-addressed.
-#[derive(Clone, Default)]
-struct ImageGrants {
-    /// `CAOS_GRANT_ENGINE_SOCKET=1`.
-    socket: bool,
-    /// `CAOS_GRANT_VOLUMES=<abs path> [<abs path>…]` — mountpoints this image
-    /// wants backed by persistent named volumes.
-    ///
-    /// NOT EXCLUSIVE, and that is the whole design rather than an omission.
-    /// What lands in them — a nix store, a git object database — is
-    /// content-addressed and safe for concurrent writers, so several workers
-    /// share one volume rather than queueing for it. The one thing that is NOT
-    /// safe that way is redis, which is why a dev stack points at an existing
-    /// redis instead of running its own on a shared directory: two servers on
-    /// one dbdir both start, neither locks, and they interleave one AOF between
-    /// two disagreeing datasets (measured).
-    ///
-    /// The image names PATHS; runnerd names the volumes. So an image cannot
-    /// address another deployment's storage, and nothing about the host's
-    /// filesystem layout has to reach a worker.
-    volumes: Vec<String>,
-    /// `CAOS_GRANT_DEVICES=<abs path> [<abs path>…]` — device nodes to pass
-    /// through. Validated like a mountpoint; runnerd decides nothing about what
-    /// they are, only that the image asked by absolute traversal-free path.
-    devices: Vec<String>,
-    /// `CAOS_GRANT_SYS_ADMIN=1` — add CAP_SYS_ADMIN.
-    ///
-    /// Asked for by exactly one thing: an image that mounts a persistent store
-    /// over its own with `mount --bind`. Nothing else can do that job. A
-    /// volume and a container's overlay are different filesystems (measured:
-    /// device 178 against 37), so `rename` and `renameat2(RENAME_EXCHANGE)` are
-    /// both EXDEV, and a symlink swap cannot be atomic — the `ln` that would
-    /// make it has its ELF interpreter under the very path being replaced, so
-    /// it cannot even start once the old one is gone.
-    ///
-    /// SMALLER THAN IT SOUNDS, in this company. It is CAP_SYS_ADMIN inside the
-    /// container's user namespace, and the image that asks for it already holds
-    /// the engine socket, which is root-equivalent on the HOST. This does not
-    /// widen what that image can reach; it lets it arrange its own filesystem.
-    sys_admin: bool,
+/// One way of running a claimed job to completion. The poll loop, the required
+/// set and the crash backstop are shared, so a backend only starts the job's
+/// runner, waits for it, and cleans up after it (design/firecracker-runners.md,
+/// phase 0c).
+pub(crate) trait Backend: Send + Sync {
+    /// For the startup line: what this backend runs workers on.
+    fn describe(&self) -> String;
+    /// Delete what a previous runnerd of this deployment left behind. Called
+    /// once at startup, before any slot claims a job. Never touches a live
+    /// worker or another deployment's.
+    fn reap_leftovers(&self);
+    /// Start the job's runner, wait for it to exit, and remove it. The runner
+    /// posts its own results; the [`Outcome`] is only for the backstop.
+    fn run(&self, common: &Common, slot: u32, job: &Job) -> Outcome;
 }
 
-/// The volume backing `path` for this deployment. Derived, never taken from the
-/// image: a mountpoint is a claim about the container's own filesystem, which is
-/// safe for an image to make, while a volume NAME is a claim about shared
-/// storage, which is not.
-fn volume_name(path: &str) -> String {
-    let slug: String = path
-        .trim_matches('/')
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    format!("caos-vol-{slug}")
+/// How a runner's life ended, as far as the backstop cares.
+pub(crate) struct Outcome {
+    /// `(error, log)` if the runner died in a way that may have left a job
+    /// unsettled; `None` for a clean exit.
+    pub(crate) failure: Option<(String, String)>,
+    /// The runner's stdout: its claim records (`caos_world::runner_lineage`).
+    pub(crate) stdout: String,
 }
 
-/// Is this a mountpoint an image may ask for? Absolute, no traversal, no room
-/// for a second `-v` argument to hide in.
-fn valid_mountpoint(path: &str) -> bool {
-    path.starts_with('/')
-        && path.len() > 1
-        && !path.contains("..")
-        && !path.contains(char::is_whitespace)
-        && !path.contains(':')
+/// The environment every runner is started with, whatever starts it. The
+/// Docker backend passes it as `-e`; a VM backend puts it in boot config.
+///
+/// The redis address is passed only when set, so an unset one reaches the
+/// runner as an ABSENT env var rather than an empty one it might dial. The
+/// required set goes down so the runner's follow-up polls, and their lineage,
+/// keep this slot's constraints: a pooled slot's warm runner must stay in the
+/// pool.
+pub(crate) fn worker_env(common: &Common) -> Vec<(String, String)> {
+    let mut env = vec![("CAOS_SERVER_URL".to_string(), common.server_url.clone())];
+    if let Some(addr) = &common.worker_redis_addr {
+        env.push(("CAOS_WORKER_REDIS_ADDR".to_string(), addr.clone()));
+    }
+    env.push((
+        caos_world::runner_lineage::PARENT_REQUIRED_ENV.to_string(),
+        caos_world::runner_lineage::encode_required(&common.required),
+    ));
+    env
 }
 
-fn env_or(key: &str, default: &str) -> String {
+pub(crate) fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
@@ -296,7 +218,7 @@ fn as_address(url: &str) -> String {
 
 fn main() {
     install_termination_handlers();
-    let config = Arc::new(Config {
+    let common = Arc::new(Common {
         server_url: as_address(&env_or("CAOS_SERVER_URL", "http://caos-server")),
         worker_redis_addr: std::env::var("CAOS_WORKER_REDIS_ADDR")
             .ok()
@@ -305,131 +227,47 @@ fn main() {
             .ok()
             .filter(|t| !t.is_empty()),
         slots: env_or("CAOS_RUNNER_SLOTS", "8").parse().unwrap_or(8),
-        network: env_or("CAOS_DOCKER_NETWORK", "caos-net"),
-        docker_bin: env_or("CAOS_DOCKER_BIN", "docker"),
-        docker_args: std::env::var("CAOS_DOCKER_ARGS")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect(),
-        grants: Mutex::new(HashMap::new()),
-        socket: std::env::var("CAOS_RUNNER_SOCKET")
-            .ok()
-            .filter(|s| !s.is_empty()),
         required: required_args(&env_or("CAOS_RUNNER_REQUIRE", "")),
     });
-    // The required set is part of this line because it is what decides which
-    // jobs this process can ever see, and `stack/serve` greps this line to know
-    // runnerd is up.
-    eprintln!(
-        "caos-runnerd: {} slots, server {}, network {}, requiring {:?}",
-        config.slots, config.server_url, config.network, config.required
-    );
-    reap_leftovers(&config);
-    let mut threads = Vec::new();
-    for slot in 1..config.slots {
-        let config = Arc::clone(&config);
-        threads.push(std::thread::spawn(move || slot_loop(&config, slot)));
-    }
-    slot_loop(&config, 0);
-}
-
-/// Does this image ASK for the engine socket (`SOCKET_GRANT_ENV` in its config
-/// env)? Read from the image itself, not from the job or its args, so a caller
-/// cannot talk its way into the grant — only the image's author can, and the
-/// image is content-addressed.
-///
-/// `image inspect` needs the image present, and `run` is what normally pulls
-/// it, so a miss pulls first. Both answers are memoized per ref: a wrong
-/// answer here is a silent loss of containment, so the failure mode is chosen
-/// deliberately — anything that goes wrong reads as "no grant".
-fn image_grants(config: &Config, image_ref: &str) -> ImageGrants {
-    if let Some(known) = config.grants.lock().expect("grant memo").get(image_ref) {
-        return known.clone();
-    }
-    let inspect = |args: &[&str]| {
-        Command::new(&config.docker_bin)
-            .args(&config.docker_args)
-            .args(args)
-            .output()
-    };
-    let mut out = inspect(&[
-        "image",
-        "inspect",
-        "--format",
-        "{{range .Config.Env}}{{println .}}{{end}}",
-        image_ref,
-    ]);
-    if !matches!(&out, Ok(o) if o.status.success()) {
-        // Not pulled yet: `run` would have fetched it, so fetch it here.
-        let _ = inspect(&["pull", image_ref]);
-        out = inspect(&[
-            "image",
-            "inspect",
-            "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}",
-            image_ref,
-        ]);
-    }
-    let mut grants = ImageGrants::default();
-    match &out {
-        Ok(o) if o.status.success() => {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let line = line.trim();
-                if line == format!("{SOCKET_GRANT_ENV}=1") {
-                    grants.socket = true;
-                } else if line == format!("{SYS_ADMIN_GRANT_ENV}=1") {
-                    grants.sys_admin = true;
-                } else if let Some(list) = line.strip_prefix(&format!("{DEVICE_GRANT_ENV}=")) {
-                    for path in list.split_whitespace() {
-                        if valid_mountpoint(path) {
-                            grants.devices.push(path.to_string());
-                        } else {
-                            eprintln!("caos-runnerd: {image_ref} asks for device {path:?}, which is not an absolute traversal-free path; ignoring it");
-                        }
-                    }
-                } else if let Some(list) = line.strip_prefix(&format!("{VOLUME_GRANT_ENV}=")) {
-                    for path in list.split_whitespace() {
-                        if valid_mountpoint(path) {
-                            grants.volumes.push(path.to_string());
-                        } else {
-                            eprintln!(
-                                "caos-runnerd: {image_ref} asks for mountpoint {path:?}, \
-                                 which is not an absolute traversal-free path; ignoring it"
-                            );
-                        }
-                    }
-                }
-            }
+    // A backend that cannot work is refused HERE, before any slot claims a
+    // job: a misconfigured pool that starts and fails every job is far worse
+    // than one that does not start.
+    let backend: Arc<dyn Backend> = match env_or("CAOS_RUNNER_BACKEND", "docker").as_str() {
+        "docker" => Arc::new(docker::Config::from_env()),
+        other => {
+            eprintln!("caos-runnerd: unknown CAOS_RUNNER_BACKEND {other:?} (known: docker)");
+            std::process::exit(2);
         }
-        // The wrong answer here is a silent loss of containment, so anything
-        // that goes wrong reads as "nothing granted".
-        _ => eprintln!("caos-runnerd: cannot inspect {image_ref}; granting it nothing"),
+    };
+    // The required set is part of this line because it is what decides which
+    // jobs this process can ever see, and `stack/serve` greps this line ("slots,
+    // server") to know runnerd is up.
+    eprintln!(
+        "caos-runnerd: {} slots, server {}, {}, requiring {:?}",
+        common.slots,
+        common.server_url,
+        backend.describe(),
+        common.required
+    );
+    backend.reap_leftovers();
+    let mut threads = Vec::new();
+    for slot in 1..common.slots {
+        let common = Arc::clone(&common);
+        let backend = Arc::clone(&backend);
+        threads.push(std::thread::spawn(move || {
+            slot_loop(&common, &*backend, slot)
+        }));
     }
-    if grants.socket {
-        eprintln!("caos-runnerd: {image_ref} declares {SOCKET_GRANT_ENV}; granting engine socket");
-    }
-    if !grants.volumes.is_empty() {
-        eprintln!(
-            "caos-runnerd: {image_ref} declares {VOLUME_GRANT_ENV}; granting {}",
-            grants.volumes.join(" ")
-        );
-    }
-    config
-        .grants
-        .lock()
-        .expect("grant memo")
-        .insert(image_ref.to_string(), grants.clone());
-    grants
+    slot_loop(&common, &*backend, 0);
 }
 
 /// One slot: poll for a job, run its container, wait for the container to die,
 /// poll again. The container (a warm runner) may serve many jobs before dying;
 /// this slot stays parked on `wait` the whole time — one poll per slot lineage.
-fn slot_loop(config: &Config, slot: u32) {
+fn slot_loop(common: &Common, backend: &dyn Backend, slot: u32) {
     loop {
-        match poll(config) {
-            Ok(Some(job)) => run_container(config, slot, &job),
+        match poll(common) {
+            Ok(Some(job)) => run_job(common, backend, slot, &job),
             Ok(None) => {} // idle (or evicted, which we ignore): poll again
             Err(e) => {
                 eprintln!("runnerd slot {slot}: poll failed: {e}");
@@ -442,7 +280,7 @@ fn slot_loop(config: &Config, slot: u32) {
 /// A claimed job: the fields runnerd itself needs, plus the payload verbatim to
 /// hand the container. (`req` is the wire field name; its value is the ArgTree
 /// hash.)
-struct Job {
+pub(crate) struct Job {
     arg_tree: String,
     nonce: String,
     image_ref: String,
@@ -466,13 +304,28 @@ fn blob_oid(value: &str) -> String {
 }
 
 /// Parse `CAOS_RUNNER_REQUIRE` — `name=value` pairs, whitespace or comma
-/// separated — into the required set. A pair with no `=`, or an empty name, is
-/// dropped with a warning rather than failing the process: a runner that starts
-/// and matches nothing is far easier to diagnose than one that does not start.
-fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
-    let mut out = std::collections::BTreeMap::new();
+/// separated — into the required set. `name=value` names the BLOB of `value`
+/// (`required-pool=seeded`); `name:hash=<oid>` names an object by its id, which
+/// is how a pool names its `base`, an image TREE (the same `:hash=` form the
+/// caos CLI binds args with). A pair with no `=`, an empty name, or a `:hash=`
+/// that is not a 40-hex oid is dropped with a warning rather than failing the
+/// process: a runner that starts and matches nothing is far easier to diagnose
+/// than one that does not start.
+fn required_args(spec: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for pair in spec.split([' ', '\t', '\n', ',']).filter(|s| !s.is_empty()) {
         match pair.split_once('=') {
+            Some((name, oid)) if name.ends_with(":hash") => {
+                let name = name.trim_end_matches(":hash");
+                let is_oid = oid.len() == 40 && oid.bytes().all(|b| b.is_ascii_hexdigit());
+                if name.is_empty() || !is_oid {
+                    eprintln!(
+                        "caos-runnerd: ignoring malformed CAOS_RUNNER_REQUIRE entry {pair:?}"
+                    );
+                } else {
+                    out.insert(name.to_string(), oid.to_ascii_lowercase());
+                }
+            }
             Some((name, value)) if !name.is_empty() => {
                 out.insert(name.to_string(), blob_oid(value));
             }
@@ -483,7 +336,7 @@ fn required_args(spec: &str) -> std::collections::BTreeMap<String, String> {
 }
 
 /// One long-poll. `Some(job)` to run; `None` on idle/evicted.
-fn poll(config: &Config) -> Result<Option<Job>, String> {
+fn poll(config: &Common) -> Result<Option<Job>, String> {
     let body = serde_json::json!({
         "required": config.required,
         "lineage": [],
@@ -527,201 +380,51 @@ fn poll(config: &Config) -> Result<Option<Job>, String> {
     Ok(Some(parsed))
 }
 
-/// Run the job's container and wait it out. The container posts its own
-/// results; we only backstop a crash — nonzero exit means it may never have
-/// reported, so post a failure with the captured log (410 if it did report).
-///
-/// Deliberately NOT `--rm`: an *attached* `docker run --rm` waits with
-/// `condition=removed`, i.e. `POST /containers/<id>/wait?condition=removed`,
-/// and podman's compat handler spins a core on that call for as long as the
-/// container is stopped-but-not-yet-removed. Podman also loses auto-removals
-/// outright (containers sit in `Exited` with `AutoRemove=true` forever), which
-/// turns that spin into a permanent one. So we take exit-wait only — which the
-/// engine answers from an event, not a poll — and delete the container
-/// ourselves afterwards.
-fn run_container(config: &Config, slot: u32, job: &Job) {
+/// Run one claimed job on the backend, then backstop its runner's death: post
+/// a failure for every job it may have left unsettled (410 if it did report).
+fn run_job(common: &Common, backend: &dyn Backend, slot: u32, job: &Job) {
     eprintln!(
-        "runnerd slot {slot}: arg_tree {} -> container ({})",
-        job.arg_tree, job.image_ref
+        "runnerd slot {slot}: arg_tree {} -> {} ({})",
+        job.arg_tree,
+        backend.describe(),
+        job.image_ref
     );
-    let name = format!("caos-worker-{}", job.nonce);
-    let mut command = Command::new(&config.docker_bin);
-    command
-        .args(&config.docker_args) // global flags (e.g. --remote --url …) precede `run`
-        .arg("run")
-        .args(["--name", &name])
-        // Our mark for the crash reaper — see `reap_leftovers`. Scoped to this
-        // runnerd, because an INNER runnerd delegating to the outer engine
-        // (`--remote --url …`) shares a container namespace with the outer one,
-        // and must not sweep its siblings' containers.
-        .args(["--label", &format!("{OWNER_LABEL}={}", owner_id())])
-        .args(["--network", &config.network])
-        // The log reaches us through the attach stream (`output()` below), so
-        // the engine's own copy is a second one nobody reads: conmon wrote it to
-        // the store's disk at ~19 MB/s in a suite run, fsyncing as it went, on
-        // the volume whose fsync latency is what every container start waits on.
-        .args(["--log-driver", "none"]);
-    // One inspect answers both grants, memoized together.
-    let grants = image_grants(config, &job.image_ref);
-    if let Some(sock) = &config.socket {
-        if grants.socket {
-            // Hand THIS worker the engine socket so its own inner runnerd can
-            // delegate sibling containers to this engine (phase 4). Bind it at
-            // a fixed in-container path and advertise that path, so a worker
-            // that only TALKS to the engine never needs to know the host
-            // socket's location.
-            //
-            // …and the host location too, for the one worker that cannot use
-            // the fixed path: a bind mount's source is resolved on the HOST, so
-            // a worker CREATING a container that itself needs the engine can
-            // only name the socket as the host sees it. That is how a shared
-            // test stack gets started as a detached sibling
-            // (design/faster-tests.md).
-            //
-            // Not a second grant, and not a wider one: it sits inside the same
-            // per-image gate, and a holder of this socket can already read the
-            // host path straight out of the engine by inspecting itself. This
-            // hands it over rather than making it do the archaeology.
-            command
-                .args(["-v", &format!("{sock}:{ENGINE_SOCKET_PATH}")])
-                .args(["-e", &format!("CAOS_ENGINE_SOCKET={ENGINE_SOCKET_PATH}")])
-                .args(["-e", &format!("CAOS_ENGINE_SOCKET_HOST={sock}")]);
-        }
-    }
-    // Persistent storage the image asked for. Named volumes rather than bind
-    // mounts, deliberately: the engine owns the name, so nothing about the
-    // host's filesystem has to be known by — or reach — a worker. It also seeds
-    // itself, because mounting a FRESH named volume over a path that has content
-    // in the image copies that content in (verified), which is what lets a nix
-    // store survive here without any bootstrap step.
-    if grants.sys_admin {
-        command.args(["--cap-add", "SYS_ADMIN"]);
-        // A nested container engine needs more than the capability: pivot_root
-        // and keyctl are blocked by the default seccomp profile even with
-        // SYS_ADMIN, so crun dies with "OCI permission denied" before the
-        // container starts. Unconfined is the standard answer for a container
-        // that runs its own engine — and this grant already implies that trust.
-        command.args(["--security-opt", "seccomp=unconfined"]);
-        // Same story one layer up: on hosts with AppArmor (Ubuntu's docker
-        // ships the `docker-default` profile) `mount` is denied regardless of
-        // the capability, so the bind over /nix fails with EPERM. Docker
-        // Desktop and OrbStack have no AppArmor, which is why this only bites
-        // on a Linux box.
-        command.args(["--security-opt", "apparmor=unconfined"]);
-    }
-    for dev in &grants.devices {
-        command.args(["--device", dev]);
-    }
-    for path in &grants.volumes {
-        command.args(["-v", &format!("{}:{path}", volume_name(path))]);
-    }
-    // A worker's own scratch cache, when this deployment offers one. Passed
-    // only when set, so an unset address reaches the worker as an ABSENT env
-    // var rather than an empty one it might dial.
-    if let Some(addr) = &config.worker_redis_addr {
-        command.args(["-e", &format!("CAOS_WORKER_REDIS_ADDR={addr}")]);
-    }
-    let out = command
-        .args(["-e", &format!("CAOS_SERVER_URL={}", config.server_url)])
-        .args(["--entrypoint", CAOS_BIN])
-        .arg(&job.image_ref)
-        .arg("runner")
-        .arg(format!("--job={}", job.payload))
-        .output();
-    // Delete it ourselves, now that we hold its exit status and its log. A
-    // plain `rm -f` is one DELETE the engine answers synchronously — none of
-    // the auto-remove machinery, and nothing polls.
-    remove_container(config, &name);
-    let failure = match out {
-        Ok(out) => {
-            // Relay the container's log (the runner relays its workers' output
-            // to its stderr) so it survives the container's removal.
-            eprint!("{}", String::from_utf8_lossy(&out.stderr));
-            if out.status.success() {
-                None
-            } else {
-                Some((
-                    format!("worker container exited with {}", out.status),
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                ))
+    let outcome = backend.run(common, slot, job);
+    if let Some((error, log)) = outcome.failure {
+        eprintln!("runnerd slot {slot}: arg_tree {}: {error}", job.arg_tree);
+        for (arg_tree, nonce) in backstop_targets(job, &outcome.stdout) {
+            if let Err(e) = post_failure(common, &arg_tree, &nonce, &error, &log) {
+                eprintln!("runnerd slot {slot}: reporting failure for {arg_tree}: {e}");
             }
         }
-        Err(e) => Some((format!("running {}: {e}", config.docker_bin), String::new())),
-    };
-    if let Some((error, log)) = failure {
-        eprintln!("runnerd slot {slot}: arg_tree {}: {error}", job.arg_tree);
-        if let Err(e) = post_failure(config, job, &error, &log) {
-            eprintln!("runnerd slot {slot}: reporting failure: {e}");
-        }
     }
 }
 
-/// Delete one worker container. Best-effort and quiet: a container that is
-/// already gone is the normal case for the reaper, and a removal that fails is
-/// a leaked container, not a failed job — the job's result is already settled
-/// by the time we get here.
-fn remove_container(config: &Config, name_or_id: &str) {
-    let out = Command::new(&config.docker_bin)
-        .args(&config.docker_args)
-        .args(["rm", "-f", name_or_id])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => eprintln!(
-            "caos-runnerd: removing {name_or_id}: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => eprintln!("caos-runnerd: removing {name_or_id}: {e}"),
-    }
-}
-
-/// Delete the exited worker containers this runnerd's predecessor left behind.
-/// Without `--rm` the engine no longer cleans up after a runnerd that died
-/// mid-run, so this is the replacement — run once at startup, before any slot
-/// claims a job.
-///
-/// `status=exited` is load-bearing as well as safe: our own live workers are
-/// still running, and so are any siblings that happen to share the label.
-fn reap_leftovers(config: &Config) {
-    let filter = format!("label={OWNER_LABEL}={}", owner_id());
-    let out = Command::new(&config.docker_bin)
-        .args(&config.docker_args)
-        .args([
-            "ps",
-            "-aq",
-            "--filter",
-            "status=exited",
-            "--filter",
-            &filter,
-        ])
-        .output();
-    let listed = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Ok(o) => {
-            eprintln!(
-                "caos-runnerd: listing leftover containers: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return;
+/// The jobs a dead runner may have left unsettled: the one we handed it, and
+/// the last one it recorded claiming (`caos_world::runner_lineage`), which for
+/// a warm runner is the job it actually died in. Every job claimed before the
+/// last one was posted before the next was claimed. A target that was already
+/// settled answers 410, which is harmless. The first job is always included,
+/// because a runner can die before writing its first record.
+fn backstop_targets(job: &Job, stdout: &str) -> Vec<(String, String)> {
+    let mut targets = vec![(job.arg_tree.clone(), job.nonce.clone())];
+    if let Some(last) = caos_world::runner_lineage::last_claim(stdout) {
+        if last.1 != job.nonce {
+            targets.push(last);
         }
-        Err(e) => {
-            eprintln!("caos-runnerd: listing leftover containers: {e}");
-            return;
-        }
-    };
-    let ids: Vec<&str> = listed.split_whitespace().collect();
-    if ids.is_empty() {
-        return;
     }
-    eprintln!("caos-runnerd: reaping {} leftover container(s)", ids.len());
-    for id in ids {
-        remove_container(config, id);
-    }
+    targets
 }
 
 /// The crash backstop: report a container that died without (necessarily)
 /// posting. A 410 means it did post before dying — the job is settled.
-fn post_failure(config: &Config, job: &Job, error: &str, log: &str) -> Result<(), String> {
+fn post_failure(
+    config: &Common,
+    arg_tree: &str,
+    nonce: &str,
+    error: &str,
+    log: &str,
+) -> Result<(), String> {
     // Keep only the tail of a big log: the failure is usually at the end, and
     // the message lands in an error string a client will read.
     let tail: String = log
@@ -734,7 +437,7 @@ fn post_failure(config: &Config, job: &Job, error: &str, log: &str) -> Result<()
         .collect::<Vec<_>>()
         .join("\n");
     let body = serde_json::json!({
-        "req": job.arg_tree, "nonce": job.nonce, "ok": false, "error": error, "log": tail,
+        "req": arg_tree, "nonce": nonce, "ok": false, "error": error, "log": tail,
     });
     let url = format!("{}/runner/result", config.server_url.trim_end_matches('/'));
     let mut req = minreq::post(&url)
@@ -752,5 +455,54 @@ fn post_failure(config: &Config, job: &Job, error: &str, log: &str) -> Result<()
             "result post failed ({code}): {}",
             resp.as_str().unwrap_or("")
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caos_world::runner_lineage::claim_record;
+
+    fn job(arg_tree: &str, nonce: &str) -> Job {
+        Job {
+            arg_tree: arg_tree.to_string(),
+            nonce: nonce.to_string(),
+            image_ref: "img".to_string(),
+            payload: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn required_names_a_blob_by_value_or_an_object_by_hash() {
+        let oid = "2fc39c5d1021c6cb1d149ab94e40837d2a6b0b66";
+        let required = required_args(&format!("required-pool=fc base:hash={oid} bad:hash=xyz"));
+        assert_eq!(
+            required,
+            BTreeMap::from([
+                ("base".to_string(), oid.to_string()),
+                ("required-pool".to_string(), blob_oid("fc")),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_warm_runner_crash_fails_the_job_it_was_running() {
+        let stdout = format!(
+            "{}\n{}\n",
+            claim_record("r1", "n1"),
+            claim_record("r2", "n2")
+        );
+        assert_eq!(
+            backstop_targets(&job("r1", "n1"), &stdout),
+            vec![("r1".into(), "n1".into()), ("r2".into(), "n2".into())]
+        );
+    }
+
+    #[test]
+    fn a_first_job_crash_is_reported_once_with_or_without_a_record() {
+        let only = vec![("r1".to_string(), "n1".to_string())];
+        assert_eq!(backstop_targets(&job("r1", "n1"), ""), only);
+        let stdout = format!("{}\n", claim_record("r1", "n1"));
+        assert_eq!(backstop_targets(&job("r1", "n1"), &stdout), only);
     }
 }

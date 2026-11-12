@@ -124,6 +124,27 @@ posts the result and then polls for itself. The delegator is the crash
 backstop — container exited nonzero → the agent posts an error result with
 captured stderr (harmlessly 410'd if the container already posted).
 
+The backstop covers every job a warm container claims, not only the first.
+Before setting up each job, the runner writes a CLAIM RECORD,
+`caos-runner claimed req=<arg_tree> nonce=<nonce>`, to its own stdout and
+flushes it. Nothing else writes to the runner's stdout: a worker's output is
+piped and relayed to stderr, so a worker can't forge a record. On a nonzero
+exit the agent fails both the first job and the last claimed one. Every
+earlier claim was posted before the next one was taken. Without this, a
+container that died on its second job left that job's caller waiting forever
+(claimed jobs have no deadline). The record format and its parser live in
+`caos_world::runner_lineage`, which both sides compile; `tests/warm-crash`
+covers it.
+
+**A delegated runner inherits its parent's constraints.** The agent passes
+its own required set to the container as `CAOS_RUNNER_PARENT_REQUIRED` (a
+JSON object of name → oid, `{}` for a generic agent). Every follow-up poll the
+runner makes, resident ones included, requires `parent ∪ {base[, affinity]}`
+and names `[parent]` as its lineage. Without this, a pooled agent's warm
+container rejected its own pool's jobs, accepted same-base jobs from outside
+the pool, and could never be evicted for a pool job. `tests/warm-pool` covers
+this against the dev stack's `test-pool`.
+
 ## Server internals
 
 `run_req` is untouched before and after dispatch (cache, cycle detection,

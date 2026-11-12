@@ -1,0 +1,8 @@
+# tests/warm-pool, as an ENTRY (design/caos-expr.md, Phase 3): evaluating this
+# directory yields the test's ARG TREE, which dev/run-test then runs.
+#
+# A WORKER TEST of a POOLED runner's warm reuse (design/firecracker-runners.md,
+# phase 0a), against the dev stack's `test-pool` (dev/stack-up). `warm` is the
+# built image of dev/warm-test, whose runner stays warm for a minute; `job` is
+# the script each job runs.
+curry --base:@=DEEP-DEPS/go --worker1:@=worker.go --warm:@=DEEP-DEPS/warm-test --job:@=job.sh

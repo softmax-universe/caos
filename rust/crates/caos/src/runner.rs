@@ -21,6 +21,7 @@
 //! socket, and one renews the server-side lease; all of them report to the main
 //! thread over a single channel, which is the only place a job's state changes.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -69,6 +70,13 @@ const DEFAULT_RESIDENT_GRACE_SECS: u32 = 10;
 /// three missed renewals are a lapse.
 const LEASE_RENEW_MS_ENV: &str = "CAOS_LEASE_RENEW_MS";
 const DEFAULT_LEASE_RENEW_MS: u32 = 5000;
+
+/// TEST ONLY, declared by an image like every knob here: exit abruptly, without
+/// posting, right after recording the n-th claim. It is the one way a test can
+/// make a warm runner die holding a job it claimed itself: a worker runs
+/// unprivileged, and PID 1 ignores even SIGKILL sent from inside its own
+/// namespace. `dev/warm-crash-test` declares it, for `tests/warm-crash`.
+const TEST_EXIT_AFTER_CLAIMS_ENV: &str = "CAOS_RUNNER_TEST_EXIT_AFTER_CLAIMS";
 
 /// The unix socket `caos next` reaches the runner on. Root-owned and mode 0600:
 /// the unprivileged worker gets to it only through the setuid `caos`.
@@ -150,6 +158,7 @@ struct Config {
     renew: Duration,
     uid: u32,
     gid: u32,
+    exit_after_claims: Option<u32>,
 }
 
 impl Config {
@@ -167,6 +176,7 @@ impl Config {
             )),
             uid: crate::env_u32(WORKER_UID_ENV).unwrap_or(DEFAULT_WORKER_UID),
             gid: crate::env_u32(WORKER_GID_ENV).unwrap_or(DEFAULT_WORKER_GID),
+            exit_after_claims: crate::env_u32(TEST_EXIT_AFTER_CLAIMS_ENV),
         }
     }
 }
@@ -240,6 +250,12 @@ struct Runner {
     /// with (every entry is tagged with its hash).
     image_oid: Option<String>,
     affinity_oid: Option<String>,
+    /// The host agent's own required set (`CAOS_RUNNER_PARENT_REQUIRED`): carried
+    /// on every follow-up poll, and named as the lineage, so a pooled host's
+    /// warm runner stays in its pool. Empty under a generic host.
+    parent: BTreeMap<String, String>,
+    /// Jobs claimed so far, for `exit_after_claims`.
+    claims: u32,
 }
 
 /// `runner --job=<json>` — run the handed-in job through the staged lifecycle,
@@ -249,6 +265,9 @@ struct Runner {
 /// (`exit`), or we never learned the oid.
 pub fn run(job_json: &str) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
+    let parent = caos_world::runner_lineage::decode_required(
+        &std::env::var(caos_world::runner_lineage::PARENT_REQUIRED_ENV).unwrap_or_default(),
+    )?;
     let mut runner = Runner {
         t: HttpTransport::from_env()?,
         cfg: Config::from_env(),
@@ -259,6 +278,8 @@ pub fn run(job_json: &str) -> Result<(), String> {
         used_next: false,
         image_oid: None,
         affinity_oid: None,
+        parent,
+        claims: 0,
     };
     if runner.cfg.resident {
         serve_next_socket(runner.tx.clone())?;
@@ -276,7 +297,7 @@ pub fn run(job_json: &str) -> Result<(), String> {
         if matches!(after, After::Done) {
             return Ok(());
         }
-        match next_job(&runner.t, &oid, &token)? {
+        match next_job(&runner.t, &runner.parent, &oid, &token)? {
             Some(next) => job = next,
             None => return Ok(()),
         }
@@ -507,14 +528,12 @@ impl Runner {
             return Err("a resident job's args name no base or affinity".to_string());
         };
         let ttl_ms = self.cfg.poll_ms;
-        let body = serde_json::json!({
-            "required": { "base": image, "affinity": affinity },
-            "tenure": tenure,
-            // Our parent is a generic runner (runnerd) — it polls with no required
-            // args once we die, so a job we can't serve can evict us toward it.
-            "lineage": [ {} ],
-            "ttl_ms": ttl_ms,
-        });
+        let body = poll_body(
+            &self.parent,
+            &[("base", image), (caos_world::AFFINITY_ARG, affinity)],
+            Some(tenure),
+            ttl_ms,
+        );
         let url = runner_url(&self.t, "poll")?;
         let resp = runner_post(
             &url,
@@ -552,6 +571,14 @@ impl Runner {
     /// first; a later job of a resident worker keeps what earlier ones fetched,
     /// which is checked against its oid and so still correct.
     fn prepare(&mut self, job: &RunnerJob, fresh: bool) -> Result<PathBuf, String> {
+        // Before anything that can fail or crash: from here on, this is the job
+        // a host's crash backstop must fail if we die.
+        record_claim(job);
+        self.claims += 1;
+        if self.cfg.exit_after_claims == Some(self.claims) {
+            eprintln!("caos runner: {TEST_EXIT_AFTER_CLAIMS_ENV} reached; exiting without posting");
+            std::process::exit(70);
+        }
         let arg_tree = job.arg_tree.as_str();
         let cas = if fresh {
             cas_setup(&self.t, Some(arg_tree))?
@@ -1091,17 +1118,12 @@ fn remove_secrets() {
 /// `None` on `idle` (our TTL passed) or `exit` (evicted) — either way, quit.
 fn next_job(
     t: &HttpTransport,
+    parent: &BTreeMap<String, String>,
     image_oid: &str,
     token: &Option<String>,
 ) -> Result<Option<RunnerJob>, String> {
     let ttl_ms = crate::env_u32(RUNNER_TTL_ENV).unwrap_or(DEFAULT_RUNNER_TTL_MS);
-    let body = serde_json::json!({
-        "required": { "base": image_oid },
-        // Our parent is a generic runner (runnerd) — it polls with no required
-        // args once we die, so a job we can't serve can evict us toward it.
-        "lineage": [ {} ],
-        "ttl_ms": ttl_ms,
-    });
+    let body = poll_body(parent, &[("base", image_oid)], None, ttl_ms);
     let url = runner_url(t, "poll")?;
     // The HTTP timeout only backstops a dead server; the poll itself hangs for
     // the TTL server-side, so pad well past it (seconds granularity).
@@ -1123,6 +1145,50 @@ fn next_job(
     match v.get("job") {
         Some(job) if job.is_object() => Ok(Some(RunnerJob::from_value(job)?)),
         _ => Ok(None),
+    }
+}
+
+/// A follow-up poll's body. `required` is the host's set plus our own keys, so
+/// a pooled host's warm runner keeps its pool: without the pool entry the
+/// server's symmetric match rejects the pool's jobs, and same-base work from
+/// outside the pool gets through. The lineage is that parent: it polls with
+/// exactly `parent` once we die, so a job we can't serve can evict us toward it.
+/// Our own keys win a clash, though under a matching parent the values agree.
+fn poll_body(
+    parent: &BTreeMap<String, String>,
+    own: &[(&str, &str)],
+    tenure: Option<&str>,
+    ttl_ms: u32,
+) -> serde_json::Value {
+    let mut required = parent.clone();
+    for (name, oid) in own {
+        required.insert((*name).to_string(), (*oid).to_string());
+    }
+    let mut body = serde_json::json!({
+        "required": required,
+        "lineage": [ parent ],
+        "ttl_ms": ttl_ms,
+    });
+    if let Some(tenure) = tenure {
+        body["tenure"] = serde_json::Value::from(tenure);
+    }
+    body
+}
+
+/// Write this job's claim record to our stdout for the host's crash backstop
+/// (`caos_world::runner_lineage`). Flushed, and synced when stdout is a file or
+/// device (a VM's report disk), so the record survives the crash it exists
+/// for. Best-effort: a host that doesn't read stdout loses nothing.
+fn record_claim(job: &RunnerJob) {
+    use std::os::fd::AsFd;
+    let mut out = std::io::stdout().lock();
+    let line = caos_world::runner_lineage::claim_record(&job.arg_tree, &job.nonce);
+    if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+        return;
+    }
+    if let Ok(fd) = out.as_fd().try_clone_to_owned() {
+        // EINVAL on a pipe is expected; only a file or device can be synced.
+        let _ = std::fs::File::from(fd).sync_data();
     }
 }
 
@@ -1320,6 +1386,35 @@ fn drop_privileges(uid: u32, gid: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generic_parent_polls_as_before() {
+        let body = poll_body(&BTreeMap::new(), &[("base", "b1")], None, 2000);
+        assert_eq!(
+            body,
+            serde_json::json!({"required": {"base": "b1"}, "lineage": [{}], "ttl_ms": 2000})
+        );
+    }
+
+    #[test]
+    fn a_pooled_parent_is_carried_and_named_as_lineage() {
+        let parent = BTreeMap::from([("required-pool".to_string(), "p1".to_string())]);
+        let body = poll_body(
+            &parent,
+            &[("base", "b1"), ("affinity", "a1")],
+            Some("t1"),
+            10_000,
+        );
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "required": {"base": "b1", "affinity": "a1", "required-pool": "p1"},
+                "lineage": [{"required-pool": "p1"}],
+                "tenure": "t1",
+                "ttl_ms": 10_000,
+            })
+        );
+    }
 
     #[test]
     fn masks_longest_secret_first_and_ignores_empty() {

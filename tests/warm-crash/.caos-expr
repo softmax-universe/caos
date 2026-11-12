@@ -1,0 +1,8 @@
+# tests/warm-crash, as an ENTRY (design/caos-expr.md, Phase 3): evaluating this
+# directory yields the test's ARG TREE, which dev/run-test then runs.
+#
+# A WORKER TEST of the crash backstop for a WARM runner's later job
+# (design/firecracker-runners.md, phase 0b). `crashy` is the built image of
+# dev/warm-crash-test, whose runner dies on claiming its second job; `job` is
+# the script each of the two jobs runs.
+curry --base:@=DEEP-DEPS/go --worker1:@=worker.go --crashy:@=DEEP-DEPS/warm-crash-test --job:@=job.sh

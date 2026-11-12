@@ -268,6 +268,18 @@ Environment overrides: `SERVER_ADDR` (`0.0.0.0:80`), `CAOS_GIT_DIR` (`/git`),
 (`caos-redis:6379`), `CAOS_RUNNER_TOKEN` (unset = runner auth disabled).
 Worker-running knobs (network, docker binary, slots) live on `caos-runnerd`.
 
+A plain `caos-runnerd` (no `CAOS_RUNNER_REQUIRE`) runs whatever it is asked
+to that does not name a runner, and mounts none of its host's persistent
+volumes into any worker, so it can run on any machine that reaches the server.
+Jobs that must run on the central host carry `--required-caosd=true`:
+dev/test-stack (the host's volumes, redis and registry) and every flake-builder
+build (the registry, by name; std/flake-builder curries the arg onto its
+image). Only the caosd runner — a runnerd on the central host started with
+`CAOS_RUNNER_REQUIRE=required-caosd=true` — runs them, and it is the only
+runner that grants volumes. `stack/serve` starts both runners on the central
+host and splits `CAOS_RUNNER_SLOTS` between them, half each by default
+(`CAOS_STACK_CAOSD_SLOTS` sets the caosd runner's share).
+
 ### Compute
 
 A run **request** is a **WorkRequest**: an **ArgTree** to run, plus runtime

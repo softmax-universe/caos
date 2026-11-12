@@ -6,4 +6,11 @@
 #
 # It is not run by hand. `std/caos-test` and `dev/caos-stack` are the callers:
 # each forms the keyed message and tail-calls it.
-curry --base:@=DEEP-DEPS/devbox --worker1:@=worker.sh
+#
+# `--required-caosd=true` pins the daemon to the central host. devbox's grants
+# are persistent volumes — the shared nix store (/mounted-nix), the stacks'
+# state (/caos-dev) and their engine's images (/caos-images) — which only the
+# caosd runner grants, and the dev stack reaches the host's redis and registry
+# by name (dev/stack-up). The arg routes every message for the daemon to the
+# caosd runner; a plain runnerd (on any machine) never runs it.
+curry --base:@=DEEP-DEPS/devbox --worker1:@=worker.sh --required-caosd=true

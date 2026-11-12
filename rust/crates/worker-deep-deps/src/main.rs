@@ -213,6 +213,14 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
                 "directory {rel:?} declares two deps mounted as {mount:?}"
             ));
         }
+        // A dependency INSIDE a mount (`../../caos-core/rustc`) is mounted as
+        // the finished object it is: never deepened again, and nothing under
+        // it fetched beyond the levels needed to name it.
+        if let Some(mount) = mount_of(pass.mounts, &target) {
+            let target_path = reach_into_mount(base, mount, &target)?;
+            link(&target_path, &at)?;
+            continue;
+        }
         // A FILE dependency is mounted, not deepened: there is nothing under it
         // to walk and no `DEPS` it could carry, so the mount IS the file. This
         // is what lets a package name a workspace manifest (`../../Cargo.toml
@@ -224,14 +232,6 @@ fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
         // `metadata`, which follows the link into /cas and answers about the
         // content. A missing target errors here rather than further down in
         // `entries`, where it would read as an empty directory.
-        // A dependency INSIDE a mount (`../../caos-core/rustc`) is mounted as
-        // the finished object it is: never deepened again, and nothing under
-        // it fetched beyond the levels needed to name it.
-        if let Some(mount) = mount_of(self.mounts, &target) {
-            let target_path = reach_into_mount(base, mount, &target)?;
-            link(&target_path, &at)?;
-            continue;
-        }
         let target_path = format!("{base}/{target}");
         let meta = fs::metadata(&target_path)
             .map_err(|e| format!("dependency {target:?} of {rel:?}: {e}"))?;

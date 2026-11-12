@@ -3,5 +3,3 @@
 ../../std/hello hello
 ../../caos-core/rustc rustc
 ../../caos-core/cargo cargo
-# (A comment, so this tree differs from the one whose stack started cold.)
-# (Second comment: a fresh stack for the no-seeder layer, core already warm.)

@@ -659,6 +659,93 @@ fn eval_command_args(
     host.dispatch(&image_ref, entries)
 }
 
+/// `graft [--in:<t>=<tree>] --<name>[:<t>]=<value> …` — the tree `--in` (the
+/// empty tree when absent) with each `<name>` entry set to `<value>`, replacing
+/// an entry of that name. PURE TREE ASSEMBLY, like `curry`: it dispatches
+/// nothing of its own, so it is available before any worker exists. That is
+/// what the repo root needs to put a freshly built core into its own tree before
+/// anything can be built WITH that core (design/nix-bootstrap.md); a worker such
+/// as `std/flake-input-loader` cannot do it there, because it is built by the core.
+///
+/// Values resolve exactly like a command's args (`$VAR`, `:@=` — evaluated if
+/// it is an expression —, `:@@=`, `:hash=`, a literal blob), and `--in` like
+/// one too, so `--in:@=.` is the expression's own tree.
+///
+/// A grafted entry is a FINISHED value, already evaluated where it came from.
+/// The result records that: each name grafted is added to [`MOUNTS_FILE`] at
+/// the result's root, which is how a later tree transform (deep-deps) knows not
+/// to descend into it.
+fn eval_graft(
+    host: &dyn EvalHost,
+    input_tree: &str,
+    tokens: &[&str],
+    env: &HashMap<String, (String, String)>,
+    vars: bool,
+) -> Result<(String, String), String> {
+    let mut base: Option<&str> = None;
+    let mut toks: Vec<&str> = Vec::new();
+    for &tok in tokens {
+        let (name, _, _) = parse_arg(tok)?;
+        if name == GRAFT_IN_ARG {
+            if base.replace(tok).is_some() {
+                return Err("eval-path: `graft` given --in twice".to_string());
+            }
+            continue;
+        }
+        if name == "." || name == ".." || name == MOUNTS_FILE || name == ".caos-expr" {
+            return Err(format!("eval-path: `graft` cannot set the entry {name:?}"));
+        }
+        if toks
+            .iter()
+            .any(|t| parse_arg(t).map(|(n, _, _)| n == name).unwrap_or(false))
+        {
+            return Err(format!("eval-path: `graft` given --{name} twice"));
+        }
+        toks.push(tok);
+    }
+    if toks.is_empty() {
+        return Err("eval-path: `graft` needs at least one --<name>=<value> entry".to_string());
+    }
+    let mut entries = match base {
+        None => Vec::new(),
+        Some(tok) => {
+            let input = eval_expr_args(host, input_tree, &[tok], env, vars)?
+                .pop()
+                .ok_or("eval-path: `graft` --in resolved to nothing")?;
+            if !input.mode.is_tree() {
+                return Err("eval-path: `graft` --in must name a tree".to_string());
+            }
+            host.fetch_tree_entries(&input.oid.to_string())?
+                .ok_or("eval-path: `graft` --in is not a tree")?
+        }
+    };
+    let mut mounts = std::collections::BTreeSet::new();
+    if let Some(existing) = entries.iter().find(|e| entry_name(e) == MOUNTS_FILE.as_bytes()) {
+        for line in fetch_blob_string(host, &existing.oid.to_string())?.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                mounts.insert(line.to_string());
+            }
+        }
+    }
+    let grafted = eval_expr_args(host, input_tree, &toks, env, vars)?;
+    for g in &grafted {
+        mounts.insert(String::from_utf8_lossy(entry_name(g)).into_owned());
+    }
+    entries.retain(|e| {
+        entry_name(e) != MOUNTS_FILE.as_bytes()
+            && !grafted.iter().any(|g| g.filename == e.filename)
+    });
+    entries.extend(grafted);
+    let list: String = mounts.iter().map(|m| format!("{m}\n")).collect();
+    entries.push(Entry {
+        mode: EntryKind::Blob.into(),
+        filename: MOUNTS_FILE.as_bytes().to_vec().into(),
+        oid: host.post_object("blob", list.as_bytes())?,
+    });
+    Ok(("tree".to_string(), host.post_tree(entries)?.to_string()))
+}
+
 /// Resolve a command's `--base` arg to an image ref string, dispatched on its
 /// explicit type (never sniffed from the value's shape): `$VAR` (an object a
 /// prior line produced), `:@=<path>` (a path naming an image tree in

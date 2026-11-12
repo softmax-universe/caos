@@ -559,7 +559,7 @@ func seedCommit(repoDir, pinRel, server, sha string) string {
 		if err != nil || blob == "" {
 			fatal("could not store the dev %s: %v", name, err)
 		}
-		if _, err := git(nil, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+name); err != nil {
+		if _, err := git(nil, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+pinRel+name); err != nil {
 			fatal("could not stage the dev %s: %v", name, err)
 		}
 	}

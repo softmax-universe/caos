@@ -1837,8 +1837,8 @@ sandbox = false''
           # binaries stay available as `.#caos`.
           default = caos-tools;
           inherit caos server runnerd caos-cli caosd caos-tools;
-          # The workspace stamped for the TEST world — what dev/stack-up builds
-          # a dev stack from, so a host client cannot drive it (and vice versa).
+          # What dev/stack-up builds a dev stack from (the same workspace as the
+          # host's: there is no separate test world any more).
           caos-test-world = testWorkspaceBins;
 
           # The two stack-bring-up aggregates (see `stackInputs`): one nix

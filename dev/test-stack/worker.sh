@@ -333,8 +333,9 @@ op_run_tests() {
   # NO COMMENT INSIDE THE BLOCKS BELOW: a continuation followed by a comment
   # joins INTO the comment and severs the environment prefix.
   phase "forming the suite request"
-  local suite_req
-  suite_req=$(CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 \
+  local suite_req trace_parent
+  trace_parent=$(caos job-req) || fail "reading this job's request hash"
+  suite_req=$(CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 CAOS_TRACE_PARENT="$trace_parent" \
     "$CLI" prepare-request --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}") \
     || fail "forming the suite request"
   caos trace-child suite "$suite_req" || fail "linking the suite's trace to this job"

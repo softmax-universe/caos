@@ -195,7 +195,7 @@ pub(crate) fn eval_endpoint(
                 return raw_root(config, &locator, &git_ref, &root).map(String::into_bytes);
             }
             let dir = git_ref.dir.as_deref().unwrap_or("");
-            eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
+            eval_in_tree(config, &root.to_string(), dir, secrets, parent).map_err(|e| {
                 HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message()))
             })
         }

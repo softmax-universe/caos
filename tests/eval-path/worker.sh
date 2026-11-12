@@ -170,6 +170,17 @@ END
 run --base=$IMG --name:@=name
 EOF
 
+# An expression that BUILDS something, for the trace check at the end. Its name
+# carries a nonce so the build is a fresh dispatch: a cache hit runs nothing and
+# therefore records nothing, which would make that check unfalsifiable.
+mkdir -p pkg-traced
+cp pkg-direct/build.sh pkg-traced/build.sh
+echo "traced-$(date +%s%N)-$$" > pkg-traced/name
+cp -r "$BASH" pkg-traced/bash
+cat > pkg-traced/.caos-expr <<'EOF'
+run --base:@=bash --worker1:@=build.sh --name:@=name
+EOF
+
 commit "eval-path fixtures"
 
 echo "== eval-path evaluates a directory's .caos-expr ==" >&2

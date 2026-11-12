@@ -365,12 +365,31 @@ sketch, in the order they were found.
   primitive: the primitive's own. It streams that image, describes it as a
   delta, and names it for the server in `CAOS_NIX_IMAGE_FILE`. Everything else it
   did, the hand-deepen, the seed records and the hand-built core images, is gone.
-- **A cold core is slow, and a fresh dev stack can lose its mock API key to it.**
-  The first evaluation after an edit that reaches the flake builds the whole
-  workspace and the cargo image inside the primitive, 30 to 50 minutes. The test
-  stack grants its mock key by evaluating `std/llm-call` and others at the
-  tree's commit and records the grant even when that evaluation timed out. See
-  AGENTS.md.
+- **A cold core was slow, and a fresh dev stack could lose its mock API key to it.**
+  The first evaluation after an edit that reached the flake built the whole
+  workspace and the cargo image inside the primitive: 33 to 62 minutes by wall
+  clock. The test stack grants its mock key by evaluating `std/llm-call` and
+  others at the tree's commit and records the grant even when that evaluation
+  timed out. See AGENTS.md.
+- **The cold core was a serial chain of nine dispatches, five of which rebuilt
+  the workspace.** Read from the evaluation's trace: runner image 45 s,
+  flake-builder image 58 s, cargo image 837 s, then five jobs that each depend
+  on the workspace at 330 to 447 s apiece, then the deep-deps run. Every
+  `nix=v1` job started with an empty `/nix`, so each rebuilt the toolchain, the
+  dependencies and the workspace. Two changes fixed most of it. The five
+  workspace jobs became one (`caos-core-parts`, one output holding the caos and
+  `/worker` layers and the two worker binaries, named by path in the root
+  expression). And the `nix=v1` jobs now carry `--required-caosd=true`, which
+  routes them to the caosd runner; the primitive's image declares
+  `/mounted-nix` and `CAOS_GRANT_SYS_ADMIN=1`, and `stack/nix-worker` seeds the
+  shared store volume with what the image has that it lacks and binds it over
+  `/nix`, the way `dev/devbox/worker` does. Measured as the time before the
+  suite starts: 39 minutes before, 11.6 minutes on the first run with the
+  store, 4.3 minutes for a Rust edit on a warm store. **That bind widens what a
+  flake build can do** (SYS_ADMIN, no seccomp or apparmor confinement, for
+  whatever flake an evaluated tree names); the alternative with no extra
+  privilege is a store volume at `/nix` seeded from an in-image copy of the
+  image's closure.
 - **`CAOS_CACHE_NAMESPACE` is kept**, with a note that it may no longer be needed:
   the hole it closed (a seeded key that named no binary) is gone, but dropping it
   is a step to take once the stack has run without it.

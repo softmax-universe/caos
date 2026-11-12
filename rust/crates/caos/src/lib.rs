@@ -5079,7 +5079,19 @@ fn request_compute_url(
     path: &str,
     secrets: &Secrets,
 ) -> Result<(String, String), String> {
-    let headers = secrets.headers();
+    request_compute_url_with(base, path, secrets, Vec::new())
+}
+
+/// [`request_compute_url`] with `extra` headers beside the secrets: which job or
+/// trace node an evaluation belongs to (`caos_world::TRACE_*_HEADER`).
+fn request_compute_url_with(
+    base: &str,
+    path: &str,
+    secrets: &Secrets,
+    extra: Vec<(&'static str, String)>,
+) -> Result<(String, String), String> {
+    let mut headers = secrets.headers();
+    headers.extend(extra);
     // NO TIMEOUT, deliberately: this is the call that waits for the work. A run
     // takes as long as the worker does.
     let body = server_call(

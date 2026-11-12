@@ -41,7 +41,7 @@
             text = builtins.readFile ./worker;
           };
         in
-        pkgs.dockerTools.buildLayeredImage {
+        pkgs.dockerTools.buildLayeredImage ({
           # The caos-worker-<name> form: build-builtins.sh maps tarballs
           # back to std entries by this name.
           name = "caos-worker-flake-builder";

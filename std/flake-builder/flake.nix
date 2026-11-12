@@ -87,7 +87,7 @@
             ];
           };
           includeNixDB = true;
-        };
+        } // extra);
     in
     {
       packages = builtins.listToAttrs (
@@ -95,7 +95,7 @@
           (system: {
             name = system;
             value = {
-              caosImage = forSystem system;
+              caosImage = forSystem system { };
             };
           })
           [

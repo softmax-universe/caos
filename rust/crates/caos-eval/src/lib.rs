@@ -633,12 +633,12 @@ fn eval_command_args(
     env: &HashMap<String, (String, String)>,
     vars: bool,
 ) -> Result<(String, String), String> {
-    if verb == "graft" {
-        return eval_graft(host, input_tree, tokens, env, vars);
+    if verb == "graft" || verb == "mount" {
+        return eval_graft(host, input_tree, verb, tokens, env, vars);
     }
     if verb != "run" && verb != "curry" {
         return Err(format!(
-            "eval-path: expected `run`, `curry` or `graft`, got {verb:?}"
+            "eval-path: expected `run`, `curry`, `graft` or `mount`, got {verb:?}"
         ));
     }
     // No positional image and no `--`: every token after the verb is a

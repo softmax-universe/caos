@@ -70,6 +70,10 @@ image_names=()
 for name in "${names[@]}"; do
   if has_host_image "$name"; then image_names+=("$name"); fi
 done
+# The nix primitive's image (design/nix-bootstrap.md) streams like the others
+# but is NO std entry: nothing stages, deepens or seeds it. The server finds it
+# through CAOS_NIX_IMAGE_FILE, written below.
+image_names+=(nix)
 
 # caos-cli: a prebuilt binary if the caller injected one (CAOS_CLI — how caosd
 # runs us from a store copy with no `nix` at runtime), else built from the flake.

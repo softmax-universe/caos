@@ -1485,12 +1485,12 @@ mod evaluated_tests {
     }
 
     #[test]
-    fn graft_replaces_an_entry_and_keeps_earlier_mounts() {
+    fn mount_replaces_an_entry_and_keeps_earlier_mounts() {
         let host = Memory::default();
         let out = eval_in(
             &host,
             &[("a", "old"), (".caos-mounts", "m\n")],
-            "graft --in:@=. --a=new\n",
+            "mount --in:@=. --a=new\n",
         )
         .unwrap();
         let got = listing(&host, &out);

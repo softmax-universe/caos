@@ -338,9 +338,6 @@ op_run_tests() {
     "$CLI" prepare-request --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}") \
     || fail "forming the suite request"
   caos trace-child suite "$suite_req" || fail "linking the suite's trace to this job"
-  echo "==> suite request $suite_req (caos-cli status --all $suite_req)" >&2
-  echo "==> full trace JSON:" >&2
-  echo "    curl -s localhost:9090/status/$suite_req?all=1 | jless" >&2
 
   phase "running the suite"
   # A previous run's checkout is read-only, and this one is its replacement.

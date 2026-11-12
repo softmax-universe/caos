@@ -345,7 +345,7 @@ op_run_tests() {
   if [ -e /tmp/suite ]; then chmod -R u+w /tmp/suite; fi
   rm -rf /tmp/suite
   local status=0
-  CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 \
+  CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 CAOS_TRACE_PARENT="$trace_parent" \
     "$CLI" run /tmp/suite --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}" \
       >/tmp/run.out 2>/tmp/run.err || status=$?
   if [ "$status" -ne 0 ]; then

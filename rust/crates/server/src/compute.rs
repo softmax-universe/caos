@@ -2437,7 +2437,7 @@ fn convert_git_image(config: &Config, git_hash: &str) -> Result<String, String> 
             .map_err(|e| format!("base ref not UTF-8: {e}"))?;
         let base_ref = base_ref.trim();
         let base_ref = base_ref.strip_prefix(DOCKER_SCHEME).unwrap_or(base_ref);
-        validate_docker_reference(base_ref, false)?;
+        validate_docker_reference(base_ref)?;
         let (base_layers, base_diff_ids) = fetch_base(config, base_ref)?;
         diff_ids.extend(base_diff_ids);
         manifest_layers.extend(base_layers);

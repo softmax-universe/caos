@@ -75,10 +75,8 @@ Where the code differs from, or settles, what the sections below say:
   script between the host and the test stack is that editing it needs neither a
   host rebuild nor an image rebuild.
 - **Driving a cloud session at a stack.** `start` publishes the tree and the
-  stack's own TEST-world client as `refs/caos/dev` on the stack (a host-world client
-  is refused by a test server with "caos world mismatch", and the session stalls in
-  its first hook with nothing in the run log: the hook output is only in the raw
-  session events), and replies with `ticket` and `dev_commit`. `caos-stack` is a Go
+  stack's own client as `refs/caos/dev` on the stack (the world check that once
+  refused a mismatched client is gone), and replies with `ticket` and `dev_commit`. `caos-stack` is a Go
   router; with `cloud-env` its second stage tail-calls `drive env-create` for a NEW
   environment named `z Caos Dev <commit>` rather than editing one, with the setup
   `--dev-commit=<commit> --server=<ticket>`. That runs in the router and not in the

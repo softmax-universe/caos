@@ -2294,7 +2294,7 @@ fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
         return resolve_image(config, &nix_image(image)?);
     }
     if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
-        validate_docker_reference(reference, true).map_err(|e| HttpError::new(400, e))?;
+        validate_docker_reference(reference).map_err(|e| HttpError::new(400, e))?;
         return Ok(reference.to_string());
     }
     if !image.bytes().all(|b| b.is_ascii_hexdigit()) {

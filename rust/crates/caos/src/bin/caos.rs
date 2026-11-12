@@ -182,6 +182,9 @@ fn run(args: &[String]) -> Result<(), String> {
             },
             _ => Err(usage(args)),
         },
+        // `vm-init` — PID 1 of a Firecracker runner appliance; refuses anywhere
+        // else (`caos::vm_init`).
+        Some("vm-init") => caos::vm_init::run(),
         _ => Err(usage(args)),
     }
 }

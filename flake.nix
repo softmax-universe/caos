@@ -386,6 +386,26 @@
             inherit nixpkgs;
           }).packages.${linuxSystem}.caosImage;
 
+        # What a runnerd Firecracker pool runs with (design/firecracker-runners.md,
+        # "Deployment"): runnerd, the VMM and jailer, and the tools its backend
+        # shells out to.
+        firecrackerRelease = import ./nix/firecracker-release.nix { pkgs = linuxPkgs; };
+        runnerdFirecrackerEnv = linuxPkgs.buildEnv {
+          name = "caos-runnerd-firecracker-env";
+          paths = [
+            firecrackerRelease
+            linuxPkgs.iproute2
+            linuxPkgs.iptables
+            linuxPkgs.coreutils
+            linuxPkgs.procps
+            linuxPkgs.bash
+            (linuxPkgs.runCommand "caos-runnerd-bin" { } ''
+              mkdir -p $out/bin
+              cp ${workspaceBins}/bin/runnerd $out/bin/caos-runnerd
+            '')
+          ];
+        };
+
         # std/runner as HOST-BUILT streamed core (design/flake-images.md,
         # part 2): the pooled interpreter IMAGE every compiled worker runs
         # on — not a worker itself (its /worker awaits a worker1; the
@@ -1770,6 +1790,44 @@ sandbox = false''
           # Image tarballs (build with `nix build`, then `docker load < result`).
           caos-worker-flake-builder-docker = workerFlakeBuilderImage;
           caos-worker-runner-docker = workerRunnerImage;
+
+          # The Firecracker test appliance (design/firecracker-runners.md): kernel,
+          # initrd and root disk for a runnerd Firecracker pool serving
+          # dev/fc-test's base, built from the SAME dev/fc-test/workload.nix as
+          # that base's Docker image. One per world, because its `caos` must be
+          # the world of the server the pool serves.
+          caos-fc-test-appliance = import ./nix/firecracker-appliance.nix {
+            pkgs = linuxPkgs;
+            caos = workspaceBins;
+            name = "caos-fc-test-appliance";
+            workload = import ./dev/fc-test/workload.nix { pkgs = linuxPkgs; };
+          };
+          caos-fc-test-appliance-test-world = import ./nix/firecracker-appliance.nix {
+            pkgs = linuxPkgs;
+            caos = testWorkspaceBins;
+            name = "caos-fc-test-appliance-test-world";
+            workload = import ./dev/fc-test/workload.nix { pkgs = linuxPkgs; };
+          };
+          # The VMM and its jailer, for a runnerd Firecracker pool's host: the
+          # upstream static release (nix/firecracker-release.nix says why).
+          firecracker = firecrackerRelease;
+          # A runnerd Firecracker pool's tools: runnerd plus what its backend
+          # shells out to. `dev/firecracker-check/run` uses it directly in its
+          # host mode (FC_POOL=host, as root); the image below is the same
+          # thing as a container.
+          caos-runnerd-firecracker-env = runnerdFirecrackerEnv;
+          # A runnerd Firecracker pool as a container. It needs /dev/kvm,
+          # /dev/net/tun and NET_ADMIN, plus SYS_ADMIN for the jailer, and the
+          # appliance at CAOS_FC_APPLIANCE (dev/firecracker-check runs it).
+          caos-runnerd-firecracker-docker = pkgs.dockerTools.buildLayeredImage {
+            name = "caos-runnerd-firecracker";
+            tag = "latest";
+            contents = [ runnerdFirecrackerEnv ];
+            config = {
+              Entrypoint = [ "/bin/caos-runnerd" ];
+              Env = [ "PATH=/bin" "CAOS_RUNNER_BACKEND=firecracker" ];
+            };
+          };
           # The cargo worker, host-built and streamed like the flake-builder
           # and the runner: std/cargo is no longer a published flake tree, so
           # its image comes from here (see the cargoDef call above).

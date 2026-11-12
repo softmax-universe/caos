@@ -23,6 +23,7 @@ pub mod import_git;
 pub mod push_git;
 pub mod runner;
 pub mod timing;
+pub mod vm_init;
 
 use std::ffi::OsStr;
 use std::fs::OpenOptions;

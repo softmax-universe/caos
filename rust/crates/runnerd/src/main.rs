@@ -44,6 +44,7 @@
 //! there. `stack/serve` supplies whichever the placement needs.
 
 mod docker;
+mod firecracker;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -234,8 +235,19 @@ fn main() {
     // than one that does not start.
     let backend: Arc<dyn Backend> = match env_or("CAOS_RUNNER_BACKEND", "docker").as_str() {
         "docker" => Arc::new(docker::Config::from_env()),
+        "firecracker" => match firecracker::Config::from_env()
+            .and_then(|config| config.validate(&common).map(|()| config))
+        {
+            Ok(config) => Arc::new(config),
+            Err(e) => {
+                eprintln!("caos-runnerd: firecracker backend: {e}");
+                std::process::exit(2);
+            }
+        },
         other => {
-            eprintln!("caos-runnerd: unknown CAOS_RUNNER_BACKEND {other:?} (known: docker)");
+            eprintln!(
+                "caos-runnerd: unknown CAOS_RUNNER_BACKEND {other:?} (known: docker, firecracker)"
+            );
             std::process::exit(2);
         }
     };

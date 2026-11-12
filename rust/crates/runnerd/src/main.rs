@@ -478,7 +478,7 @@ struct Job {
 
 /// A git blob's object id: sha1 over `blob <len>\0` then the content. The
 /// server's rendezvous compares OIDS, and a job's arg value reaches it as the
-/// blob of that value — so a runner requiring `required-pool=seeded` has to
+/// blob of that value — so a runner requiring `required-caosd=true` has to
 /// name the same object the ArgTree does, not the string.
 fn blob_oid(value: &str) -> String {
     use sha1::{Digest, Sha1};
@@ -815,7 +815,7 @@ mod tests {
         // A plain runnerd, here or on any other machine.
         assert!(!grants_volumes(&required_args("")));
         // A runner that requires something else entirely.
-        assert!(!grants_volumes(&required_args("required-pool=seeded")));
+        assert!(!grants_volumes(&required_args("required-pool=x")));
         // The right name with the wrong value names a runner no job asks for.
         assert!(!grants_volumes(&required_args("required-caosd=yes")));
         // The caosd runner, alone or alongside another requirement.

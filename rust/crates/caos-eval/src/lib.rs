@@ -542,7 +542,7 @@ fn parse_assignment(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     match rest.split_whitespace().next() {
-        Some("run") | Some("curry") | Some("graft") => Some((name, rest)),
+        Some("run") | Some("curry") | Some("graft") | Some("mount") => Some((name, rest)),
         _ => None,
     }
 }

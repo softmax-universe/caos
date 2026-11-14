@@ -157,6 +157,7 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
         let ticket = compute::start_expression(config, "run", &params, &secrets)
             .map_err(|e| e.message().to_string())?;
         let ticket = String::from_utf8_lossy(&ticket).trim().to_string();
+        record_call(config, &session, &args, &ticket);
         return Ok(text_result(
             format!(
                 "ticket: {ticket}\n\nAsk for it with result(ticket=\"{ticket}\"). It is \

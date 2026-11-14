@@ -192,6 +192,42 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
     Ok(result)
 }
 
+/// Hang a started call off its session's trace, so `caos-cli watch` on the
+/// session's trace ticket (`help` prints it) shows every call it makes. Best
+/// effort like every trace write: a call never fails because it could not be
+/// listed.
+fn record_call(config: &Config, session: &str, args: &Value, ticket: &str) {
+    match compute::session_trace_root(config, session) {
+        Ok(root) => crate::status::session_call(config, &root, &call_label(args), ticket),
+        Err(error) => eprintln!("warning: no trace root for {session}: {}", error.message()),
+    }
+}
+
+/// What a call is, for a line of the session's live view: the tool, its
+/// arguments cut short, and the id Claude Code gave the call, which is how a
+/// node is matched to the transcript.
+fn call_label(args: &Value) -> String {
+    const VALUE_CHARS: usize = 40;
+    let tool = args.get("path").and_then(Value::as_str).unwrap_or("?");
+    let mut label = tool.to_string();
+    if let Some(declared) = args.get("arguments").and_then(Value::as_object) {
+        for (name, value) in declared {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            let text = text.replace('\n', " ");
+            let shown: String = text.chars().take(VALUE_CHARS).collect();
+            let cut = if text.chars().count() > VALUE_CHARS { "…" } else { "" };
+            label.push_str(&format!(" {name}={shown}{cut}"));
+        }
+    }
+    if let Some(id) = args.get("caos_tool_use_id").and_then(Value::as_str) {
+        label.push_str(&format!(" [{id}]"));
+    }
+    label
+}
+
 /// The server's part of a call's timing line: how long the call took here, how
 /// much of that was the step (everything but decoding its answer), and the
 /// step's ticket, which `caos-std/read-trace` reads as the trace of the whole

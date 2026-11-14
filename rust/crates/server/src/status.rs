@@ -158,6 +158,30 @@ pub(crate) fn child(config: &Config, arg_tree: &str, via: &str, name: &str, chil
     record(config, arg_tree, event);
 }
 
+/// A tool call joined the session `root`'s trace, as a child named `name`.
+///
+/// The session's own record is opened (`requested`, never `ended`) the first
+/// time this server process sees the session and finds no record, so the root
+/// stays current for as long as the session lives and `caos-cli watch` keeps
+/// following it between calls. The live view of a root lists only the calls
+/// still running, which is what a watcher of a session wants.
+///
+/// The edge belongs to the session, not to the call: the call's own record is
+/// untouched, so its ticket traces it alone exactly as before. `via` is `eval`
+/// so the display names the child by `name` (the call), not by its tool.
+pub(crate) fn session_call(config: &Config, root: &str, name: &str, call: &str) {
+    static OPENED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let opened = OPENED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let first = opened
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(root.to_string());
+    if first && read(config, root).events.is_empty() {
+        requested(config, root);
+    }
+    child(config, root, "eval", name, call);
+}
+
 /// The promise this run left behind: its type, and the handler ArgTree that ran
 /// after the child work (absent when the continuation has no `then`).
 pub(crate) fn continuation(config: &Config, arg_tree: &str, kind: &str, handler: Option<&str>) {

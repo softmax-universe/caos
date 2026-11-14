@@ -3211,8 +3211,7 @@ fn ticket_of(
 /// without asking a server. It shares no input with a call's own ticket: a call
 /// stays traceable by itself, and the session names it as a child.
 pub(crate) fn session_trace_root(config: &Config, session: &str) -> Result<String, HttpError> {
-    let canonical = serde_json::json!(["session", session]);
-    store_git_blob(config, canonical.to_string().as_bytes())
+    store_git_blob(config, &caos_world::session_trace_material(session))
         .map(|id| id.to_string())
         .map_err(|e| HttpError::new(500, e))
 }

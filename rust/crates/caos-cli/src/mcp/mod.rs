@@ -559,6 +559,20 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The trace ticket of the caos session `id`: the root its tool calls are
+/// listed under, which `caos-cli watch` follows. The server records under the
+/// same oid (`compute::session_trace_root`), both hashing
+/// `caos_world::session_trace_material`, so naming it needs no round trip.
+fn session_trace_ticket(id: &str) -> Result<String, String> {
+    gix::objs::compute_hash(
+        gix::hash::Kind::Sha1,
+        gix::objs::Kind::Blob,
+        &caos_world::session_trace_material(id),
+    )
+    .map(|oid| oid.to_string())
+    .map_err(|error| format!("hashing the session trace ticket: {error}"))
+}
+
 /// The `AGENTS.md` at the root of the session `head`, introduced for the
 /// model; `None` when the session has none. Bounded as `llm-step` bounds a
 /// source tree's (`std/llm-step/src/source_trees.rs`).

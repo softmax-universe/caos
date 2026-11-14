@@ -515,7 +515,10 @@ mod tests {
         let label = call_label(&args);
         assert!(label.starts_with("caos-std/grep "), "{label}");
         assert!(label.contains(" pattern=unimplemented!"), "{label}");
-        assert!(label.contains(&format!(" content={}…", "x".repeat(40))), "{label}");
+        assert!(
+            label.contains(&format!(" content={}…", "x".repeat(40))),
+            "{label}"
+        );
         assert!(label.ends_with(" [toolu_1]"), "{label}");
         assert!(!label.contains("caos_session"), "{label}");
     }

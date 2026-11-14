@@ -108,9 +108,13 @@ func main() {
 	})
 }
 
+// put answers with `text`: a result is a tree holding `stdout`
+// (design/tool-contract.md), as std/caos-test's answer is.
 func put(text string) {
-	w.Must(os.WriteFile("/tmp/out", []byte(text), 0o644))
-	caos("put", "/tmp/out", "/cas/out")
+	const dir = "/tmp/answer"
+	w.Must(os.MkdirAll(dir, 0o755))
+	w.Must(os.WriteFile(dir+"/stdout", []byte(text), 0o644))
+	caos("put", dir, "/cas/out")
 }
 
 func route() {

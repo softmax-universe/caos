@@ -176,6 +176,7 @@ fn call(config: &Arc<Config>, caller: &Caller, params: &Value) -> Result<Value, 
     let ticket = compute::start_expression(config, "run", &params, &secrets)
         .map_err(|e| e.message().to_string())?;
     let ticket = String::from_utf8_lossy(&ticket).trim().to_string();
+    record_call(config, &session, &args, &ticket);
     let answer = compute::wait_ticket(config, &ticket).map_err(|e| e.message().to_string())?;
     let stepped = started.elapsed().as_secs_f64();
     let answer = String::from_utf8_lossy(&answer);

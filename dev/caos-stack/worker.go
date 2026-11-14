@@ -132,7 +132,7 @@ func route() {
 			"for it to start or inspect.\ncaos-stack is specific to the caos codebase; run it there.\n")
 		return
 	}
-	if _, err := os.Stat("/cas/args/in/dev/stack-up"); err != nil {
+	if _, err := os.Stat(in + "/dev/stack-up"); err != nil {
 		put("caos-stack runs a caos dev stack built from the tree. This source tree is\n" +
 			"not the caos codebase (no flake.nix / dev/stack-up), so there is no stack\n" +
 			"for it to start or inspect.\ncaos-stack is specific to the caos codebase; run it there.\n")

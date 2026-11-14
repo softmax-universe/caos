@@ -160,7 +160,7 @@ pub(crate) fn child(config: &Config, arg_tree: &str, via: &str, name: &str, chil
 
 /// A tool call joined the session `root`'s trace, as a child named `name`.
 ///
-/// The session's own record is opened (`requested`, never `ended`) the first
+/// The session's own record is opened (`requested` and `started`, never `ended`) the first
 /// time this server process sees the session and finds no record, so the root
 /// stays current for as long as the session lives and `caos-cli watch` keeps
 /// following it between calls. The live view of a root lists only the calls
@@ -177,7 +177,10 @@ pub(crate) fn session_call(config: &Config, root: &str, name: &str, call: &str) 
         .unwrap_or_else(|p| p.into_inner())
         .insert(root.to_string());
     if first && read(config, root).events.is_empty() {
+        // `started` as well: a node with only `requested` reads as a job
+        // parked for capacity, and `watch` would label the session `queue`.
         requested(config, root);
+        started(config, root);
     }
     child(config, root, "eval", name, call);
 }

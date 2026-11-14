@@ -530,12 +530,16 @@ fn on_user_prompt(config: &Config, payload: &Value) -> Result<(), String> {
         Err(error) if from.is_some() => refuse_prompt(&error),
         Err(error) => return Err(error),
     };
+    let trace = session_trace_ticket(&id)?;
     let text = match (recorded.status.as_str(), &from) {
         ("forked", Some(from)) => format!(
-            "caos session ref {} forked from {from}; {readers}",
+            "caos session ref {} forked from {from}; {readers}; trace {trace}",
             session_ref(&id)?
         ),
-        ("created", _) => format!("caos session ref {}; {readers}", session_ref(&id)?),
+        ("created", _) => format!(
+            "caos session ref {}; {readers}; trace {trace} (caos-cli watch {trace})",
+            session_ref(&id)?
+        ),
         _ => return Ok(()),
     };
     let mut message = json!({ "systemMessage": text });

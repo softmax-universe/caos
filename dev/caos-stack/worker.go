@@ -17,6 +17,7 @@
 //	        environment whose setup installs that client and talks to that
 //	        stack, by tail-calling `drive`, with the reply as its `in`.
 //	done    the `then` of that: put the reply and the new environment's name.
+//	answer  the `then` of every other op: put the daemon's reply as the result.
 //
 // THE ENVIRONMENT IS MADE HERE AND NOT IN THE DAEMON, and that is a boundary. It
 // takes the claude-oauth-token, which only `drive` is granted (by its code

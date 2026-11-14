@@ -1,14 +1,15 @@
 # prod — the machines that run caos
 
 A machine here is a **role**, named `<daemon>-<environment>`, defined as a
-`nixosConfigurations` attribute in the root `flake.nix`. Today there is one:
+`nixosConfigurations` attribute in the root `flake.nix`:
 
 | role | module | what it runs |
 |---|---|---|
 | `caosd-prod` | `caosd/configuration.nix` | `caosd up --iroh` as a systemd unit |
 | `watchdog-prod` | `watchdog/configuration.nix` | `caos-watchdog`: probes caosd-prod, responds to its Datadog alerts |
+| `runner-prod` | `runner/configuration.nix` | `caos-runnerd` on another machine, reaching caosd-prod by iroh |
 
-Both import `base.nix`: the EC2 base (SSM shell, amazon-init off, the dhcpcd
+All import `base.nix`: the EC2 base (SSM shell, amazon-init off, the dhcpcd
 guard), secrets from AWS Secrets Manager, and the Datadog agent.
 
 ## Deploying
@@ -167,6 +168,54 @@ aws secretsmanager put-secret-value --profile caos-admin --region us-east-1 \
 From a shell on the box: `caos-watchdog ssh -- <cmd>` runs a command on the
 server, `systemctl status caos-watchdog caos-watchdog-probe.timer` shows the
 two units, `journalctl -u caos-watchdog-probe` the probe results.
+
+## Runners on other machines
+
+`runner-prod` adds compute without adding a server. Each such host runs the
+same runnerd caosd-prod's stack runs, and its workers see the same names —
+`caos-server`, `caos-registry:5000`, `caos-redis:6379`, and `localhost:5000`
+for the docker daemon's pulls — but behind each is `iroh-vhost pin`, splicing
+to that service on caosd-prod over iroh. `runner/configuration.nix` has the
+diagram. No address and no VPC rule is involved, so a runner can be anywhere
+that can reach caosd-prod's UDP ports.
+
+The server side is `caosd up --runner-tickets` (on in `caosd/configuration.nix`):
+three more endpoints, each with its own key, on UDP 11205 (server), 11206
+(registry) and 11207 (redis). They are separate from the client ticket because
+they reach more — the registry and an unauthenticated redis — so they go only to
+runner hosts, and rotating them does not touch anyone's `caos://` remote.
+
+Copy them into Secrets Manager once, from a shell on caosd-prod; they survive
+restarts, like the client ticket:
+
+```sh
+for s in server registry redis; do
+  aws secretsmanager put-secret-value --region us-east-1 \
+    --secret-id caos/runner-ticket/$s --secret-string "$(caosd runner-ticket $s)"
+done
+```
+
+(The secrets themselves, the runner instances and their role are OpenTofu in
+metta, `devops/tf/caos`; caosd-prod's role may write these three.) Then on each
+runner host:
+
+```sh
+sudo nixos-rebuild switch --refresh --flake github:Metta-AI/caos#runner-prod
+```
+
+`systemctl status caos-runner` shows the unit; `journalctl -u caos-runner` the
+gateway and runnerd together. The tickets carry caosd-prod's public address,
+so a runner should reach it directly; if UDP 11205-11207 is blocked it falls
+back to the relay, which works but turns a 1.5 GB image pull into a crawl.
+To rotate the tickets: on caosd-prod,
+`rm -r /data/caos/stack/iroh-runner && systemctl restart caosd`, put the new
+values as above, and restart `caos-runner` on every runner host.
+
+What a runner host does not share with caosd-prod: the persistent volumes an
+image asks for (`CAOS_GRANT_VOLUMES`, e.g. cargo's target cache) are per engine,
+so work that lands on a different machine starts those cold. And its runnerd is
+the revision the HOST was deployed at, not the server's; redeploy runners with
+the server when the runner protocol changes.
 
 ## The binary cache
 

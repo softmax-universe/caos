@@ -1005,6 +1005,12 @@ sandbox = false''
         #   caosd ticket that ticket — the whole of what a client configures
         #                (`git remote add caos <ticket>`). Stable across
         #                restarts; needs a stack brought up with --iroh.
+        #   caosd up --runner-tickets (or CAOS_RUNNER_TICKETS=yes) also answers
+        #                runners on other machines (prod/runner): the server,
+        #                registry and redis, each on its own ticket and UDP
+        #                port (11205-11207). Off by default: those tickets reach
+        #                an unauthenticated redis and the registry.
+        #   caosd runner-ticket <server|registry|redis>  one of those tickets.
         # NO std-build AND NO std-check, and both went for the same reason.
         # Publishing is not separable from bring-up any more: `stack/serve`
         # publishes and then starts the seeder with the tree that publish
@@ -1303,7 +1309,7 @@ sandbox = false''
 
             usage() {
               echo "caosd ($CAOS_REV)"
-              echo "usage: caosd [up [--iroh=false]|down|reset|logs|ticket|doctor|image-cleanup|version]"
+              echo "usage: caosd [up [--iroh=false] [--runner-tickets]|down|reset|logs|ticket|runner-ticket <service>|doctor|image-cleanup|version]"
             }
 
             case "''${1:-up}" in
@@ -1338,10 +1344,12 @@ sandbox = false''
               # `caosd ticket` prints it. `--iroh` alone is accepted and means
               # the default, so existing invocations keep working.
               IROH=''${CAOS_IROH:-yes}
+              RUNNER_TICKETS=''${CAOS_RUNNER_TICKETS:-no}
               for arg in "''${@:2}"; do
                 case "$arg" in
                 --iroh | --iroh=true | --iroh=yes) IROH=yes ;;
                 --iroh=false | --iroh=no) IROH=no ;;
+                --runner-tickets) RUNNER_TICKETS=yes ;;
                 *) die "caosd up: unknown argument '$arg'" ;;
                 esac
               done
@@ -1379,6 +1387,14 @@ sandbox = false''
               # as the last command in its scope exits the script (AGENTS.md).
               iroh_publish=()
               if [ "$IROH" = yes ]; then iroh_publish=(-p 11204:11204/udp); fi
+              # The runner endpoints' ports, for the same reason as the client's:
+              # a runner pulling a 1.5 GB image through the relay is not usable.
+              if [ "$RUNNER_TICKETS" = yes ]; then
+                if [ "$IROH" != yes ]; then
+                  die "caosd up --runner-tickets needs --iroh: the runner endpoints use its relay"
+                fi
+                iroh_publish+=(-p 11205:11205/udp -p 11206:11206/udp -p 11207:11207/udp)
+              fi
 
               # WHAT GOES IN THE TICKET: exactly what the operator names,
               # and nothing else.
@@ -1503,6 +1519,7 @@ sandbox = false''
                 -e CAOS_STACK_SEEDER=yes \
                 -e CAOS_STACK_IROH="$IROH" \
                 -e CAOS_STACK_IROH_ADVERTISE="$IROH_ADVERTISE" \
+                -e CAOS_STACK_RUNNER_TICKETS="$RUNNER_TICKETS" \
                 -e CAOS_IROH_RELAY="''${CAOS_IROH_RELAY:-}" \
                 -e CAOS_STACK_RUNNER_SERVER_URL=http://caos-server \
                 -e CAOS_STACK_RUNNER_REDIS_ADDR=caos-redis:6379 \
@@ -1643,6 +1660,19 @@ sandbox = false''
               fi
               cat "$ticket"
               ;;
+            runner-ticket)
+              # One of the three a runner on another machine pins a local port
+              # to (prod/runner). Read from the listener's file, as `ticket` is.
+              case "''${2:-}" in
+              server | registry | redis) ;;
+              *) die "usage: caosd runner-ticket <server|registry|redis>" ;;
+              esac
+              ticket="$CAOS_DATA/stack/iroh-runner/$2/ticket"
+              if [ ! -e "$ticket" ]; then
+                die "no $2 runner ticket here. Bring the stack up with 'caosd up --runner-tickets' (or CAOS_RUNNER_TICKETS=yes)"
+              fi
+              cat "$ticket"
+              ;;
             doctor)
               # Is every stored object's history stored? The server's own check
               # (`server doctor`), run by hand: it reads every object, minutes
@@ -1753,6 +1783,10 @@ sandbox = false''
           # The watchdog-prod host's program (prod/watchdog): probes, the
           # Datadog poller and the Claude session runner, one binary. Same
           # shape as the deploy driver above, same caos/w error policy.
+          # The gateway a prod/runner host reaches its server's services
+          # through (`iroh-vhost pin`). Its own flake builds the same file.
+          iroh-vhost = pkgs.callPackage ./tools/iroh-vhost/package.nix { };
+
           caos-watchdog = pkgs.buildGoModule {
             pname = "caos-watchdog";
             version = "0.1.0";
@@ -1889,6 +1923,22 @@ sandbox = false''
             caos.package = self.packages.x86_64-linux.caos-tools;
             # caos.advertiseAddress is deliberately NOT set here: it differs
             # per machine, so deploy.sh reads it off the host and layers it on.
+          }
+        ];
+      };
+
+      # Compute for caosd-prod on another machine (prod/runner). Pure, like
+      # the watchdog: the server is named by tickets fetched at boot, so every
+      # runner host is this one config.
+      nixosConfigurations.runner-prod = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/amazon-image.nix"
+          ./prod/runner/configuration.nix
+          {
+            networking.hostName = "runner-prod";
+            caos.runner.runnerd = self.packages.x86_64-linux.runnerd;
+            caos.runner.irohVhost = self.packages.x86_64-linux.iroh-vhost;
           }
         ];
       };

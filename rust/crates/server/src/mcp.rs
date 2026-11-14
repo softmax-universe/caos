@@ -498,6 +498,24 @@ mod tests {
     use super::*;
     use caos_world::mcp::PROTOCOL_VERSION;
 
+    /// A node of the session's live view says which tool, with what, and which
+    /// Claude Code call it was, and a long value does not flood the line.
+    #[test]
+    fn a_call_is_labelled_by_tool_arguments_and_call_id() {
+        let args = json!({
+            "path": "caos-std/grep",
+            "arguments": {"pattern": "unimplemented!", "content": "x".repeat(100)},
+            "caos_session": "s",
+            "caos_tool_use_id": "toolu_1",
+        });
+        let label = call_label(&args);
+        assert!(label.starts_with("caos-std/grep "), "{label}");
+        assert!(label.contains(" pattern=unimplemented!"), "{label}");
+        assert!(label.contains(&format!(" content={}…", "x".repeat(40))), "{label}");
+        assert!(label.ends_with(" [toolu_1]"), "{label}");
+        assert!(!label.contains("caos_session"), "{label}");
+    }
+
     /// The handshake and the list touch no server state, so they can be
     /// checked without a `Config`.
     #[test]

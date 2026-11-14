@@ -455,7 +455,14 @@ fn overview(config: &Config, caller: &Caller, claude_session: Option<&str>) -> V
             Err(error) => {
                 format!("session: Claude Code session {claude_session:?} is unusable: {error}\n")
             }
-            Ok(id) => format!("session: {id}\nsession head: {}\n", head_of(config, &id)),
+            Ok(id) => {
+                let trace = compute::session_trace_root(config, &id)
+                    .unwrap_or_else(|error| format!("<unavailable: {}>", error.message()));
+                format!(
+                    "session: {id}\nsession head: {}\nsession trace: {trace} (caos-cli watch {trace})\n",
+                    head_of(config, &id)
+                )
+            }
         },
     };
     let step = match caller.step {

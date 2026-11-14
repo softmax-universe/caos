@@ -177,7 +177,10 @@ pub(crate) fn session_call(config: &Config, root: &str, name: &str, call: &str) 
         .unwrap_or_else(|p| p.into_inner())
         .insert(root.to_string());
     if first && read(config, root).events.is_empty() {
+        // `started` as well: a node with only `requested` reads as a job
+        // parked for capacity, and `watch` would label the session `queue`.
         requested(config, root);
+        started(config, root);
     }
     child(config, root, "eval", name, call);
 }

@@ -102,6 +102,8 @@ func main() {
 			makeEnv()
 		case "done":
 			done()
+		case "answer":
+			put(arg("result"))
 		default:
 			w.True(false, "unknown --stage: %s", stage)
 		}

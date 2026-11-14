@@ -16,6 +16,13 @@
 //! The caller says WHICH input, WHAT of it to load, and WHERE to put it. This
 //! worker checks the pin and does the splice.
 //!
+//! `--output-path=.` puts it HERE: the result is the input tree itself, in
+//! place of `--in`. That is for an expression kept in a directory of its own
+//! (`caos-std/`, holding the expression, `flake.nix` and `flake.lock`): the
+//! loader's input is then those three files rather than a whole session tree,
+//! so it is keyed on something that does not change from one call to the next.
+//! The pin is checked first, exactly as for any other path.
+//!
 //! Two things are worth understanding about the shape:
 //!
 //! - **The locator appears twice, and must.** `--base` yields this worker's
@@ -75,6 +82,18 @@ fn run() -> Result<(), String> {
     let (url, rev) = locked_input(&lock, &input)?;
     check_expr(&expr, &input, &url, &rev)?;
 
+    let out = scratch("loaded")?;
+    // `.` mounts the input AT the consumer's own directory: the result IS the
+    // input tree, replacing the tree that was handed in. That is what lets the
+    // expression live in a small directory of its own (`caos-std/`) whose
+    // evaluation does not change as the rest of the session does. Only a bare
+    // `.` means this; every other spelling that names no component is still
+    // refused below.
+    if output_path.trim() == "." {
+        let mounted = out.join("mounted");
+        link(PathBuf::from(arg("input-tree")), &mounted)?;
+        return caos(["put", path(&mounted), "/cas/out"]);
+    }
     let comps: Vec<String> = output_path
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".")
@@ -83,7 +102,6 @@ fn run() -> Result<(), String> {
     if comps.is_empty() {
         return Err(format!("--output-path={output_path:?} names no path"));
     }
-    let out = scratch("loaded")?;
     splice(Some(in_dir), &out, &comps, &PathBuf::from(arg("input-tree")))?;
     caos(["put", path(&out), "/cas/out"])
 }

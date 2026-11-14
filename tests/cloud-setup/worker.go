@@ -106,12 +106,23 @@ func fixtureAssets(dir string) string {
 // mounting that revision's std at a path of the repo's choosing. Both locators
 // carry the pinned rev, which is what stage 1 has to rewrite -- the loader
 // refuses a tree whose expression and lockfile disagree.
-func fixtureRepo(dir string) string {
+func fixtureRepo(dir string) string { return fixtureRepoAt(dir, false) }
+
+// The same client repo with its flake and expression in `caos-std/` and the
+// loader mounting at `.`: the loader then runs over a directory that does not
+// change as the session does.
+func fixtureNestedRepo(dir string) string { return fixtureRepoAt(dir, true) }
+
+func fixtureRepoAt(dir string, nested bool) string {
+	outputPath, pins := "caos-std", dir
+	if nested {
+		outputPath, pins = ".", filepath.Join(dir, "caos-std")
+	}
 	expr := "# the consumer root (design/flake-inputs.md)\n" +
 		"run --base:@@=github:softmax-universe/caos?rev=" + pinRev + "&dir=std/flake-input-loader" +
 		" --in:@=. --expr=$CAOS_EXPR --input=caos" +
 		" --input-tree:@@=github:softmax-universe/caos?rev=" + pinRev + "&dir=std" +
-		" --output-path=caos-std\n"
+		" --output-path=" + outputPath + "\n"
 	lock := `{
   "nodes": {
     "root": { "inputs": { "caos": "caos", "nixpkgs": "nixpkgs" } },
@@ -124,8 +135,8 @@ func fixtureRepo(dir string) string {
   "version": 7
 }
 `
-	write(filepath.Join(dir, ".caos-expr"), expr, 0o644)
-	write(filepath.Join(dir, "flake.lock"), lock, 0o644)
+	write(filepath.Join(pins, ".caos-expr"), expr, 0o644)
+	write(filepath.Join(pins, "flake.lock"), lock, 0o644)
 	write(filepath.Join(dir, "AGENTS.md"), "a client repo\n", 0o644)
 	git(dir, "init", "-q", "-b", "main")
 	git(dir, "add", "-A")
@@ -392,6 +403,35 @@ func main() {
 				"the refusal of %s does not say %q:\n%s", bad.arg, bad.says, refusal)
 		}
 
+		w.Step("a pin kept in caos-std/ is read from there, and the seed repoints it there")
+		// The loader mounts at `.` in this layout, so std is at the directory that
+		// holds the expression, and the seed has to rewrite THAT expression and lock.
+		w.Must(os.MkdirAll("/tmp/home4", 0o755))
+		nested := fixtureNestedRepo("/tmp/repo-nested")
+		nestedHead := git(nested, "rev-parse", "HEAD")
+		nestedBootstrap := exec.Command("go", "run", filepath.Join(cloud, "bootstrap.go"),
+			"--base="+base, "--server="+ticket, "--dev-commit="+devRev,
+			"--secret-readers="+readers, "--dev-tree="+devTree,
+			"--prefix=/tmp/prefix4", "--share-dir=/tmp/share4", "--homes=/tmp/home4")
+		nestedBootstrap.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+nested)
+		nestedBootstrap.Dir = "/tmp"
+		nestedOut, err := nestedBootstrap.CombinedOutput()
+		w.True(err == nil, "stage 1 failed on a pin kept in caos-std/: %v\n%s", err, nestedOut)
+		nestedDev := stamp("/tmp/share4/dev-stamp")
+		w.True(nestedDev["std_path"] == "caos-std" && nestedDev["repo"] == nested,
+			"a loader mounting at . in caos-std/ does not put std at caos-std: %v", nestedDev)
+		nestedSeed := nestedDev["seed"]
+		nestedExpr := git(nested, "show", nestedSeed+":caos-std/.caos-expr")
+		for _, dir := range []string{"std/flake-input-loader", "std"} {
+			want := ":@@=git+" + ticket + "?rev=" + devRev + "&dir=" + dir
+			w.True(strings.Contains(nestedExpr, want),
+				"the seed's caos-std/.caos-expr does not reach the dev server for %s:\n%s", dir, nestedExpr)
+		}
+		w.True(git(nested, "diff", "--name-only", nestedHead, nestedSeed) == "caos-std/.caos-expr\ncaos-std/flake.lock",
+			"the seed differs from HEAD in more than the pin in caos-std/:\n%s",
+			git(nested, "diff", "--stat", nestedHead, nestedSeed))
+		w.True(git(nested, "status", "--porcelain") == "", "stage 1 left the nested checkout dirty")
+
 		w.Step("stage 1 leaves a session ready to start")
 		devSettings := readJSON("/tmp/home1/.claude/settings.json")
 		w.True(strings.Contains(hookCommand(devSettings, "UserPromptSubmit"), "'--llm-step:@@=git+caos://local?rev="+devRev+"&dir=std/llm-step'"),
@@ -442,6 +482,13 @@ func main() {
 		// Dev mode installs the dev commit whatever the checkout pins.
 		hookOut, marked = hook("/tmp/share-dev", "softmax-universe/caos@"+otherRev, devRev)
 		w.True(!marked, "the hook failed a dev install over the checkout's pin:\n%s", hookOut)
+
+		// The same check for a pin kept in caos-std/.
+		pinRepo = fixtureNestedRepo("/tmp/pin-repo-nested")
+		hookOut, marked = hook("/tmp/share-nested-current", "softmax-universe/caos@"+pinRev, "")
+		w.True(!marked, "the hook marked an install that matches a caos-std/ pin stale:\n%s", hookOut)
+		hookOut, marked = hook("/tmp/share-nested-moved", "softmax-universe/caos@"+otherRev, "")
+		w.True(marked, "the hook did not read the pin from caos-std/:\n%s", hookOut)
 
 		// The session base setup computed is a commit; a checkout now at another
 		// one is told so, without failing the session.

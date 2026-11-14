@@ -249,6 +249,45 @@ func readOutputPath(path string) (string, error) {
 	return found, nil
 }
 
+// The directory of a client repo that holds its pin: `caos-std/` when that
+// directory carries a flake.lock, the repo root otherwise.
+//
+// A repo may keep the flake and the root expression in `caos-std/` (the
+// loader's `--output-path=.` then replaces that directory with caos' std), so
+// that what the loader is keyed on -- the directory it is run over -- does not
+// change every time the session does. Both layouts are supported: a repo that
+// builds with its own root flake keeps the pin at the root.
+func pinDir(repoDir string) string {
+	nested := filepath.Join(repoDir, "caos-std")
+	if _, err := os.Stat(filepath.Join(nested, "flake.lock")); err == nil {
+		return nested
+	}
+	return repoDir
+}
+
+// Where the mounted std is in the SESSION's tree, given where the pin lives
+// and the loader's --output-path. `.` means "here": the directory holding the
+// expression is what is replaced, so std is at that directory's own path. At
+// the repo root there is no such path -- the loader would replace the whole
+// session with std -- which nothing downstream can use.
+func stdMount(repoDir, dir, outputPath string) (string, error) {
+	rel, err := filepath.Rel(repoDir, dir)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.ToSlash(rel)
+	if outputPath == "." {
+		if rel == "." {
+			return "", fmt.Errorf("--output-path=. at the repo root would replace the whole session tree with caos' std, leaving no path to it; keep the expression in caos-std/ to mount there")
+		}
+		return rel, nil
+	}
+	if rel == "." {
+		return outputPath, nil
+	}
+	return rel + "/" + outputPath, nil
+}
+
 // The checkout is already on disk when this runs: `Cloned from seed bundle`
 // precedes `Running setup script` in the environment's own log. `-e .git`
 // rather than a directory test, because a worktree's .git is a FILE.
@@ -265,7 +304,7 @@ func findCheckout() string {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err != nil {
+		if _, err := os.Stat(filepath.Join(pinDir(dir), "flake.lock")); err != nil {
 			continue
 		}
 		abs, err := filepath.Abs(dir)
@@ -488,7 +527,7 @@ func installHelper(prefix, slug, tag string) {
 // UNREFERENCED, via commit-tree into a throwaway index: nothing points at it, so
 // `git push` cannot carry it and the ticket it contains -- a credential -- stays
 // out of every pushable ref.
-func seedCommit(repoDir, server, sha string) string {
+func seedCommit(repoDir, pinRel, server, sha string) string {
 	index, err := os.CreateTemp("", "caos-seed-index")
 	if err != nil {
 		fatal("could not make a seed index: %v", err)
@@ -520,17 +559,17 @@ func seedCommit(repoDir, server, sha string) string {
 		if err != nil || blob == "" {
 			fatal("could not store the dev %s: %v", name, err)
 		}
-		if _, err := git(nil, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+name); err != nil {
+		if _, err := git(nil, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+pinRel+name); err != nil {
 			fatal("could not stage the dev %s: %v", name, err)
 		}
 	}
 	committed := func(name string) []byte {
-		cmd := exec.Command("git", "cat-file", "blob", "HEAD:"+name)
+		cmd := exec.Command("git", "cat-file", "blob", "HEAD:"+pinRel+name)
 		cmd.Dir = repoDir
 		out, err := cmd.Output()
 		if err != nil {
 			fatal("the checkout cannot be repointed at the dev server: HEAD has no %s\n"+
-				"  Without it this session runs your client against the pinned tools.", name)
+				"  Without it this session runs your client against the pinned tools.", pinRel+name)
 		}
 		return out
 	}
@@ -636,7 +675,8 @@ func main() {
 			"  Point this environment at one, or fork\n" +
 			"  softmax-universe/caos-session.")
 	}
-	p, err := readLock(filepath.Join(repoDir, "flake.lock"), "caos")
+	dir := pinDir(repoDir)
+	p, err := readLock(filepath.Join(dir, "flake.lock"), "caos")
 	if err != nil {
 		fatal("%v\n"+
 			"  (a 'follows' input carries no lock of its own, and is not one either)\n"+
@@ -664,12 +704,16 @@ func main() {
 	if !isSha(p.rev) {
 		fatal("the caos input is pinned to %q, which is not a full commit sha", p.rev)
 	}
-	p.stdPath, err = readOutputPath(filepath.Join(repoDir, ".caos-expr"))
+	outputPath, err := readOutputPath(filepath.Join(dir, ".caos-expr"))
+	if err == nil {
+		p.stdPath, err = stdMount(repoDir, dir, outputPath)
+	}
 	if err != nil {
 		fatal("%v\n"+
-			"  A caos-client repo's root expression loads the pinned input:\n"+
+			"  A caos-client repo's expression loads the pinned input, in caos-std/ (with\n"+
+			"  --output-path=.) or at the repo root (with --output-path=caos-std):\n"+
 			"  run --base:@@=...&dir=std/flake-input-loader --in:@=. --expr=$CAOS_EXPR \\\n"+
-			"      --input=caos --input-tree:@@=...&dir=std --output-path=caos-std", err)
+			"      --input=caos --input-tree:@@=...&dir=std --output-path=.", err)
 	}
 	say("%s pins caos %s at %s, and mounts its std at %s", repoDir, p.slug(), p.rev[:12], p.stdPath)
 
@@ -720,7 +764,11 @@ func main() {
 
 	seed := ""
 	if devRev != "" {
-		seed = seedCommit(repoDir, a.server, devRev)
+		pinRel := ""
+		if rel, err := filepath.Rel(repoDir, dir); err == nil && rel != "." {
+			pinRel = filepath.ToSlash(rel) + "/"
+		}
+		seed = seedCommit(repoDir, pinRel, a.server, devRev)
 	}
 
 	// Unshallowed here: the dev seed commit is pushed below, and a push packs its

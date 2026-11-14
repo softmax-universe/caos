@@ -133,16 +133,26 @@ See [`../drive`](../drive) for starting one.
 environment at your fork. It is four things, and nothing else:
 
 ```
-flake.nix / flake.lock   a `caos` input pinned by revision — the version knob
-.caos-expr               one line, mounting that input's std/ at --output-path
+caos-std/flake.nix       a `caos` input pinned by revision — the version knob
+caos-std/flake.lock      (the flake and its lock live beside the expression)
+caos-std/.caos-expr      one line, mounting that input's std/ here (--output-path=.)
 AGENTS.md (+ CLAUDE.md)  what the agent is told at the start of every session
-.gitignore               the mount point, which must not exist as a real directory
 ```
 
-The root expression is the `std/flake-input-loader` line from
+The expression is the `std/flake-input-loader` line from
 [`design/flake-inputs.md`](../../../design/flake-inputs.md) ("Consumer root"),
 on **one** line — `eval` splits on lines, so a trailing `\` is a token rather
 than a continuation.
+
+**Where the pin lives.** Setup reads the pin from `caos-std/` when that
+directory has a `flake.lock`, and from the repository root otherwise, so both
+layouts work. The `caos-std/` layout is the one to prefer for a session: the
+loader is then run over a directory that does not change as the session does,
+so it is answered from cache instead of re-run before every tool call. A repo
+that builds with a flake of its own keeps the older layout — `flake.nix`,
+`flake.lock` and `.caos-expr` at the root with `--output-path=caos-std`, and a
+`.gitignore` for the mount point, which must not exist as a real directory.
+A `.` at the root is refused: it would replace the whole session with std.
 
 **Setup script**: paste these two lines into the environment's "Setup script"
 field (swap `main` for a branch or commit to test a change to the *bootstrap

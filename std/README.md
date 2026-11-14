@@ -140,7 +140,7 @@ property of the container. A tool that has to fetch something can.
 | `runner` | The pooled interpreter every compiled worker is curried onto; part of the seeded core. |
 | `deep-deps` | Mounts each directory's `DEPS` at `DEEP-DEPS/<name>`, which is what lets a subtree name things outside itself. |
 | `flake-builder` | Builds a flake directory into a runnable image. |
-| `flake-input-loader` | Splices a flake input's tree into the consumer's own, so a repo reaches caos' `std/` by path. |
+| `flake-input-loader` | Splices a flake input's tree into the consumer's own, so a repo reaches caos' `std/` by path; with `--output-path=.` it replaces the consumer's tree, for an expression kept in a directory of its own. |
 | `git-runner` | An opt-in git runtime for compiled workers, for the one thing caos has no verb for. |
 | `llm-step` | The agent harness: one turn of a session, and the registry of tools it offers a model. |
 | `llm-client` | The Anthropic API client `llm-step` posts through. |

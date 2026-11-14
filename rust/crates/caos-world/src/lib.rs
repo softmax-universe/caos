@@ -71,6 +71,18 @@ pub fn secret_hash_material(pairs: &[(&str, &str)]) -> Vec<u8> {
     out
 }
 
+/// The bytes whose git blob oid is a session's trace ticket, the root that
+/// every tool call of the session hangs off (`caos-cli watch <ticket>` follows
+/// it). Derived from the session id alone, so the client can name it without
+/// asking a server. Both sides hash THIS, so the ticket the hook prints is the
+/// one the server records under; the canonical form lives here for the same
+/// reason as [`secret_hash_material`].
+pub fn session_trace_material(session: &str) -> Vec<u8> {
+    serde_json::json!(["session", session])
+        .to_string()
+        .into_bytes()
+}
+
 /// Arg-name prefix reserved for RUNNER SELECTION (SPEC, "Misc"): an ArgTree
 /// entry whose name starts with this must be matched EXACTLY by the runner that
 /// takes the job.

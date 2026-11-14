@@ -218,7 +218,11 @@ fn call_label(args: &Value) -> String {
             };
             let text = text.replace('\n', " ");
             let shown: String = text.chars().take(VALUE_CHARS).collect();
-            let cut = if text.chars().count() > VALUE_CHARS { "…" } else { "" };
+            let cut = if text.chars().count() > VALUE_CHARS {
+                "…"
+            } else {
+                ""
+            };
             label.push_str(&format!(" {name}={shown}{cut}"));
         }
     }

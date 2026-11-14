@@ -115,9 +115,18 @@ func put(text string) {
 
 func route() {
 	// List the tree one level — enough to look for the codebase's own files.
-	caos("get", "/cas/args/in")
-	_ = exec.Command("caos", "get", "/cas/args/in/dev").Run()
-	if _, err := os.Stat("/cas/args/in/flake.nix"); err != nil {
+	// `root` is the tree to bring up (design/tool-contract.md): a source tree's
+	// commit resolves to its code tree, which is what the daemon is keyed by.
+	if !has("root") {
+		put("caos-stack: nothing is at the root path: root is the source tree to bring up,\n" +
+			"such as sources/caos/02-layer\n")
+		return
+	}
+	const in = "/cas/caos-stack-tree"
+	caos("resolve", caos("hash", "/cas/args/root"), "", in)
+	caos("get", in)
+	_ = exec.Command("caos", "get", in+"/dev").Run()
+	if _, err := os.Stat(in + "/flake.nix"); err != nil {
 		put("caos-stack runs a caos dev stack built from the tree. This source tree is\n" +
 			"not the caos codebase (no flake.nix / dev/stack-up), so there is no stack\n" +
 			"for it to start or inspect.\ncaos-stack is specific to the caos codebase; run it there.\n")

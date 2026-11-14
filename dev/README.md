@@ -22,9 +22,10 @@ under test, not the place the tools run.
 - Reach the tools BY PATH in the import: `imports/caos/main/dev/caos-stack` and
   `imports/caos/main/integrations/claude-code/drive`, with `run_tool`. (`caos-std/`
   is the std pinned by the client repo, not the tree under test, and no longer
-  holds `caos-stack`.) Pass the tree to bring up as `in`: `caos-stack` takes it
-  (`tool_help` lists it), e.g. `in=feature/<name>`. Leave `in` off to test the
-  import itself.
+  holds `caos-stack`.) Pass the tree to bring up as `root`, like `caos-test`:
+  e.g. `root=feature/<name>`, or `root=imports/caos/main` to test the import
+  itself. (Before this was fixed `caos-stack` still declared the retired `in` and
+  never received a tree.)
 - Do NOT run the tools from `feature/<name>`. `drive` is granted its token only
   when the root tree it is run from is one `caosd up` published (AGENTS.md,
   "Resident workers"), so an edited checkout can fail every `drive` call with

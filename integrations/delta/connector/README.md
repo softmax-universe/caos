@@ -4,10 +4,10 @@ This is a Go implementation of selected Delta protocol operations. It does not
 launch, embed, or download the Delta application. The public reference Wasm is
 used only by the separate [protocol investigation](../protocol/README.md).
 
-**Current state: authentication, registration, and read-only history download
-work; agent-turn execution is not implemented yet.** The CAOS entry implements
-bounded checks, not a persistent runner. Do not select a diagnostic machine for
-real work.
+**Current state: authentication, registration, conversation replay, initial
+workspace reconstruction, and bounded one-shot execution are implemented.**
+The one-shot bridge does not implement Personal Runner dispatch or persistent
+service. Do not select a diagnostic machine for real work.
 
 ## Verified against the real service
 
@@ -42,23 +42,16 @@ the same module, runs its tests, and vendors pinned dependencies. Its source
 filter excludes research artifacts and the evaluated `DEEP-DEPS` tree.
 `tests/delta-protocol` builds that image through the ordinary CAOS suite.
 
-For source revision `ced02e82db97134a5714ef731fb5e54d8e428e1c`, validation
-included the race-enabled Go tests, `go vet`, a native Nix package build, the
-live CAOS probe, and the full salted CAOS suite: **79/79 passed**. This verifies
-the connector's current operations; it is not evidence of agent-turn execution.
+The [landed transport checkpoint](https://github.com/softmax-universe/caos/pull/448)
+passed the full salted CAOS suite (**79/79**), CAOS and native Nix builds,
+race-enabled Go tests, and live connection/history checks. The replay engine was
+added afterward and has separate compatibility checks.
 
-The canonical root entry at revision `7624c1d767cae4866080226c08a01731c6cee0a0`
-also passed the live CAOS probe and the full salted suite (**79/79**), as well as
-`nix build --no-link .#delta-runner`. The offline reference now checks 382 wire
-cases. The dispatch decoder reads typed epochs and timeline identities, accepts
-the reference's defaults for omitted newer fields, and rejects malformed types.
-Parsing a dispatch does not admit the turn or acknowledge execution.
-
-The typed dispatch decoder at revision
-`868fb0085c5b92ce238e66f28d35f651c391f1ad` passed the race-enabled Go tests
-(`-count=10`), `go vet`, the native Nix build, a live CAOS probe, and the full
-salted suite (**79/79**). The history reference checks additionally establish
-default root-object IDs offline; replay and live turn execution remain unbuilt.
+The offline reference runs 10,395 protocol and in-memory state checks, including
+128 generated text-CRDT histories and 768 queries checked with both ordinary and
+visible-anchor semantics. See the protocol README for exporting those
+cases and comparing the Go implementation against them. The production worker
+does not include or invoke that reference module.
 
 ## Read-only history capture
 
@@ -81,6 +74,63 @@ apply them to a local state database or execute a turn. A capture containing
 replication-pack references is incomplete until those packs are fetched; that
 fetch path is still unimplemented. Raw content and pack metadata stay in the
 private file, never in standard output.
+
+## Read-only conversation state replay
+
+```sh
+connector replay-history \
+  --snapshot-file=/private/path/new-history-snapshot.json \
+  --output-file=/private/path/new-replay-report.json
+```
+
+This command needs no network or account credential. It selects the requested
+timeline frontier, verifies causal closure, and reconstructs registers, maps,
+scratch text, serialized-version state, and seal records. Text edits use UTF-8
+byte offsets in their causal parent view. Concurrent text insertions and
+deletions retain their identities; maps remove only values observed by their
+parent, preserving unseen concurrent updates.
+
+The approved fixture's 24 batches reconstruct a 194-byte conversation buffer,
+8 registers, 10 maps, and one seal range. An independent replay with the public
+client's in-memory text engine produces the same buffer. The optional native
+corpus test also compares 128 synthetic forked histories, under shuffled delivery,
+without adding vendor code to the production worker.
+
+The report contains private thread text. Captures can also contain delegated
+model vouchers, so keep both outside source checkouts and never bind raw captures
+into CAOS arguments or results. Output files are private and never overwritten.
+
+This reconstructs already accepted records; it does not authorize new edits.
+Seal enforcement for a writer, live ownership/epoch admission, native message
+translation, incremental workspace-delta replay, and replication-pack retrieval
+remain unimplemented. Unsupported deltas and incomplete histories fail explicitly.
+A stored generation-state tag is not a liveness check: the fixture retains a
+Streaming value even after its assistant response has completed.
+
+## Workspace identity and journal-write checks
+
+Workspace attachments identify their own history, timeline, pinned version, and
+worktree root. The connector follows those descriptors from an authorized thread
+and reconstructs their initial Git trees, preserving blob IDs, executable modes,
+symlinks, and Git's directory ordering. It does not use the operator's checkout
+as a substitute for the thread's files. Unsafe paths, unresolved attachments,
+missing causal parents, unfetched packs, and incremental edits fail explicitly.
+
+The approved fixture's 1,022 initial entries reconstruct Git tree
+`d997a9ffc38b9e37a31d57175036fb8fb086973d`, exactly matching its recorded base
+commit `75bd5aaa6a054150042c4ab3a6425a36d9697379`. This establishes the content
+identity needed to reuse CAOS's object store; it does not establish file-delta
+synchronization or prove that every blob is available on the execution server.
+
+The outgoing history encoder also matches the compiled native reference. A
+separately gated live test wrote one unused empty map into the disposable
+fixture, received acceptance, then found that exact batch in a fresh download.
+The conversation text and files were unchanged. The fixture now has 25 batches.
+No turn was acknowledged or executed by that test.
+
+The encoder is not an authorization layer or a turn controller. A writer must
+retain an allocated batch across an uncertain send and reconcile it by identity,
+not allocate another batch and assume the first one failed.
 
 ## Authentication
 
@@ -135,6 +185,129 @@ absent or empty list denies all history inspection. This check happens before
 requesting a service token. No thread content or replication-pack URL is
 published to a CAOS result. `registration-name` is accepted only by `op=probe`.
 
+`op=replay-history` uses the same sealed allowlist, downloads the history, and
+reconstructs it in the worker. It returns only counts, not text, map values,
+model vouchers, or other private state. Neither history operation accepts turns.
+
+`op=inspect-workspaces` follows the authorized thread's resolved attachments and
+reconstructs their pinned initial trees. It returns only workspace and object
+counts. It does not write files or accept turns.
+
+`op=bridge-context` imports separate native user and completed assistant messages
+into a CAOS session, using the existing `std/llm-step` recording operations.
+It then exports the pinned context through the normal model-context renderer
+and checks its roles and text. The operation requests no inference and makes
+no Delta edits. Its public report contains only counts; the imported conversation
+and workspace live in the configured CAOS server, like other CAOS sessions.
+Native inference vouchers and unrelated metadata are never passed to that session.
+
+The bridge reconstructs the native workspace tree and verifies that its recorded
+base commit resolves to that exact tree in CAOS before using it. Each continuation
+rechecks the authorized native frontier. A changed thread aborts the import rather
+than mixing versions. Staged jobs release their worker slots between operations.
+
+The execution backend uses CAOS's existing `prepare-request` and `sub-run`
+mechanisms. It does not obtain another CAOS credential or implement a second
+model/tool loop. `std/run-and-update-ref` can publish immutable task-result refs
+for a caller without a CAOS session record; duplicate callbacks reconcile the
+same result by identity without force-writing a ref.
+
+### Model authorization preflight
+
+Delta connection credentials are not themselves model credentials. The native
+operator can check the connector's own model authorization without inference:
+
+```sh
+connector auth-model-check --credential-file=/private/path/credentials.json
+```
+
+`op=check-model` performs the same check in CAOS, after requiring the sealed
+thread allowlist match. It reads `/client/users/me`, selects only the returned
+default organization (which must also appear in the returned membership list),
+and posts that organization to `/client/llm_tokens`. It never reads application
+settings, obtains another provider key, sends a completion, or changes Delta
+history. Tokens and account metadata are never printed or returned.
+
+On 2026-11-11 the approved connector's account lookup returned HTTP 200, but its
+default organization's model-token request returned HTTP 402:
+“Organization does not have an active subscription.” The approved fixture's
+one existing user message contains no nonempty delegated inference voucher.
+This does not block use of CAOS's separately approved existing
+`anthropic.inference` credential workflow. Its key belongs only in the private
+CAOS secret store under the normal exact-revision `std/llm-step` grant, never in
+an ArgTree or native history. The execution model must be selected explicitly.
+The preflight reports only Delta model-token authorization, not end-to-end
+readiness. The existing driver uses Anthropic transport, not Delta's model API.
+
+### Isolated one-shot prompt execution
+
+This operator-driven path is deliberately restricted to an approved disposable
+fixture with **one writer at a time**. The operator must exclude native agents
+and other connector writers for the entire submission, execution, and readback.
+Frontier checks detect changes but are not an atomic server-side compare-and-swap.
+
+1. `connector submit-prompt --identity-file=<private sealed identity>
+   --thread-id=<allowlisted fixture> --text-file=<private prompt>
+   --plan-file=<new private plan>` appends a real native user message. The exact
+   batch is retained before send; retry with the same plan to reconcile it.
+2. Run `integrations/delta` with `op=execute-turn`, that `thread-id`, an explicit
+   Anthropic `model`, and a fresh RFC3339 timestamp as `request-id`. The connector
+   imports separate native messages, verifies the pinned workspace, then runs
+   the existing `std/llm-step` model/tool loop. It does not delegate execution to
+   an existing Delta agent.
+3. The bridge exports the driver's actual final model context and publishes its
+   final assistant text, completion marker, model identity and user-submission
+   link. Native tool-segment translation remains unimplemented: the full tool
+   trace stays in the normal CAOS session. The public result contains counts,
+   not thread text.
+4. Fresh native replay must show the exact reply in the selected timeline and
+   preserve every earlier projected message. A stored but off-timeline batch is
+   not success. Publication retries retain the same batch identity and contents.
+
+Continuations are HMAC-authenticated with the sealed connector identity and bound
+to actor, thread, operation, model, and request. Each callback result is checked
+against its retained task's immutable CAOS result before being consumed.
+
+This checkpoint asks the model to inspect files without edits or delegation and
+rejects net workspace changes before reply publication. That instruction is not
+a capability sandbox: the ordinary driver remains tool-capable, and the final
+tree comparison does not detect reverted edits or external effects. Use only the
+approved, trusted fixture prompt. No ongoing dispatch/lease guarantee is implied.
+
+#### Live attempt: blocked by the approved inference credential
+
+On 2026-11-11, source revision
+`c494bfa495c0bcd06e476814603ef04295805c10` submitted and read back a genuine
+native prompt in the existing approved disposable thread. It asked the agent
+to read the attached workspace's `SPEC.md` with file tools and explain ArgTree
+cache identity, resident-worker request IDs, and per-job nonce/salt.
+`claude-opus-4-8` was explicitly selected only for that fixture.
+
+The real CAOS driver imported all three native messages and attempted its
+normal `POST https://api.anthropic.com/v1/messages`. The approved credential
+was injected successfully, but Anthropic returned HTTP 400
+`invalid_request_error`: “Your credit balance is too low to access the Anthropic
+API. Please go to Plans & Billing to upgrade or purchase credits.”
+
+- Live task, ticket, native prompt identities, and the retained publication plan
+  remain only in the private operator record. Lookup handles are not public
+  audit data: they can expose retained context or diagnostics.
+- Native prompt publication succeeded; the thread now has 26 history batches.
+- **No model response, tool execution, or new assistant reply was generated.**
+  The previous fixture messages remain unchanged. No existing Delta agent ran
+  the prompt, and no canned reply was substituted.
+
+The inference account's credit is an external blocker. The connector cannot
+repair billing or silently obtain a different credential. After that credential
+can infer, reuse the retained prompt plan (do not append another prompt) and
+start a new execution request ID so the failed task's immutable result is not
+reused. The reply-publication path has offline/native-codec tests and independent
+review, but still needs that successful live model/tool/readback demonstration.
+
+**Unfixed protocol-support gaps:** structured native tool/thinking history,
+attachments, inherited parent context, and multiple or incrementally edited
+workspaces still fail explicitly. They are not flattened or silently omitted.
+
 The image contains the statically compiled connector and CA certificates, plus
 CAOS's normal additions. It contains no desktop, browser, Delta binary, native
 Delta credential store, or Docker-engine grant.
@@ -145,9 +318,10 @@ The connection reader now preserves notifications in order while correlating
 concurrent RPCs. A canceled or disconnected request is treated as an uncertain
 server outcome, not proof that its effects were canceled.
 
-The connector still needs a long-lived worker runtime, reconnect/lease handling,
-turn admission and ownership checks, history/workspace synchronization, and the
-bridge to CAOS's existing agent execution. A completed implementation must
+Beyond the isolated one-shot, the connector still needs a long-lived worker
+runtime, reconnect/lease handling, dispatch admission and ownership checks,
+continuous history/workspace synchronization, native tool segments, and file
+updates. A completed persistent implementation must
 demonstrate a real phone-initiated turn, including its reply and workspace
 changes, with the laptop disconnected. The current probe does not establish
 any of those outcomes.

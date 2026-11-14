@@ -37,7 +37,7 @@ use session_protocol::v3::{
 use worker_common::{read_arg, read_arg_opt};
 
 use crate::progress::{self, State, TryAppend};
-use crate::{forward_files, message_ordinal};
+use crate::{canonical_payload_bytes, forward_files, message_ordinal};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
@@ -76,7 +76,11 @@ impl Request {
             "prompt" => Kind::Prompt,
             "stop" => Kind::Stop,
             "failure" => Kind::Failure,
-            other => return Err(format!("--record is prompt, stop or failure, not {other:?}")),
+            other => {
+                return Err(format!(
+                    "--record is prompt, stop or failure, not {other:?}"
+                ));
+            }
         };
         let message_id = read_arg("message-id")?.trim().to_string();
         session_protocol::v3::ids::validate_client_key(&message_id)
@@ -93,7 +97,10 @@ impl Request {
             message_id,
             text: read_arg_opt("text")?.unwrap_or_default(),
             actor: read_arg("actor")?.trim().to_string(),
-            model: read_arg_opt("model")?.unwrap_or_default().trim().to_string(),
+            model: read_arg_opt("model")?
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             content,
             from,
         }))
@@ -108,14 +115,21 @@ pub(crate) fn run(session: &str, request: &Request) -> Result<(), String> {
                 // Another prompt may create it between our look and our push; the
                 // loser opens the winner's.
                 if let Some(state) = create(session, request)? {
-                    return forward(&state, if request.from.is_some() { "forked" } else { "created" });
+                    return forward(
+                        &state,
+                        if request.from.is_some() {
+                            "forked"
+                        } else {
+                            "created"
+                        },
+                    );
                 }
             }
             None => {
                 return Err(format!(
                     "no session {session:?} to record into; \
                      a session's first recorded event is its user prompt"
-                ))
+                ));
             }
         }
     };
@@ -181,6 +195,26 @@ fn entry(session: &str, request: &Request, role: Role) -> TranscriptEntry {
     }
 }
 
+fn message_transition(session: &str, request: &Request, role: Role) -> Result<Transition, String> {
+    // context_messages reads the provider blocks of every assistant entry.
+    // A closing message recorded by another harness must have that payload too,
+    // or the next ordinary model turn cannot read its conversation.
+    let payloads = if role == Role::Assistant {
+        vec![(
+            "response.json".to_string(),
+            canonical_payload_bytes(&serde_json::json!([
+                {"type": "text", "text": request.text}
+            ]))?,
+        )]
+    } else {
+        Vec::new()
+    };
+    Ok(Transition::MessageAppend {
+        entry: entry(session, request, role),
+        payloads,
+    })
+}
+
 /// The prompt, minted on top of `parent` and not yet pushed.
 fn mint_prompt(
     store: &mut GitStore,
@@ -189,10 +223,7 @@ fn mint_prompt(
     request: &Request,
     signature: &Signature,
 ) -> Result<Oid, String> {
-    let transition = Transition::MessageAppend {
-        entry: entry(session, request, Role::User),
-        payloads: Vec::new(),
-    };
+    let transition = message_transition(session, request, Role::User)?;
     let applied = apply(store, Some(parent), &transition)?;
     mint(store, parent, &applied, transition.kind(), signature)
 }
@@ -300,7 +331,7 @@ fn create_fork(session: &str, request: &Request, from: &Oid) -> Result<Option<St
                         "merging {locator} into the fork conflicts in {}; \
                          fork without it, or resolve that in the repository first",
                         paths.join(", ")
-                    ))
+                    ));
                 }
             };
             let mut content = TreeBuilder::from(Some(tree));
@@ -318,7 +349,9 @@ fn create_fork(session: &str, request: &Request, from: &Oid) -> Result<Option<St
             Some(commit) => commit.clone(),
             None => ensure_genesis(&mut store)?,
         };
-        legacy::migrate_v5(&mut store, from, session, &title, content, &parent, &signature)?
+        legacy::migrate_v5(
+            &mut store, from, session, &title, content, &parent, &signature,
+        )?
     } else {
         let transition = Transition::SessionFork {
             identity: Identity {
@@ -344,8 +377,7 @@ fn create_fork(session: &str, request: &Request, from: &Oid) -> Result<Option<St
     let mut state = State::from_store(store, refname.clone(), forked.clone())?;
     let claimed = mint_prompt(state.store_mut(), &forked, session, request, &signature)?;
     let active = session_protocol::v3::refs::active_membership_ref(&request.actor, session)?;
-    let archived =
-        session_protocol::v3::refs::archived_membership_ref(&request.actor, session)?;
+    let archived = session_protocol::v3::refs::archived_membership_ref(&request.actor, session)?;
     // Negotiated: the content commit's history is on the server under no
     // advertised ref, and only negotiation keeps it out of the pack.
     let created = create_or_join(state.store(), &refname, || {
@@ -475,11 +507,7 @@ fn stop(session: &str, state: &mut State, request: &Request) -> Result<&'static 
     append(session, state, request, Role::Assistant, "stop")
 }
 
-fn failure(
-    session: &str,
-    state: &mut State,
-    request: &Request,
-) -> Result<&'static str, String> {
+fn failure(session: &str, state: &mut State, request: &Request) -> Result<&'static str, String> {
     append(session, state, request, Role::System, "failure")
 }
 
@@ -497,10 +525,7 @@ fn append(
             return Ok("recorded");
         }
         let expected = state.head().clone();
-        let transition = Transition::MessageAppend {
-            entry: entry(session, request, role),
-            payloads: Vec::new(),
-        };
+        let transition = message_transition(session, request, role)?;
         match state.try_append_at(&expected, transition)? {
             TryAppend::Appended(_) => return Ok("recorded"),
             TryAppend::HeadChanged(_) => continue,
@@ -509,4 +534,72 @@ fn append(
     Err(format!(
         "session {session:?} kept changing while its {what} was recorded"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session_protocol::v3::MemoryStore;
+
+    #[test]
+    fn recorded_closing_message_is_readable_by_the_normal_model_driver() {
+        let session = "recorded-context";
+        let mut store = MemoryStore::new();
+        let genesis = ensure_genesis(&mut store).unwrap();
+        let signature = client_signature("harness", "harness@example.invalid", 1);
+        let root = Transition::SessionRoot {
+            identity: Identity {
+                id: session.to_string(),
+                kind: IdentityKind::Root,
+                owner: None,
+            },
+            title: "recorded conversation".to_string(),
+            content: None,
+        };
+        let applied = apply(&mut store, None, &root).unwrap();
+        let mut head = mint(&mut store, &genesis, &applied, root.kind(), &signature).unwrap();
+        for (role, kind, message_id, text) in [
+            (
+                Role::User,
+                Kind::Prompt,
+                "00000000000000000000000000000001",
+                "first prompt",
+            ),
+            (
+                Role::Assistant,
+                Kind::Stop,
+                "00000000000000000000000000000002",
+                "  A quoted \"answer\" 😀\n",
+            ),
+            (
+                Role::User,
+                Kind::Prompt,
+                "00000000000000000000000000000003",
+                "next prompt",
+            ),
+        ] {
+            let request = Request {
+                kind,
+                message_id: message_id.to_string(),
+                text: text.to_string(),
+                actor: "external-harness".to_string(),
+                model: "external-model".to_string(),
+                content: None,
+                from: None,
+            };
+            let transition = message_transition(session, &request, role).unwrap();
+            let applied = apply(&mut store, Some(&head), &transition).unwrap();
+            head = mint(&mut store, &head, &applied, transition.kind(), &signature).unwrap();
+        }
+        let view = Session::open(&store, &head).unwrap();
+        let context = crate::context_messages(&view).unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!([
+                {"role":"user", "content":"first prompt"},
+                {"role":"assistant", "content":[{"type":"text", "text":"  A quoted \"answer\" 😀\n"}]},
+                {"role":"user", "content":"next prompt"}
+            ]).as_array().unwrap().clone()
+        );
+    }
 }

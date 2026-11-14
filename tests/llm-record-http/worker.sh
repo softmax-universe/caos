@@ -121,6 +121,7 @@ record stop "$s1" "I read it."
 [ "$status" = recorded ] || fail "the stop was '$status'"
 [ "$(roles)" = user,assistant,assistant ] || fail "the stop recorded $(roles)"
 [ "$(newest_text)" = "I read it." ] || fail "the closing message is '$(newest_text)'"
+closing_head=$recorded_head
 record stop "$s1" "I read it."
 [ "$status" = recorded ] || fail "a repeated stop was '$status'"
 [ "$(roles)" = user,assistant,assistant ] || fail "a repeated stop recorded again"
@@ -141,6 +142,29 @@ record failure "$(new_id)" "overloaded_error: try later"
   || fail "the prompt and failure recorded $(roles)"
 [ "$(newest_text)" = "overloaded_error: try later" ] \
   || fail "the failure message is '$(newest_text)'"
+
+stage "export the normal model context at the pinned closing head, without inference"
+code=$(curl -sS -X POST -o /tmp/export.body -w '%{http_code}' \
+  --data-urlencode "base:hash=$LLM_TEST_LLM_STEP" --data-urlencode "session=$conv" \
+  --data-urlencode "head:hash=$closing_head" --data-urlencode "export-context=1" \
+  --data-urlencode "salt=$SALT-export" "$server/eval/run") \
+  || fail "context export did not complete"
+[ "$code" = 200 ] || fail "context export: HTTP $code: $(cat /tmp/export.body)"
+exported=$(cat /tmp/export.body)
+case "$exported" in "tree "*) exported=${exported#tree } ;; *) fail "context export did not return a tree" ;; esac
+caos get-hash "$exported" /cas/exported-context || fail "reading context export"
+caos get /cas/exported-context || fail "expanding context export"
+caos get /cas/exported-context/messages.json || fail "reading exported messages"
+jq -e '
+  length == 4 and
+  .[0] == {"role":"user", "content":"read the greeting"} and
+  .[1].role == "assistant" and .[1].content[0].type == "tool_use" and
+  .[2].role == "user" and .[2].content[0].type == "tool_result" and
+  .[3] == {"role":"assistant", "content":[{"type":"text", "text":"I read it."}]}
+' /cas/exported-context/messages.json >/dev/null \
+  || fail "context export lost roles, tool results, or the recorded closing message"
+[ "$(caos hash /cas/exported-context/session)" = "$closing_head" ] \
+  || fail "context export returned the current head instead of the pinned one"
 
 stage "a stop for a session nobody created is refused"
 code=$(curl -sS -X POST -o /tmp/none.body -w '%{http_code}' \

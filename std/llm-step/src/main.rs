@@ -92,6 +92,10 @@ struct Config {
     /// that drives the model itself has to publish these declarations to it,
     /// and they belong to the step that implements them.
     list_tools: bool,
+    /// Export the model context at an explicitly pinned session head. Protocol
+    /// adapters use this same renderer instead of rebuilding tool-result and
+    /// signed-thinking history from a second implementation.
+    export_context: bool,
     merge_refs: Option<String>,
     model: String,
     base_url: String,
@@ -139,11 +143,16 @@ impl Config {
         };
         let list_tools = read_arg_opt("list-tools")?.is_some();
         let record = record::Request::read()?;
+        let export_context = read_arg_opt("export-context")?.is_some();
+        if export_context && (list_tools || record.is_some() || tools_only.is_some()) {
+            return Err("--export-context cannot be combined with another operation".to_string());
+        }
         // None of those modes reaches the model, so none may DEMAND what a
         // model call takes. The key especially: `caos mcp` runs Claude Code's
         // tools for a session whose model is Claude Code's own, and requiring
         // an Anthropic key of it would refuse a turn over a call nothing makes.
-        let answers_model = tools_only.is_none() && !list_tools && record.is_none();
+        let answers_model =
+            tools_only.is_none() && !list_tools && record.is_none() && !export_context;
         Ok(Self {
             api_key: match answers_model {
                 true => secret("anthropic-api-key")?,
@@ -160,6 +169,7 @@ impl Config {
             max_result_chars,
             record,
             list_tools,
+            export_context,
             merge_refs: read_arg_opt("merge-refs")?,
             model: match answers_model {
                 true => read_arg("model")?,
@@ -197,6 +207,18 @@ fn run() -> Result<(), String> {
         return record::run(&cfg.session, request);
     }
     let mut state = progress::State::open(&cfg.session)?;
+    if cfg.export_context {
+        let head = Oid::parse(&cas_hash(&arg("head"))?, "export head")?;
+        if !state.store().is_ancestor(&head, state.head())? {
+            return Err("export head is not on this session's spine".to_string());
+        }
+        let messages = context_messages(&state.session_at(&head)?)?;
+        let payload = canonical_payload_bytes(&Value::Array(messages))?;
+        return forward_files(
+            &head,
+            &[("messages.json", &payload), ("head", head.as_str().as_bytes())],
+        );
+    }
     timing::phase("state.open");
     let run_text = read_arg_opt("run")?.unwrap_or(own_args_tree()?);
     let request = Oid::parse(&run_text, "session request")?;

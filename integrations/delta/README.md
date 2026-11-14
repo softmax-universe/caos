@@ -3,10 +3,17 @@
 This integration implements a standalone Delta protocol participant in Go,
 backed by CAOS. It does not host the Delta application, a desktop, or a browser.
 
-**Authentication and machine registration work from a CAOS worker. Agent-turn
-execution and thread/workspace synchronization are still being implemented.**
-The current CAOS entry runs bounded connection and allowlisted history checks,
-not a persistent agent.
+**Authentication, machine registration, conversation replay, initial
+workspace-tree reconstruction, and a bounded one-shot agent bridge are
+implemented.** The one-shot path uses CAOS's existing tool-capable agent driver
+and publishes its completed reply to an isolated, allowlisted thread. It is not
+Personal Runner dispatch or a persistent, laptop-independent service; ongoing
+thread/workspace synchronization is still being implemented.
+
+The first live one-shot attempt reached the existing CAOS driver's Anthropic
+request, but the approved inference credential was rejected for insufficient
+credit. **No generated reply has been demonstrated in Delta yet.** See the
+connector's live-attempt record below; this is not an end-to-end success claim.
 
 - [Connector implementation and operator instructions](connector/README.md)
 - [Recovered protocol formats and offline reference checks](protocol/README.md)

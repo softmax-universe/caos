@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -36,11 +37,19 @@ type deltaID struct {
 }
 
 func decodeBinary(data []byte, size int) ([]byte, error) {
+	raw, err := decodeBytes(data)
+	if err != nil || len(raw) != size {
+		return nil, errors.New("invalid protocol binary length")
+	}
+	return raw, nil
+}
+
+func decodeBytes(data []byte) ([]byte, error) {
 	if len(data) == 0 || data[0] < 0xc4 || data[0] > 0xc6 {
 		return nil, errors.New("expected protocol binary")
 	}
 	var raw []byte
-	if err := msgpack.Unmarshal(data, &raw); err != nil || len(raw) != size {
+	if err := msgpack.Unmarshal(data, &raw); err != nil {
 		return nil, errors.New("invalid protocol binary length")
 	}
 	return raw, nil
@@ -53,6 +62,9 @@ func decodeString(data []byte) (string, error) {
 	}
 	var value string
 	err := msgpack.Unmarshal(data, &value)
+	if err == nil && !utf8.ValidString(value) {
+		err = errors.New("invalid protocol UTF-8")
+	}
 	return value, err
 }
 

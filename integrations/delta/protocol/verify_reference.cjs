@@ -4,11 +4,22 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {recoverSchemas} = require('./schema_reference.cjs');
+const {verifyTextReference} = require('./text_reference.cjs');
+const {verifyValueReference} = require('./value_reference.cjs');
+const {anchorReference} = require('./anchor_reference.cjs');
+const {verifyHistoryWriteReference} = require('./history_write_reference.cjs');
+const {verifyMessageWriteReference} = require('./message_write_reference.cjs');
 
 const directory = process.argv[2];
-const schemaOutput = process.argv[3] === '--schema-output' ? process.argv[4] : null;
-if (!directory || !(process.argv.length === 3 || (process.argv.length === 5 && schemaOutput))) {
-  console.error('usage: node verify_reference.cjs <prepared-reference-directory> [--schema-output <file>]');
+const outputs = {};
+let valid = !!directory && (process.argv.length - 3) % 2 === 0;
+for (let index = 3; valid && index < process.argv.length; index += 2) {
+  const flag = process.argv[index];
+  valid = ['--schema-output', '--text-output'].includes(flag) && !Object.hasOwn(outputs, flag);
+  if (valid) outputs[flag] = process.argv[index + 1];
+}
+if (!valid) {
+  console.error('usage: node verify_reference.cjs <prepared-reference-directory> [--schema-output <file>] [--text-output <file>]');
   process.exit(2);
 }
 
@@ -35,7 +46,15 @@ async function main() {
     ['memory', 'init_memory', 'malloc', 'git_header_encode', 'git_header_decode',
       'start_turn_encode', 'set_local_encode', 'ack_local_encode', 'client_encode',
       'server_decode', 'history_path', 'thread_encode', 'thread_decode', 'field_push',
-      'schema_thread', 'schema_batch'].sort(),
+      'batch_decode', 'batch_encode', 'origin_decode', 'origin_encode',
+      'text_empty', 'text_string', 'text_clone', 'text_apply', 'edit_decode',
+      'edit_encode', 'batch_payload_id',
+      'text_create', 'scratch_decode', 'fragment_decode', 'fragment_offset',
+      'buffer_decode', 'anchor_decode', 'anchor_resolve', 'anchor_resolve_visible',
+      'snapshot_empty', 'snapshot_clone', 'map_insert', 'map_remove', 'map_get',
+      'map_values', 'map_winner', 'map_insert_decode', 'map_remove_decode',
+      'schema_thread', 'schema_batch', 'message_decode', 'message_encode',
+      'actor_decode', 'actor_encode', 'actor_metadata_decode', 'actor_metadata_encode'].sort(),
   );
   const imports = {};
   const hostCalls = [];
@@ -87,9 +106,13 @@ async function main() {
     const data = Buffer.from(hex, 'hex');
     const input = alloc(data.length);
     bytes().set(data, input);
-    const slice = alloc(8), output = alloc(size), fieldId = alloc(24);
-    u32(slice, input);
-    u32(slice + 4, data.length);
+    const slice = alloc(32), output = alloc(size), fieldId = alloc(24);
+    const bytesReader = ['message_decode', 'actor_decode', 'actor_metadata_decode'].includes(name);
+    // This pinned Bytes layout stores its borrowed pointer/length at 4/8.
+    // These pure codecs copy bytes without invoking its ownership vtable.
+    const pointerOffset = bytesReader ? 4 : 0;
+    u32(slice + pointerOffset, input);
+    u32(slice + pointerOffset + 4, data.length);
     if (fieldPath !== null) {
       assert.ok(fieldPath.length <= 15);
       // Pinned Option<FieldId>: Some flag, then a 16-byte inline FieldId.
@@ -98,7 +121,7 @@ async function main() {
       bytes().set(fieldPath, fieldId + 2);
     }
     e[name](output, slice, fieldId);
-    return {output, remaining: view().getUint32(slice + 4, true)};
+    return {output, remaining: view().getUint32(slice + pointerOffset + 4, true)};
   };
   const readHex = (pointer, length) =>
     Buffer.from(bytes().slice(pointer, pointer + length)).toString('hex');
@@ -330,12 +353,23 @@ async function main() {
     check('FieldId path', readHex(next + 1, i + 1), Buffer.from(fieldPath.slice(0, i + 1)).toString('hex'));
     fieldId = next;
   }
+  const anchors = anchorReference(e, {alloc, bytes, view, u32, decode, check});
+  const textCases = verifyTextReference(e, {alloc, bytes, view, u32, u64, encode, decode, check, anchors});
+  verifyValueReference(e, {alloc, bytes, view, u64, decode, check});
+  verifyHistoryWriteReference(e, {alloc, bytes, u32, copyHex, encode, decode, check});
+  verifyMessageWriteReference(e, {decode, encode, check});
   assert.deepEqual(hostCalls, []);
-  console.log(`PASS: ${checks} codec checks; 0 browser/network/storage calls`);
+  console.log(`PASS: ${checks} protocol/text checks; 0 browser/network/storage calls`);
   console.log(`Recovered ${Object.keys(schemas.definitions).length} thread/history schema descriptors`);
-  if (schemaOutput) {
-    fs.writeFileSync(schemaOutput, JSON.stringify({
+  console.log(`Generated ${textCases.length} native text-CRDT compatibility cases`);
+  if (outputs['--schema-output']) {
+    fs.writeFileSync(outputs['--schema-output'], JSON.stringify({
       version: metadata.version, build: metadata.build, ...schemas,
+    }) + '\n', {flag: 'wx'});
+  }
+  if (outputs['--text-output']) {
+    fs.writeFileSync(outputs['--text-output'], JSON.stringify({
+      version: metadata.version, build: metadata.build, cases: textCases,
     }) + '\n', {flag: 'wx'});
   }
   console.log(`Reference: Delta ${metadata.version}, build ${metadata.build}`);

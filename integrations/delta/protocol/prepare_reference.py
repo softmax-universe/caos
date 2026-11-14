@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expose only selected codecs from a pinned, public Delta Web debug module."""
+"""Expose selected codecs and pure state operations from a pinned public module."""
 
 import argparse
 import hashlib
@@ -16,6 +16,18 @@ URL = f"https://cdn.delta.dev/delta-web/production/{BUILD}/symbols/{ASSET}"
 HEADER = b"\0asm\1\0\0\0"
 ENCODE = "encode_versioned::<alloc::vec::Vec<u8>>"
 DECODE = "decode_versioned::<&[u8]>"
+BYTES_DECODE = "decode_versioned::<bytes::buf::reader::Reader<bytes::bytes::Bytes>>"
+ARC_ALLOCATOR = "delta_collections::allocator::ArcAllocator"
+TEXT_TYPE = f"deltadb::text::Text<deltadb::delta::DeltaId, {ARC_ALLOCATOR}>"
+SNAPSHOT_TYPE = f"deltadb::history::HistorySnapshot<{ARC_ALLOCATOR}, deltadb::history::WorktreeFile>"
+VALUE_MAP_TYPE = (
+    f"delta_collections::cow_hash_map::CowHashMap<bytes::bytes::Bytes, "
+    f"deltadb::history::MapValues, {ARC_ALLOCATOR}>"
+)
+MAPS_TYPE = (
+    f"delta_collections::cow_hash_map::CowHashMap<deltadb::history::MapId, "
+    f"{VALUE_MAP_TYPE}, {ARC_ALLOCATOR}>"
+)
 
 
 def codec(type_name, method):
@@ -32,11 +44,74 @@ FUNCTIONS = {
     "ack_local_encode": codec("AcknowledgeLocalMachineTurn", ENCODE),
     "client_encode": codec("ClientMessage", ENCODE),
     "server_decode": codec("ServerMessage", DECODE),
+    "batch_decode": f"<deltadb::history::HistoryDeltaBatch as versioned::Versioned>::{DECODE}",
+    "batch_encode": f"<deltadb::history::HistoryDeltaBatch as versioned::Versioned>::{ENCODE}",
+    "origin_decode": f"<deltadb::history::TimelineOrigin as versioned::Versioned>::{DECODE}",
+    "origin_encode": f"<deltadb::history::TimelineOrigin as versioned::Versioned>::{ENCODE}",
     "history_path": "delta_remote_protocol::history_websocket_path",
     "thread_encode": f"<thread::ThreadDataStub as versioned::Versioned>::{ENCODE}",
     "thread_decode": f"<thread::ThreadDataStub as versioned::Versioned>::{DECODE}",
     "field_push": "<versioned::FieldId>::push",
+    "text_empty": (
+        "<deltadb::text::Text<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator>>::empty"
+    ),
+    "text_string": (
+        "<deltadb::text::Text<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator>>::to_string"
+    ),
+    "text_clone": (
+        "<deltadb::text::Text<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator> as core::clone::Clone>::clone"
+    ),
+    "text_apply": (
+        "<deltadb::text::Text<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator>>::apply_edit::<"
+        "delta_collections::allocator::ArcAllocator>"
+    ),
+    "edit_decode": f"<deltadb::text::EditTextDelta as versioned::Versioned>::{DECODE}",
+    "edit_encode": f"<deltadb::text::EditTextDelta as versioned::Versioned>::{ENCODE}",
+    "batch_payload_id": "<deltadb::history::HistoryDeltaBatch>::payload_id",
+    "text_create": (
+        "<deltadb::text::Text<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator> as "
+        "deltadb::history::ScratchBufferPayload>::from_create"
+    ),
+    "scratch_decode": f"<deltadb::history::CreateScratchBufferDelta as versioned::Versioned>::{DECODE}",
+    "fragment_decode": (
+        "<deltadb::fragment_index::FragmentId<deltadb::delta::DeltaId> "
+        f"as versioned::Versioned>::{DECODE}"
+    ),
+    "fragment_offset": (
+        "<deltadb::fragment_index::FragmentIndex<deltadb::delta::DeltaId, "
+        "delta_collections::allocator::ArcAllocator>>::offset_and_visibility_for_fragment_id"
+    ),
+    "buffer_decode": f"<deltadb::history::BufferId as versioned::Versioned>::{DECODE}",
+    "anchor_decode": f"<deltadb::buffer_anchor::BufferAnchorStub as versioned::Versioned>::{DECODE}",
+    "anchor_resolve": "<deltadb::client::BufferSnapshot>::resolve_anchor",
+    "anchor_resolve_visible": "<deltadb::client::BufferSnapshot>::resolve_visible_anchor",
+    "snapshot_empty": f"<{SNAPSHOT_TYPE}>::new",
+    "snapshot_clone": f"<{SNAPSHOT_TYPE} as core::clone::Clone>::clone",
+    "map_insert": (
+        f"<{SNAPSHOT_TYPE}>::apply_map_insert::<{ARC_ALLOCATOR}, "
+        f"deltadb::history::WorktreeFile, {TEXT_TYPE}>"
+    ),
+    "map_remove": (
+        f"<{SNAPSHOT_TYPE}>::apply_map_remove::<{ARC_ALLOCATOR}, "
+        f"deltadb::history::WorktreeFile, {TEXT_TYPE}>"
+    ),
+    "map_get": f"<{MAPS_TYPE}>::get::<deltadb::history::MapId>[3]",
+    "map_values": f"<{VALUE_MAP_TYPE}>::get::<bytes::bytes::Bytes>",
+    "map_winner": "<deltadb::history::MapValues>::get",
+    "map_insert_decode": f"<deltadb::history::MapInsertDelta as versioned::Versioned>::{DECODE}",
+    "map_remove_decode": f"<deltadb::history::MapRemoveDelta as versioned::Versioned>::{DECODE}",
     "schema_thread": "<thread::ThreadDataStub as versioned::Versioned>::versioned_schema",
+    "message_decode": f"<thread::message_segment::MessageSegmentStub as versioned::Versioned>::{BYTES_DECODE}",
+    "message_encode": f"<thread::message_segment::MessageSegmentStub as versioned::Versioned>::{ENCODE}",
+    "actor_decode": f"<deltadb::delta::ActorIdStub as versioned::Versioned>::{BYTES_DECODE}",
+    "actor_encode": f"<deltadb::delta::ActorIdStub as versioned::Versioned>::{ENCODE}",
+    "actor_metadata_decode": f"<thread::message_segment::AgentActorMetadataStub as versioned::Versioned>::{BYTES_DECODE}",
+    "actor_metadata_encode": f"<thread::message_segment::AgentActorMetadataStub as versioned::Versioned>::{ENCODE}",
     "schema_batch": (
         "<versioned::schema::SchemaCollector>::register::<"
         "deltadb::history::HistoryDeltaBatch, "
@@ -140,7 +215,8 @@ def selected_names(data, start, end):
             names = Reader(data, reader.pos, stop)
             for _ in range(names.uint()):
                 index, name = names.uint(), names.text()
-                normalized = re.sub(r"\[[0-9a-f]+\]", "", name)
+                # Short numeric suffixes distinguish compiler clones.
+                normalized = re.sub(r"\[[0-9a-f]{6,}\]", "", name)
                 if normalized in wanted:
                     export = wanted[normalized]
                     if export in found:
@@ -195,7 +271,7 @@ def main():
     with args.debug_wasm.open("rb") as source:
         with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
             prepare(data, args.output_dir)
-    print(f"Prepared codec-only exports in {args.output_dir}")
+    print(f"Prepared codec/state reference exports in {args.output_dir}")
 
 
 if __name__ == "__main__":

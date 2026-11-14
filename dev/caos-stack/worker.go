@@ -165,7 +165,8 @@ func route() {
 		caos("run-request-then", request, "--then:hash="+next("env"))
 		return
 	}
-	caos("run-request-then", request)
+	// The daemon's reply is a blob; `answer` wraps it as the result tree.
+	caos("run-request-then", request, "--then:hash="+next("answer"))
 }
 
 // setupScript is a cloud environment's setup for a session that installs the

@@ -147,9 +147,9 @@ func route() {
 		return
 	}
 
-	tree := caos("hash", "/cas/args/in")
+	tree := caos("hash", in)
 	args := []string{"prepare-request", "--base:@=/cas/args/daemon", "--affinity=" + tree,
-		"--op=" + op, "--in:@=/cas/args/in"}
+		"--op=" + op, "--in:@=" + in}
 	for _, name := range []string{"request-id", "relay", "advertise", "log", "cursor", "refs"} {
 		if has(name) {
 			args = append(args, "--"+name+":@=/cas/args/"+name)

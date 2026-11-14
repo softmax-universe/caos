@@ -89,7 +89,8 @@ jobs:
           gc-max-store-size-linux: 5G
 
       # ONE build feeds two consumers: the release assets below, and the
-      # hosts' binary cache. The hosts in prod/ (caosd-prod, watchdog-prod)
+      # hosts' binary cache. The hosts in prod/ (caosd-prod, watchdog-prod,
+      # runner-prod)
       # never build caos -- the watchdog is a t3.small that cannot compile
       # the workspace, and the server should not spend its deploy rebuilding
       # 498 crates -- so every push also pushes the signed closures to the
@@ -97,8 +98,8 @@ jobs:
       # the bucket and roles are metta's devops/tf/caos). A deploy then
       # only fetches. caos-tools contains the caos-cli the release ships,
       # plus git-remote-caos and caos-iroh; the deploy driver and the
-      # watchdog's whole system closure (so even its first boot from a bare
-      # AMI is a download) ride along. caosd-prod's own system closure is
+      # watchdog's and runners' whole system closures (so even a first boot
+      # from a bare AMI is a download) ride along. caosd-prod's own system closure is
       # not built here: it takes a per-machine advertise address the driver
       # reads off the host (prod/README.md), so its toplevel is impure, and
       # caos-tools is nearly all of it anyway.
@@ -121,6 +122,7 @@ jobs:
             --option extra-trusted-public-keys caos-cache-1:3BSj35RzBLAtUyTlJlLO3xa9b7uYFtIJIx17Jri8lPs= \
             .#caos-cli .#caos-tools .#deploy-caosd-prod \
             .#nixosConfigurations.watchdog-prod.config.system.build.toplevel \
+            .#nixosConfigurations.runner-prod.config.system.build.toplevel \
             | tee paths
           # `result` is what the staging step below reads.
           nix build .#caos-cli

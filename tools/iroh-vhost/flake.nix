@@ -11,13 +11,7 @@
     in
     {
       packages = forAll (pkgs: rec {
-        iroh-vhost = pkgs.rustPlatform.buildRustPackage {
-          pname = "iroh-vhost";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          meta.mainProgram = "iroh-vhost";
-        };
+        iroh-vhost = pkgs.callPackage ./package.nix { };
         default = iroh-vhost;
       });
       devShells = forAll (pkgs: {

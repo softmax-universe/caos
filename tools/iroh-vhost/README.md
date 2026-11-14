@@ -42,6 +42,18 @@ client sent. Bodies pass through unchanged (Content-Length and chunked), and an
 `Upgrade` (websocket) request switches the connection to a plain byte copy after
 its head.
 
+## `pin`: one ticket per port, any TCP
+
+    iroh-vhost pin 127.0.0.1:5000=/run/registry-ticket 0.0.0.0:6379=/run/redis-ticket
+
+For a client that cannot carry a ticket: a docker daemon pulling
+`localhost:5000/...`, a redis client. Each listener is bound to the ticket in its
+file, read once at startup, and every connection to it is spliced to that
+endpoint unread, so the protocol need not be HTTP. A failed dial is a hangup
+(there is no HTTP to put a 502 in) with the reason on stderr. A caos runner
+on another machine uses it to reach its server's API, registry and redis
+(`prod/runner` in this repo).
+
 ## Limits
 
 Plain HTTP only. `Location:` headers and other URLs in responses are not

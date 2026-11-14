@@ -148,6 +148,16 @@ pub const AFFINITY_ARG: &str = "affinity";
 
 #[cfg(test)]
 mod tests {
+    /// The server records under, and the hook prints, the oid of these bytes:
+    /// changing them renames every session's trace.
+    #[test]
+    fn a_session_trace_ticket_hashes_the_session_id_alone() {
+        assert_eq!(
+            super::session_trace_material("cc/abc"),
+            br#"["session","cc/abc"]"#
+        );
+    }
+
     use super::*;
 
     #[test]

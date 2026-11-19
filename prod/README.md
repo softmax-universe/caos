@@ -186,7 +186,8 @@ they reach more — the registry and an unauthenticated redis — so they go onl
 runner hosts, and rotating them does not touch anyone's `caos://` remote.
 
 Copy them into Secrets Manager once, from a shell on caosd-prod; they survive
-restarts, like the client ticket:
+restarts, like the client ticket. `caosd runner-ticket` prints the bare endpoint
+ticket (no `caos://`), which is what the runner's `iroh-vhost pin` reads:
 
 ```sh
 for s in server registry redis; do

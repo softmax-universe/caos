@@ -19,6 +19,11 @@
 //! directories it needs, instead of forcing every such thing into a directory
 //! of its own.
 //!
+//! A path the tree's root `.caos-mounts` lists is a MOUNT: a finished tree that
+//! was deepened where it came from (a consumer's `caos-std/`, the repo's
+//! `caos-core/`). It is carried across by reference, never walked or fetched,
+//! and a dependency that lies inside one is mounted as-is (see `fetch`).
+//!
 //! ONE RUN, one pass — do not split it back into per-directory jobs. Recursing
 //! through `map_then` (a job to enumerate each directory, another to rebuild it)
 //! costs ~2N containers for N directories, and buys nothing: the enumerating
@@ -47,16 +52,108 @@ fn main() -> ExitCode {
     run_worker("deep-deps", run)
 }
 
+/// The file at the tree's root listing the paths in it that were MOUNTED —
+/// grafted in as finished values by the evaluator's `graft` or by
+/// `std/flake-input-loader` (`caos_eval::MOUNTS_FILE`, same name and format:
+/// one path per line, relative to the root).
+const MOUNTS_FILE: &str = ".caos-mounts";
+
 fn run() -> Result<(), String> {
     let input = arg("in");
-    // The whole tree, in full: this pass reads every directory, and one
-    // recursive fetch is one round trip instead of one per directory.
-    caos(["get", "-r", &input])?;
+    let mounts = fetch(&input)?;
 
     let staged = scratch("out")?;
     let mut memo: HashMap<String, PathBuf> = HashMap::new();
-    deepen(&input, "", &staged, &mut memo, &mut Vec::new())?;
+    let mut pass = Pass {
+        base: &input,
+        mounts: &mounts,
+        memo: &mut memo,
+        visiting: Vec::new(),
+    };
+    deepen(&mut pass, "", &staged)?;
     caos(["put", path(&staged), "/cas/out"])
+}
+
+/// Materialize what this pass reads, and return the tree's mounts.
+///
+/// A MOUNT IS A FINISHED TREE (design/nix-bootstrap.md): it was evaluated —
+/// deepened — where it came from, so every `DEEP-DEPS/` in it is already filled
+/// and its `DEPS` name paths that only mean something THERE (std's
+/// `../../rust/crates/…`, from inside a consumer's `caos-std/`). So it is never
+/// walked, never deepened again, and never fetched: it is carried across by
+/// reference. That also keeps this pass from materializing a mounted core's
+/// image deltas, which are hundreds of MB and have no `DEPS` to find.
+///
+/// Without a `.caos-mounts` the whole tree is fetched in one recursive round
+/// trip, as before.
+fn fetch(input: &str) -> Result<Vec<String>, String> {
+    caos(["get", input])?;
+    let list = Path::new(input).join(MOUNTS_FILE);
+    if !list.exists() {
+        caos(["get", "-r", input])?;
+        return Ok(Vec::new());
+    }
+    caos(["get", path(&list)])?;
+    let text = fs::read_to_string(&list).map_err(|e| format!("reading {MOUNTS_FILE}: {e}"))?;
+    let mut mounts = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mount = normalize(line)?;
+        if mount.is_empty() {
+            return Err(format!("{MOUNTS_FILE} lists the root itself"));
+        }
+        mounts.push(mount);
+    }
+    fetch_except(input, "", &mounts)?;
+    Ok(mounts)
+}
+
+/// Fetch the directory at `rel` and everything below it EXCEPT the mounts: in
+/// one recursive round trip where no mount lies below, else level by level
+/// down to the mounts' parents.
+fn fetch_except(base: &str, rel: &str, mounts: &[String]) -> Result<(), String> {
+    let dir = full(base, rel);
+    if !mounts.iter().any(|m| strictly_under(m, rel)) {
+        return caos(["get", "-r", &dir]);
+    }
+    caos(["get", &dir])?;
+    for entry in entries(&dir)? {
+        let child = join(rel, &file_name(&entry));
+        if mounts.contains(&child) {
+            continue;
+        }
+        let meta =
+            fs::symlink_metadata(&entry).map_err(|e| format!("stat {}: {e}", entry.display()))?;
+        if meta.is_dir() {
+            fetch_except(base, &child, mounts)?;
+        } else if file_name(&entry) == "DEPS" {
+            caos(["get", path(&entry)])?; // the one file this pass reads
+        }
+    }
+    Ok(())
+}
+
+/// The mount `p` is at or below, if any.
+fn mount_of<'m>(mounts: &'m [String], p: &str) -> Option<&'m String> {
+    mounts
+        .iter()
+        .find(|m| p == m.as_str() || strictly_under(p, m))
+}
+
+/// Whether `p` lies strictly below the directory `dir` (`""` is the root).
+fn strictly_under(p: &str, dir: &str) -> bool {
+    if dir.is_empty() {
+        !p.is_empty()
+    } else {
+        p.len() > dir.len() && p.starts_with(dir) && p.as_bytes()[dir.len()] == b'/'
+    }
+}
+
+fn full(base: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{rel}")
+    }
 }
 
 /// Deepen the directory at `rel` within the materialized tree at `base`, staging
@@ -66,19 +163,18 @@ fn run() -> Result<(), String> {
 /// `memo` maps an absolute tree path to a staged directory already deepened, so
 /// a dependency reached twice is computed once. `visiting` is the current
 /// dependency chain, and it is what catches a cycle — one pass makes no server
-/// round trip, so there is no run-cycle detection to fall back on.
-fn deepen(
-    base: &str,
-    rel: &str,
-    into: &Path,
-    memo: &mut HashMap<String, PathBuf>,
-    visiting: &mut Vec<String>,
-) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}/{rel}")
-    };
+/// round trip, so there is no run-cycle detection to fall back on. `mounts`
+/// are carried across by reference and never walked ([`fetch`]).
+struct Pass<'a> {
+    base: &'a str,
+    mounts: &'a [String],
+    memo: &'a mut HashMap<String, PathBuf>,
+    visiting: Vec<String>,
+}
+
+fn deepen(pass: &mut Pass, rel: &str, into: &Path) -> Result<(), String> {
+    let base = pass.base;
+    let dir = full(base, rel);
 
     let mut deps_file: Option<PathBuf> = None;
     let mut subdirs: Vec<(String, PathBuf)> = Vec::new();
@@ -86,7 +182,9 @@ fn deepen(
         let name = file_name(&entry);
         let meta =
             fs::symlink_metadata(&entry).map_err(|e| format!("stat {}: {e}", entry.display()))?;
-        if meta.is_dir() {
+        if pass.mounts.contains(&join(rel, &name)) {
+            link(&entry, into.join(&name))?; // a mount: finished, carried by reference
+        } else if meta.is_dir() {
             subdirs.push((name, entry));
         } else if name == "DEPS" {
             deps_file = Some(entry); // replaced by DEEP-DEPS, never an own file
@@ -99,7 +197,7 @@ fn deepen(
     for (name, _) in &subdirs {
         let child = into.join(name);
         fs::create_dir_all(&child).map_err(|e| format!("creating {}: {e}", child.display()))?;
-        deepen(base, &join(rel, name), &child, memo, visiting)?;
+        deepen(pass, &join(rel, name), &child)?;
     }
 
     let Some(deps) = deps_file else {
@@ -121,6 +219,14 @@ fn deepen(
             return Err(format!(
                 "directory {rel:?} declares two deps mounted as {mount:?}"
             ));
+        }
+        // A dependency INSIDE a mount (`../../caos-core/rustc`) is mounted as
+        // the finished object it is: never deepened again, and nothing under
+        // it fetched beyond the levels needed to name it.
+        if let Some(mount) = mount_of(pass.mounts, &target) {
+            let target_path = reach_into_mount(base, mount, &target)?;
+            link(&target_path, &at)?;
+            continue;
         }
         // A FILE dependency is mounted, not deepened: there is nothing under it
         // to walk and no `DEPS` it could carry, so the mount IS the file. This
@@ -147,23 +253,37 @@ fn deepen(
         // subtree belongs. Copying the staged structure (all symlinks, so no
         // content moves) yields the identical tree, and identical trees are one
         // object.
-        if let Some(done) = memo.get(&target) {
-            copy_staged(&done.clone(), &at)?;
+        if let Some(done) = pass.memo.get(&target).cloned() {
+            copy_staged(&done, &at)?;
             continue;
         }
-        if visiting.contains(&target) {
+        if pass.visiting.contains(&target) {
             return Err(format!(
                 "dependency cycle: {} -> {target:?}",
-                visiting.join(" -> ")
+                pass.visiting.join(" -> ")
             ));
         }
-        visiting.push(target.clone());
+        pass.visiting.push(target.clone());
         fs::create_dir_all(&at).map_err(|e| format!("creating {}: {e}", at.display()))?;
-        deepen(base, &target, &at, memo, visiting)?;
-        visiting.pop();
-        memo.insert(target, at);
+        deepen(pass, &target, &at)?;
+        pass.visiting.pop();
+        pass.memo.insert(target, at);
     }
     Ok(())
+}
+
+/// The `/cas` path of `target`, which lies at or under `mount`: fetches the
+/// levels between them (one directory each) and nothing else.
+fn reach_into_mount(base: &str, mount: &str, target: &str) -> Result<String, String> {
+    let mut at = mount.to_string();
+    for comp in target[mount.len()..].split('/').filter(|c| !c.is_empty()) {
+        caos(["get", &full(base, &at)])?;
+        at = join(&at, comp);
+    }
+    let p = full(base, target);
+    fs::symlink_metadata(&p)
+        .map_err(|e| format!("dependency {target:?}, inside the mount {mount:?}: {e}"))?;
+    Ok(p)
 }
 
 // ---- helpers -------------------------------------------------------------------

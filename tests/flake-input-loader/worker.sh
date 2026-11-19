@@ -36,8 +36,9 @@ REPO='git+file:///synthetic/input'
 # The input to splice: a plain tree, standing in for whatever a locator would
 # have resolved to. The loader takes it as `--input-tree` either way.
 input_tree() {
-  rm -rf /tmp/input && mkdir -p /tmp/input/thing
+  rm -rf /tmp/input && mkdir -p /tmp/input/thing /tmp/input/other
   printf 'from the input\n' > /tmp/input/thing/file
+  printf 'other part\n' > /tmp/input/other/x
   caos put /tmp/input /cas/input >/dev/null || fail "publishing the input tree"
   echo /cas/input
 }
@@ -77,6 +78,12 @@ load() { # <rev-the-expression-pins> [<output-path>] -> the ArgTree to run
     --input-tree:@="$(input_tree)" --output-path="$out"
 }
 
+load_mounts() { # <mounts> -> the ArgTree to run
+  caos curry --base:@=/cas/args/loader \
+    --expr:@="$(expr_pinning "$SHA" mounts)" --input=demo \
+    --input-tree:@="$(input_tree)" --mounts="$1"
+}
+
 case "$stage" in
 
 start)
@@ -101,6 +108,27 @@ spliced)
   [ "$(caos hash "$R/vendor/demo-std")" = "$(caos hash /cas/args/input)" ] \
     || fail "the mount is not the input tree that was passed in"
   echo "  ok: the mount is the input tree's own oid" >&2
+
+  [ "$(cat "$R/.caos-mounts")" = "vendor/demo-std" ] \
+    || fail ".caos-mounts does not list the mount: $(cat "$R/.caos-mounts" 2>&1)"
+  echo "  ok: .caos-mounts lists the mount" >&2
+
+  echo "== --mounts puts several parts of one input in several places ==" >&2
+  caos run-then "$(consumer)" --run:hash="$(load_mounts 'thing:vendor/a,other:b')" \
+    --then:hash="$(next mounted --input:@=/cas/input)"
+  ;;
+
+mounted)
+  R=/cas/args/result; caos get -r "$R" || fail "reading the mounted tree"
+  caos get -r /cas/args/input
+  [ "$(caos hash "$R/vendor/a")" = "$(caos hash /cas/args/input/thing)" ] \
+    || fail "vendor/a is not the input's thing/"
+  [ "$(caos hash "$R/b")" = "$(caos hash /cas/args/input/other)" ] \
+    || fail "b is not the input's other/"
+  [ "$(cat "$R/sibling.txt")" = "keep me" ] || fail "a sibling was lost"
+  [ "$(cat "$R/.caos-mounts")" = "$(printf 'b\nvendor/a')" ] \
+    || fail ".caos-mounts: $(cat "$R/.caos-mounts" 2>&1)"
+  echo "  ok: both parts mounted by oid, siblings kept, both listed" >&2
 
   echo "== '.' replaces the consumer's tree with the input ==" >&2
   caos run-then "$(consumer)" --run:hash="$(load "$SHA" .)" \

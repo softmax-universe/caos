@@ -70,6 +70,10 @@ image_names=()
 for name in "${names[@]}"; do
   if has_host_image "$name"; then image_names+=("$name"); fi
 done
+# The nix primitive's image (design/nix-bootstrap.md) streams like the others
+# but is NO std entry: nothing stages, deepens or seeds it. The server finds it
+# through CAOS_NIX_IMAGE_FILE, written below.
+image_names+=(nix)
 
 # caos-cli: a prebuilt binary if the caller injected one (CAOS_CLI — how caosd
 # runs us from a store copy with no `nix` at runtime), else built from the flake.
@@ -361,6 +365,24 @@ done
 runner_delta=${hash_of[runner]:-}
 cargo_delta=${hash_of[cargo]:-}
 fb_delta=${hash_of[flake-builder]:-}
+
+# The nix primitive's image (design/nix-bootstrap.md): `caos-worker-nix`, whose
+# /worker builds a flake attribute and adds nothing. The server reads it per
+# `nix:v1` job from the file `stack/serve` names; it is never part of a key.
+# Written whole and renamed, so a reader never sees half.
+#
+# PUSHED FIRST. The delta is assembled in CLIENT, and the other images reach
+# the server only because a seed record names them; nothing names this one, so
+# without its own push the server holds a hash it cannot read ("converting git
+# image <hash>: object not found"). Same content-addressed refspec as the seed
+# tree below, for the same reasons.
+nix_delta=${hash_of[nix]:-}
+if [ -n "${CAOS_NIX_IMAGE_FILE:-}" ] && [ -n "$nix_delta" ]; then
+  git -C "$CLIENT" push -q --force caos "$nix_delta:refs/caos/req/$nix_delta"
+  printf '%s\n' "$nix_delta" > "$CAOS_NIX_IMAGE_FILE.tmp"
+  mv "$CAOS_NIX_IMAGE_FILE.tmp" "$CAOS_NIX_IMAGE_FILE"
+  echo "nix primitive: $nix_delta" >&2
+fi
 
 # Map each worker binary to the store path that CONTAINS it (bin/worker-<b>) —
 # every worker binary shares one workspace store path, so existence of

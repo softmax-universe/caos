@@ -74,11 +74,17 @@ execution deadline.
 4. **The session environment.** Sessions install the caos that the
    `caos-session` repo pins, not `main`. Move the pin there (its README,
    "Moving the pin": `nix flake update caos`, then both `rev=` values in
-   `.caos-expr`), merge it, then bump the first-line date of the `Caos`
+   `.caos-expr`), land it, then bump the first-line date of the `Caos`
    environment's setup script with `drive env-update`
    (`integrations/claude-code/drive`), which takes the whole script. Change
    only that line. `drive env-show` and `env-update` print the setup line, which
    holds the server ticket and the reader key: redact the output.
+
+   `caos-session` has no branch protections, so the pin commit can go straight
+   to `main` instead of through a PR: it is `nix flake update caos` plus both
+   `rev=` edits, and earlier pin commits there were pushed that way. A direct
+   push skips review, so pin only a commit whose release build succeeded
+   (step 1).
 
 Check it with a fresh session: `drive start --env=Caos
 --repo=softmax-universe/caos-session` asking for the `caos_status` tool.

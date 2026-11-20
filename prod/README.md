@@ -34,6 +34,66 @@ the driver and the host config it applies are always the same revision. Passing
 a ref means only "build from somewhere else" — it is not needed to make a
 branch deploy itself.
 
+### Rolling out a revision
+
+A push to `main` is live in four places. Do them in this order, with one
+revision (`REV=$(git rev-parse origin/main)`) used in every step. The server
+restart drops everything in flight, so a runner switched right after it loses
+nothing; a runner restarted alone can strand a claimed job, which has no
+execution deadline.
+
+1. **Wait for the `release` workflow on that commit.** It fills the binary
+   cache. Until it finishes, a host deploy builds instead of substituting.
+2. **The server.** The driver reads the host's own facts, so run it on
+   caosd-prod, over SSM, pinned to `REV`. `systemd-run` keeps it alive through
+   the caosd restart, but gives it no PATH:
+
+   ```sh
+   systemd-run --unit=caos-deploy --collect --setenv=HOME=/root \
+     --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin \
+     --setenv=NIX_CONFIG='experimental-features = nix-command flakes' \
+     nix run "github:Metta-AI/caos/$REV#deploy-caosd-prod" --refresh
+   ```
+
+   About 45 s; `caosd` restarts. Note `readlink -f /run/current-system` first:
+   that is the rollback target. The runner iroh endpoints, and so the tickets,
+   survive the restart.
+3. **Each runner**, over SSM, on every instance of the `caos-runner`
+   autoscaling group (a host that booted since the last rollout started at
+   whatever `main` was then):
+
+   ```sh
+   systemd-run --wait --collect --setenv=HOME=/root \
+     --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin \
+     nixos-rebuild switch --refresh \
+       --flake "github:softmax-universe/caos/$REV#runner-prod"
+   ```
+
+   Then `systemctl is-active caos-runner` and the three `iroh-vhost` lines in
+   `journalctl -u caos-runner`.
+4. **The session environment.** Sessions install the caos that the
+   `caos-session` repo pins, not `main`. Move the pin there (its README,
+   "Moving the pin": `nix flake update caos`, then both `rev=` values in
+   `.caos-expr`), land it, then bump the first-line date of the `Caos`
+   environment's setup script with `drive env-update`
+   (`integrations/claude-code/drive`), which takes the whole script. Change
+   only that line. `drive env-show` and `env-update` print the setup line, which
+   holds the server ticket and the reader key: redact the output.
+
+   `caos-session` has no branch protections, so the pin commit can go straight
+   to `main` instead of through a PR: it is `nix flake update caos` plus both
+   `rev=` edits, and earlier pin commits there were pushed that way. A direct
+   push skips review, so pin only a commit whose release build succeeded
+   (step 1).
+
+Check it with a fresh session: `drive start --env=Caos
+--repo=softmax-universe/caos-session` asking for the `caos_status` tool.
+It should report the pin as `REV`, with no `STALE INSTALL`. Archive it after
+(`drive archive`).
+
+Tried once, on one runner. Several runners, and a revision whose runner
+protocol changed, have not been tried.
+
 ### Do not use `nixos-rebuild` directly
 
 ```sh

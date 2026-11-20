@@ -1,3 +1,5 @@
 ../../std/flake-builder flake-builder
 ../../std/go/prelude prelude
 ../../flake.lock flake.lock
+../../std/llm-step agent
+../../std/run-and-update-ref result-publisher

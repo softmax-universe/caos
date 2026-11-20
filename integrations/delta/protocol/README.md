@@ -1,7 +1,7 @@
 # Delta protocol investigation
 
 The goal is a **CAOS-backed Delta protocol participant**, not a hosted Delta
-application. This directory currently contains a reproducible, offline codec
+application. This directory contains reproducible, offline codec and state
 probe. It does **not** register a runner or execute agent turns.
 
 ## What has been verified
@@ -10,8 +10,8 @@ The public Delta Web **0.24.2** bundle includes a public debug-symbol module.
 Its function names identify the runner and history protocols; its executable
 code provides an independent reference for checking recovered wire formats.
 
-The probe exposes selected codec functions from the compiled module, initializes
-their static memory, and runs them in Node. Every imported browser, network, and
+The probe exposes selected codecs and pure in-memory text/map operations from
+the compiled module, initializes static memory, and runs them in Node. Every imported browser, network, and
 storage function throws if called. It removes the application's exported entry
 points, rejects a Wasm start section, and never initializes the Delta application.
 No account, credentials, local Delta databases, or live threads are used.
@@ -19,7 +19,7 @@ No account, credentials, local Delta databases, or live threads are used.
 The downloaded module is test equipment only. A production adapter should
 implement the recovered messages itself, without shipping or loading Delta Web.
 
-**382 checks pass**, covering:
+**10,403 checks pass**, covering:
 
 - Turn-start encoding, including unsigned integer boundaries, optional strings,
   an optional generation-state timestamp, timeline IDs backed by UUID or Git
@@ -36,13 +36,27 @@ implement the recovered messages itself, without shipping or loading Delta Web.
   fields, and re-encoding explicit references.
 - The per-history connection path, history request envelopes, and inline
   history-delta response decoding.
+- Text edits, causal parent snapshots, concurrent insertion order, Unicode byte
+  offsets, scratch-buffer creation, and payload-ID allocation.
+- Observed-remove map behavior, including preservation of unseen concurrent
+  values and removal that reveals a previously hidden value.
+- Scratch-buffer anchors, including both biases, deleted text, and byte positions
+  inside Unicode scalars, with 768 queries checked against both the ordinary and
+  visible-anchor resolvers across the generated histories.
+- No-op and causal `UpdateHistory` envelopes, outgoing batches, timeline updates,
+  and decoding the acceptance response observed in the separate live write check.
+- Native user/AssistantTurn metadata, tagged UUID actors, exact message anchors,
+  completion markers, and actual provider/model metadata. The Go writer's golden
+  tests use the same independently native-decoded and re-encoded fixtures.
 
 These checks establish selected byte formats, **not service compatibility**.
 They do not establish that the server will accept a registration, dispatch a
 turn, or accept history updates from a replacement implementation.
 The separate [standalone connector](../connector/README.md) has since passed
-live authentication, heartbeat, and registration checks from CAOS; history
-synchronization and agent-turn execution remain unfinished.
+live authentication, heartbeat, registration, and history reads from CAOS. A
+separately gated write added one unused map to the approved disposable fixture
+and verified it in a fresh readback. Turn ownership, ongoing synchronization,
+and agent-turn execution remain unfinished.
 
 ## Recovered wire facts
 
@@ -195,6 +209,26 @@ Preparation checks the source SHA-256:
 It discovers codec functions by their names rather than assuming function
 indices. The verifier is read-only; only explicit preparation writes generated
 files to the supplied output directory.
+
+To compare Go text replay against the native reference's 128 generated histories:
+
+```sh
+node integrations/delta/protocol/verify_reference.cjs "$cache/isolated" \
+  --text-output "$cache/new-text-cases.json"
+cd integrations/delta/connector
+CAOS_DELTA_TEXT_REFERENCE_CASES="$cache/new-text-cases.json" \
+  go test -race -run=TestNativeTextReferenceCorpus -count=1 .
+```
+
+The cases include forks, multi-parent merges, Unicode, replacements, deletions,
+and anchor-resolution queries. The Go check also shuffles batch delivery. The native map checks
+establish a separate rule: updates remove only values observed by their parent,
+and reading chooses the greatest surviving insertion ID. A deletion is not a
+last-writer-wins tombstone that can erase an unseen insertion.
+
+The explicit text export refuses to overwrite a file. Default Go tests do not
+download the reference or use real thread/account state. Default verification
+does not write generated results into the source tree.
 
 The asset URL comes from the production Wasm's `external_debug_info` section,
 not a guessed private endpoint. The pinned web manifest is:

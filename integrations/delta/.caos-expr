@@ -1,9 +1,12 @@
 HELP=<<END
-Run a bounded standalone Delta connector check from CAOS. This does not run the Delta application or execute agent turns. Requires a delta-runner-credentials secret containing this connector's account and actor identity. Never put credentials in arguments.
+Run a bounded standalone Delta connector operation from CAOS, without the Delta application. Requires a delta-runner-credentials secret containing this connector's account, actor identity and thread allowlist. Never put credentials in arguments.
 @param {string} request-id Fresh value so the check makes a real network exchange.
-@param {string} [op] probe (default) or inspect-history (read-only).
+@param {string} [op] probe (default), inspect-history, replay-history, inspect-workspaces, bridge-context, check-model, or execute-turn. execute-turn runs the final submitted user prompt with the existing CAOS tool-capable agent driver, then writes its completed reply to the same allowlisted thread. Only for an isolated single-writer fixture; not persistent machine-runner dispatch. Requires request-id to be an RFC3339 timestamp. Other operations do not infer or write replies.
+@param {string} [model] Explicit Anthropic API model for execute-turn; its normal std/llm-step credential grant is required.
 @param {string} [registration-name] Temporarily register, then clear, a diagnostic machine name.
 @param {string} [thread-id] History to inspect; must be allowlisted in the sealed credential bundle. Only counts, never thread content or pack URLs, are returned.
 END
 IMAGE=run --base:@=DEEP-DEPS/flake-builder --in:@=. --lock:@=DEEP-DEPS/flake.lock
-curry --base=$IMAGE --help=$HELP
+AGENT=curry --base:@=DEEP-DEPS/agent
+PUBLISHER=curry --base:@=DEEP-DEPS/result-publisher
+curry --base=$IMAGE --help=$HELP --agent-image=$AGENT --result-publisher=$PUBLISHER

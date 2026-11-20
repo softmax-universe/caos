@@ -31,10 +31,32 @@ under test, not the place the tools run.
   "no token at /secret/claude-oauth-token". One did, after `drive` itself was
   edited; whether an edit elsewhere also breaks it has not been tested. The
   untouched import is the blessed copy, so it avoids the question.
-- `caos-stack` `op=start` needs `relay=http://<ip>/`. Your own session already
-  has one: `help` (no path) shows `over RELAY relay:http://<ip>/` on its `push:`
-  lines. Use `cloud-env=1` to get the environment, and a fresh `request-id` for
-  every call.
+- `caos-stack` `op=start` needs `relay=http://<ip>/`: the relay your own session
+  reaches the server through. `help` (no path) shows it on its `push:` lines
+  (`over RELAY relay:http://<ip>/`), but only once the session has pushed from
+  its own container, so a session that has only called tools shows none. The
+  reliable source is the server's ticket, which carries the relay:
+  1. `drive` `verb=env-show`, `env=Caos` (or whichever environment your
+     session runs in). Its setup script ends in `--server=caos://endpoint<base32>`,
+     optionally followed by `.<token>`: that is the ticket. It is a bearer
+     address, so extract the relay from it and do not paste it anywhere.
+  2. Decode it in a scratch worker with `caos-std/bash-tool` (any small
+     directory as `root`; the worker has coreutils but no Python). The relay is
+     stored in the ticket as a plain string, so print the printable runs:
+
+     ```sh
+     t=<the base32 between `endpoint` and the dot, if any>
+     t=$(printf %s "$t" | tr a-z A-Z)
+     while [ $(( ${#t} % 8 )) -ne 0 ]; do t="${t}="; done
+     printf %s "$t" | base32 -d | tr -c '[:print:]' '\n' | grep -E '.{6,}'
+     ```
+
+     That prints `http://<ip>/`, which is the `relay` to pass. The filter skips the
+     endpoint id and any direct addresses on purpose. No output means the ticket
+     names no relay: ask whoever runs the stack for theirs.
+
+  Use `cloud-env=1` to get the environment, and a fresh `request-id` for every
+  call.
 - `drive` `verb=start` with `env=z Caos Dev <commit>`, `repo=<owner>/<repo>`
   and a `prompt`. `at` is any integer not used before. Provisioning takes about
   two minutes; read the result with `drive info` (its `summary` is the turn's

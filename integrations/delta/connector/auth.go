@@ -57,6 +57,12 @@ type authClient struct {
 	http    *http.Client
 }
 
+type authHTTPError struct{ Status int }
+
+func (e *authHTTPError) Error() string {
+	return fmt.Sprintf("authentication server returned HTTP %d", e.Status)
+}
+
 func newAuthClient(baseURL string) (*authClient, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -80,12 +86,16 @@ func newAuthClient(baseURL string) (*authClient, error) {
 	}, nil
 }
 
-func (c *authClient) request(ctx context.Context, path string, body any, account *credentials, result any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
+func (c *authClient) request(ctx context.Context, method, path string, body any, account *credentials, result any) error {
+	var input io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		input = bytes.NewReader(data)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, input)
 	if err != nil {
 		return errors.New("could not construct authentication request")
 	}
@@ -104,9 +114,9 @@ func (c *authClient) request(ctx context.Context, path string, body any, account
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("authentication server returned HTTP %d", response.StatusCode)
+		return &authHTTPError{Status: response.StatusCode}
 	}
-	data, err = io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 	if err != nil || len(data) > 1<<20 {
 		return errors.New("invalid authentication response")
 	}
@@ -132,7 +142,7 @@ func (a deviceAuthorization) validate(now time.Time) error {
 
 func (c *authClient) start(ctx context.Context) (deviceAuthorization, error) {
 	var authorization deviceAuthorization
-	err := c.request(ctx, "/frontend/auth/delta/device/start", struct{}{}, nil, &authorization)
+	err := c.request(ctx, http.MethodPost, "/frontend/auth/delta/device/start", struct{}{}, nil, &authorization)
 	if err == nil {
 		err = authorization.validate(time.Now())
 	}
@@ -144,7 +154,7 @@ func (c *authClient) poll(ctx context.Context, secret string) (devicePoll, error
 	if secret == "" {
 		return result, errors.New("device secret is required")
 	}
-	err := c.request(ctx, "/frontend/auth/delta/device/poll",
+	err := c.request(ctx, http.MethodPost, "/frontend/auth/delta/device/poll",
 		map[string]string{"device_secret": secret}, nil, &result)
 	if err != nil {
 		return result, err
@@ -165,11 +175,50 @@ func (c *authClient) deltaToken(ctx context.Context, account credentials) (strin
 	var result struct {
 		Token string `json:"token"`
 	}
-	if err := c.request(ctx, "/client/delta_tokens", struct{}{}, &account, &result); err != nil {
+	if err := c.request(ctx, http.MethodPost, "/client/delta_tokens", struct{}{}, &account, &result); err != nil {
 		return "", err
 	}
 	if result.Token == "" {
 		return "", errors.New("Delta token response has no token")
+	}
+	return result.Token, nil
+}
+
+// Check the connector's own model authorization, not the native application's
+// keys. This obtains a short-lived token but performs no inference. A successful
+// Delta service-token exchange alone does not establish permission to call a model.
+func (c *authClient) modelToken(ctx context.Context, account credentials) (string, error) {
+	var user struct {
+		DefaultOrganization string `json:"default_organization_id"`
+		Organizations       []struct {
+			ID string `json:"id"`
+		} `json:"organizations"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/client/users/me", nil, &account, &user); err != nil {
+		return "", fmt.Errorf("could not read connector model organization: %w", err)
+	}
+	found := false
+	for _, organization := range user.Organizations {
+		if organization.ID != "" && organization.ID == user.DefaultOrganization {
+			found = true
+		}
+	}
+	if !found {
+		return "", errors.New("connector account has no resolved default model organization")
+	}
+	var result struct {
+		Token string `json:"token"`
+	}
+	body := map[string]string{"organization_id": user.DefaultOrganization}
+	if err := c.request(ctx, http.MethodPost, "/client/llm_tokens", body, &account, &result); err != nil {
+		var status *authHTTPError
+		if errors.As(err, &status) && status.Status == http.StatusPaymentRequired {
+			return "", errors.New("connector model authorization denied (HTTP 402 Payment Required); no inference was started")
+		}
+		return "", fmt.Errorf("could not authorize connector model access: %w", err)
+	}
+	if strings.TrimSpace(result.Token) == "" {
+		return "", errors.New("model authorization response has no token")
 	}
 	return result.Token, nil
 }

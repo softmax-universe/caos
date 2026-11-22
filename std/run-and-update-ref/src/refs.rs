@@ -13,6 +13,14 @@ pub fn validate_target_ref(refname: &str) -> Result<(), String> {
     session_refs::parse_head_ref(refname).map(|_| ())
 }
 
+pub fn validate_result_ref(refname: &str, request: &str) -> Result<(), String> {
+    validate_hash(request, "subreq")?;
+    if refname != format!("refs/heads/caos-task-results/{request}") {
+        return Err("result-ref must be the immutable result ref for subreq".to_string());
+    }
+    Ok(())
+}
+
 pub fn validate_child(child: &str) -> Result<(), String> {
     session_refs::head_ref(child).map(|_| ())
 }
@@ -259,6 +267,22 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn result_publication_cannot_target_a_branch_or_another_request() {
+        let request = "0123456789abcdef0123456789abcdef01234567";
+        assert!(validate_result_ref(
+            &format!("refs/heads/caos-task-results/{request}"),
+            request
+        ).is_ok());
+        for target in [
+            "refs/heads/main".to_string(),
+            format!("refs/heads/caos-task-results/{}", "a".repeat(40)),
+            format!("refs/heads/caos-task-results/{request}/extra"),
+        ] {
+            assert!(validate_result_ref(&target, request).is_err());
+        }
+    }
 
     enum FirstPush {
         Normal,

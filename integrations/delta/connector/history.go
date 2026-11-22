@@ -88,6 +88,22 @@ type historyDeltaBatch struct {
 	Payloads []wireVariant
 }
 
+func decodeHistoryVersion(data []byte) ([]deltaID, error) {
+	entries, err := decodeSequence(data, maxHistoryItems)
+	if err != nil {
+		return nil, err
+	}
+	var version []deltaID
+	for _, raw := range entries {
+		id, err := decodeDeltaID(raw)
+		if err != nil {
+			return nil, err
+		}
+		version = append(version, id)
+	}
+	return version, nil
+}
+
 func decodeHistoryBatch(data []byte) (historyDeltaBatch, error) {
 	var batch historyDeltaBatch
 	fields, err := decodeFields(data, 4, 4)
@@ -97,16 +113,9 @@ func decodeHistoryBatch(data []byte) (historyDeltaBatch, error) {
 	if batch.ID, err = decodeDeltaID(fields[0]); err != nil {
 		return batch, err
 	}
-	parent, err := decodeSequence(fields[2], maxHistoryItems)
+	batch.Parent, err = decodeHistoryVersion(fields[2])
 	if err != nil {
 		return batch, err
-	}
-	for _, raw := range parent {
-		id, err := decodeDeltaID(raw)
-		if err != nil {
-			return batch, err
-		}
-		batch.Parent = append(batch.Parent, id)
 	}
 	payloads, err := decodeSequence(fields[3], maxHistoryItems)
 	if err != nil {

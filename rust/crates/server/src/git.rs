@@ -146,6 +146,9 @@ pub(crate) fn serve(config: &Config, mut request: Request) -> std::io::Result<()
     let body = std::io::Cursor::new(leftover).chain(stdout);
     let result = request.respond(Response::new(StatusCode(status), headers, body, None, None));
     let _ = child.wait();
+    if path == "/git-receive-pack" && method == "POST" {
+        crate::refs::notify();
+    }
     result
 }
 

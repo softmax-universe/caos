@@ -1,0 +1,3 @@
+# tests/ref-wait: exercises GET|POST /ref and GET|POST /ref/wait directly over
+# HTTP from a std/go worker.
+curry --base:@=DEEP-DEPS/go --worker1:@=worker.go

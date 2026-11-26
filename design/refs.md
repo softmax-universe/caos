@@ -104,5 +104,26 @@ on a second ref, and the test waits for that with `ref-then` in turn.
 
 `GET /ref?name=<ref>` answers `<oid>` or `absent`. `POST /ref` takes `{"name",
 "value", "expected"}`, where a missing `expected` is an unconditional write,
-and answers 409 on a stale one. Both live in `rust/crates/server/src/refs.rs`,
-over `git for-each-ref` and `git update-ref`.
+and answers 409 on a stale one.
+
+`GET /ref/wait?name=<ref>[&expected=<oid|absent>][&timeout=<secs>]` and
+`POST /ref/wait` (`{"refs": {"<ref>": "<oid|absent>", ...}, "timeout": <secs>}`)
+expose the same wait directly over HTTP, for external clients and peer nodes
+watching shared refs over `http://` or `caos://<ticket>` without dispatching a
+worker job:
+
+- `GET /ref/wait` blocks until `<ref>` differs from `expected` (default
+  `absent`) and answers `<oid>` or `absent`, or `unchanged` once `timeout`
+  (default 60s, at most a day) passes with no change. Unknown or duplicate
+  query parameters are refused with 400 so a typo in `expected` never silently
+  turns a wait into a spin loop.
+- `POST /ref/wait` watches up to 256 refs on one thread (and one `git
+  for-each-ref` call per check), returning `{"changed": {"<ref>":
+  "<oid|absent>", ...}}` as soon as at least one differs from its expected
+  value, or `{"changed": {}}` on timeout.
+- Writes through `POST /ref` and pushes through `POST /git-receive-pack` wake
+  waiters at once; writes that bypass the server are picked up by the
+  once-a-second recheck.
+
+All four live in `rust/crates/server/src/refs.rs`, over `git for-each-ref` and
+`git update-ref`.

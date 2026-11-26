@@ -40,7 +40,9 @@
 //! `NAME=<verb>`. A `run` value evaluates to the run's result; a `curry` value
 //! to the curried ArgTree; a `graft` value to `--in` with the named entries set;
 //! a `mount` value to the same, with the names also recorded in `.caos-mounts`.
-//! `--base=$NAME` names the object a prior line produced.
+//! `--base=$NAME` names the object a prior line produced, and `$NAME/<path>`
+//! (anywhere `$NAME` may appear) the object at `<path>` inside it, reached
+//! through evaluation like any other descent.
 //!
 //! `$CAOS_EXPR` is pre-bound to the `.caos-expr`'s OWN blob and is reserved: an
 //! expression cannot reach its own text by path (the directive is stripped from
@@ -573,12 +575,52 @@ fn eval_value(
         if var.is_empty() || var.split_whitespace().count() != 1 {
             return Err(format!("eval-path: malformed variable reference {line:?}"));
         }
-        return env
-            .get(var)
-            .cloned()
-            .ok_or_else(|| format!("eval-path: undefined variable ${var}"));
+        return lookup_var(host, env, var);
     }
     eval_command(host, input_tree, line, env)
+}
+
+/// The object a `$VAR` or `$VAR/<path>` reference names (`reference` is what
+/// follows the `$`).
+///
+/// `$VAR/<path>` is the object at `<path>` inside `$VAR`'s result, reached by
+/// [`eval_path`] — so it descends THROUGH EVALUATION, exactly as a `:@@=`
+/// locator's `dir=` does: a `.caos-expr` met on the way is applied. This is what
+/// lets a line name something inside what an earlier line produced, without
+/// repeating how that was reached: a consumer that mounted caos names
+/// `$T/caos-core/deep-deps` instead of writing its pin a third time
+/// (design/nix-bootstrap.md).
+fn lookup_var(
+    host: &dyn EvalHost,
+    env: &HashMap<String, (String, String)>,
+    reference: &str,
+) -> Result<(String, String), String> {
+    let (var, path) = match reference.split_once('/') {
+        Some((var, path)) => (var, Some(path)),
+        None => (reference, None),
+    };
+    let (kind, oid) = env
+        .get(var)
+        .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
+    let Some(path) = path else {
+        return Ok((kind.clone(), oid.clone()));
+    };
+    if path.split('/').any(|c| c == "..") {
+        return Err(format!(
+            "eval-path: ${reference} climbs out of ${var} with `..`; a path inside a \
+             variable names only what is in it"
+        ));
+    }
+    let tree = match kind.as_str() {
+        "tree" => oid.clone(),
+        "commit" => commit_tree(host, oid)?,
+        other => {
+            return Err(format!(
+                "eval-path: ${reference} looks inside ${var}, which is a {other}, not a tree"
+            ))
+        }
+    };
+    eval_path(host, &tree, path).map_err(|e| format!("eval-path: ${reference}: {e}"))
 }
 
 /// Evaluate a single `run --base:<t>=<image> …` or `curry --base:<t>=<image> …`
@@ -784,17 +826,15 @@ fn eval_expr_base(
     // A `$VAR` base names an object a prior assignment produced, whatever its
     // declared type — matched first, exactly as `eval_expr_args` does.
     if let Some(var) = value.strip_prefix('$').filter(|_| vars) {
-        let (kind, oid) = env
-            .get(var)
-            .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
+        let (kind, oid) = lookup_var(host, env, var)?;
         // A here-string is bytes, not a worker: naming one as the base would
         // form an ArgTree whose image is a text blob.
         if kind == "blob" {
             return Err(format!(
-                "eval-path: ${var} is a here-string (a blob), not an image"
+                "eval-path: ${var} is a blob (a here-string or a file), not an image"
             ));
         }
-        return Ok(oid.clone());
+        return Ok(oid);
     }
     match ty {
         // `:docker=<ref>` — a registry image, carried as the blob
@@ -912,10 +952,9 @@ fn eval_expr_args(
         let (mode, oid) = if let Some(var) = value.strip_prefix('$').filter(|_| vars) {
             // `$VAR` names an object a prior assignment produced (or a
             // here-string's blob), whatever the declared type — matched first.
-            let (kind, oid) = env
-                .get(var)
-                .ok_or_else(|| format!("eval-path: undefined variable ${var}"))?;
-            (mode_of_kind(kind), parse_oid(oid)?)
+            // `$VAR/<path>` names one inside it.
+            let (kind, oid) = lookup_var(host, env, var)?;
+            (mode_of_kind(&kind), parse_oid(&oid)?)
         } else {
             match ty {
                 ArgType::Literal => (
@@ -1504,6 +1543,58 @@ mod evaluated_tests {
                 ("a".to_string(), "new".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_path_inside_a_variable_descends_through_evaluation() {
+        let host = Memory::default();
+        let tool_expr = host.put(
+            gix::objs::Kind::Blob,
+            b"curry --base:docker=img@sha256:00 --x=1\n".to_vec(),
+        );
+        let tool = host.tree(vec![(".caos-expr", false, tool_expr)]);
+        let f = host.put(gix::objs::Kind::Blob, b"F".to_vec());
+        let sub = host.tree(vec![("f", false, f)]);
+        let expr = host.put(
+            gix::objs::Kind::Blob,
+            b"T=graft --in:@=. --z=1\ngraft --file=$T/sub/f --got=$T/tool --want:@=tool\n".to_vec(),
+        );
+        let root = host.tree(vec![
+            (".caos-expr", false, expr),
+            ("sub", true, sub),
+            ("tool", true, tool),
+        ]);
+        let (_, out) = eval_path(&host, &root.to_string(), "").unwrap();
+        let got = listing(&host, &out);
+        let by_name = |n: &str| got.iter().find(|(name, _)| name == n).unwrap().1.clone();
+        assert_eq!(by_name("file"), "F");
+        let oid_of = |n: &str| {
+            host.fetch_tree_entries(&out)
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.filename == n.as_bytes())
+                .unwrap()
+                .oid
+        };
+        // `$T/tool` was EVALUATED on the way down, like `:@=tool`: both are the
+        // curry node, not the source directory.
+        assert_eq!(oid_of("got"), oid_of("want"));
+        assert_ne!(oid_of("got"), tool);
+    }
+
+    #[test]
+    fn a_path_inside_a_variable_refuses_what_it_cannot_mean() {
+        let host = Memory::default();
+        for (expr, why) in [
+            ("T=graft --x=1\ngraft --y=$T/../a\n", "`..`"),
+            ("B=<<END\nhi\nEND\ngraft --y=$B/x\n", "not a tree"),
+            ("T=graft --x=1\ngraft --y=$T/nope\n", "no such path"),
+            ("graft --y=$NOPE/x\n", "undefined variable $NOPE"),
+        ] {
+            let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();
+            assert!(err.contains(why), "{expr:?}: {err}");
+        }
     }
 
     #[test]

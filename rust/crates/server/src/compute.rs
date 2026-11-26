@@ -158,6 +158,7 @@ pub(crate) fn eval_endpoint(
     query: &str,
     secrets: &crate::secrets::Context,
     token: Option<&str>,
+    parent: Option<&str>,
 ) -> Result<Vec<u8>, HttpError> {
     let by_hash = query_param(query, "root:hash");
     let by_locator = query_param(query, "root:@@");
@@ -175,7 +176,7 @@ pub(crate) fn eval_endpoint(
             let path = path.ok_or_else(|| {
                 HttpError::new(400, "root:hash=<oid> needs &path=<p> to evaluate within it")
             })?;
-            eval_in_tree(config, &root, &path, secrets)
+            eval_in_tree(config, &root, &path, secrets, parent)
         }
         (None, Some(locator)) => {
             // A locator IS a path: `dir=` says which. Taking `&path=` as well
@@ -194,7 +195,7 @@ pub(crate) fn eval_endpoint(
                 return raw_root(config, &locator, &git_ref, &root).map(String::into_bytes);
             }
             let dir = git_ref.dir.as_deref().unwrap_or("");
-            eval_in_tree(config, &root.to_string(), dir, secrets).map_err(|e| {
+            eval_in_tree(config, &root.to_string(), dir, secrets, parent).map_err(|e| {
                 HttpError::new(e.status(), format!("git ref {locator:?}: {}", e.message()))
             })
         }
@@ -209,8 +210,9 @@ fn eval_in_tree(
     root: &str,
     path: &str,
     secrets: &crate::secrets::Context,
+    parent: Option<&str>,
 ) -> Result<Vec<u8>, HttpError> {
-    evaluate(config, root, path, secrets, None).map(String::into_bytes)
+    evaluate(config, root, path, secrets, parent).map(String::into_bytes)
 }
 
 /// Walk `root` down to `path`, returning `"<kind> <hash>"`, memoized on the

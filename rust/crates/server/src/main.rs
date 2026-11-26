@@ -133,6 +133,11 @@ struct Config {
     /// Empty (the default) means no prefix at all, so a deployment that sets
     /// nothing keeps exactly the keys it has today.
     cache_namespace: String,
+    /// Whether a request may name its own trace parent (`X-Caos-Trace-Parent`),
+    /// from `CAOS_TRACE_PARENTS=yes`. Off by default: it lets a caller hang an
+    /// evaluation's dispatches under ANY trace node, which only a dev stack,
+    /// whose evaluations belong to a job on another server, has a reason to allow.
+    trace_parents: bool,
     /// Filesystem path to the git object database, passed to `git http-backend`
     /// as `GIT_PROJECT_ROOT` for the smart-HTTP transport (see [`mod git`]).
     git_dir: String,
@@ -315,6 +320,7 @@ fn main() {
         registry_pull_host: env_or("CAOS_REGISTRY_PULL_HOST", DEFAULT_REGISTRY_PULL_HOST),
         redis_addr: env_or("CAOS_REDIS_ADDR", DEFAULT_REDIS_ADDR),
         cache_namespace: env_or("CAOS_CACHE_NAMESPACE", ""),
+        trace_parents: env_or("CAOS_TRACE_PARENTS", "") == "yes",
         git_dir,
         secrets_git,
         repo,
@@ -813,6 +819,43 @@ fn secret_context(config: &Config, request: &Request) -> Result<secrets::Context
     )
 }
 
+/// The trace node an evaluation's dispatches are recorded under, if the request
+/// says. Without one they are recorded under the walk's own continuation, which
+/// no one reads, so a worker that evaluates a tree (the test daemon evaluating
+/// `dev/run-tests`, which builds the core) shows an unexplained gap in its trace.
+///
+/// Two ways to say, both headers (a query string is logged): the calling job's
+/// nonce, which this server resolves to the job's ArgTree, or, on a server that
+/// allows it, the trace node itself.
+fn eval_parent(config: &Config, request: &Request) -> Result<Option<String>, HttpError> {
+    let header = |name: &'static str| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().to_string())
+    };
+    if let Some(nonce) = header(caos_world::TRACE_NONCE_HEADER) {
+        return runner::inflight_arg_tree(&nonce).map(Some);
+    }
+    let Some(parent) = header(caos_world::TRACE_PARENT_HEADER) else {
+        return Ok(None);
+    };
+    if !config.trace_parents {
+        return Err(HttpError::new(
+            403,
+            "this server does not take an explicit trace parent (CAOS_TRACE_PARENTS)",
+        ));
+    }
+    if !runner::valid_hex(&parent, 40) {
+        return Err(HttpError::new(
+            400,
+            "a trace parent is a 40-character lowercase ArgTree hash",
+        ));
+    }
+    Ok(Some(parent))
+}
+
 /// An expression's parameters: the query string, plus a form-style body when
 /// the request has one.
 fn expression_params(request: &mut Request, query: &str) -> Result<String, HttpError> {
@@ -874,7 +917,14 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
         Method::Get if path == "/eval" => {
             let secrets = secret_context(config, request)?;
             let token = git_token(request)?;
-            compute::eval_endpoint(config, &query, &secrets, token.as_deref())
+            let parent = eval_parent(config, request)?;
+            compute::eval_endpoint(
+                config,
+                &query,
+                &secrets,
+                token.as_deref(),
+                parent.as_deref(),
+            )
         }
         // One `.caos-expr` line over HTTP: `/eval/run`, `/eval/curry`, and the
         // same for `/start/…`. The args ride in the query and, for a value too

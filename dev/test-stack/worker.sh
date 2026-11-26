@@ -333,8 +333,9 @@ op_run_tests() {
   # NO COMMENT INSIDE THE BLOCKS BELOW: a continuation followed by a comment
   # joins INTO the comment and severs the environment prefix.
   phase "forming the suite request"
-  local suite_req
-  suite_req=$(CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 \
+  local suite_req trace_parent
+  trace_parent=$(caos job-req) || fail "reading this job's request hash"
+  suite_req=$(CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 CAOS_TRACE_PARENT="$trace_parent" \
     "$CLI" prepare-request --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}") \
     || fail "forming the suite request"
   caos trace-child suite "$suite_req" || fail "linking the suite's trace to this job"
@@ -344,7 +345,7 @@ op_run_tests() {
   if [ -e /tmp/suite ]; then chmod -R u+w /tmp/suite; fi
   rm -rf /tmp/suite
   local status=0
-  CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 \
+  CAOS_SALT="$(salt)" CAOS_SERVER_URL=http://127.0.0.1 CAOS_TRACE_PARENT="$trace_parent" \
     "$CLI" run /tmp/suite --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}" \
       >/tmp/run.out 2>/tmp/run.err || status=$?
   if [ "$status" -ne 0 ]; then

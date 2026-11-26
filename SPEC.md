@@ -695,6 +695,8 @@ These fields are enough to fully express what happened:
 
 To determine how two runs differed, we can diff their traces and see where the keys differ and how long each work took
 
+What a job had to BUILD in order to evaluate a tree is part of that job's trace. An evaluation (`GET /eval`) records each `run` it dispatches as a `child` of the job that asked, named `<path evaluated>#<n>`, in the order dispatched. A worker-side `caos` says which job it is with an `X-Caos-Job-Nonce` header, which the server resolves to the job's ArgTree (the nonce is the authority, as for `/sub-run` and `/trace/child`). A client on another server than its job, such as the test daemon's inner client, sends `X-Caos-Trace-Parent: <arg tree hash>` instead (the daemon gets the hash from `caos job-req` and passes it as `CAOS_TRACE_PARENT`); a server honors that only when started with `CAOS_TRACE_PARENTS=yes`, which a dev stack is, because it lets a caller hang children under any trace node. Both are headers, not query parameters, because the server logs query strings. An evaluation with neither is recorded under the walk's own continuation, which nothing links to. A cache hit still records nothing.
+
 The server supports pulling current trace data for a run: `GET /status/<arg tree hash>` returns a json tree. For any arg tree:
 - If the work is done and there's no completion arg tree, the entry is skipped. Not "no promise": a continuation with no `then` has a promise and nothing left to point at
 - If there's a completion arg tree, use it. Not gated on the work being done -- `ended` covers the continuation, so a node whose `then` is still running is not done, and gating would hide the `then` for exactly as long as it ran

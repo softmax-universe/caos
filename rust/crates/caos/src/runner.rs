@@ -596,6 +596,7 @@ impl Runner {
             }
         }
         write_root_file(&cas.join(NONCE_FILE), &job.nonce)?;
+        write_root_file(&cas.join(REQ_FILE), &job.arg_tree)?;
         Ok(cas)
     }
 
@@ -859,6 +860,7 @@ impl Heartbeat {
 
 /// The root-owned files holding a resident worker's current job context.
 const NONCE_FILE: &str = "nonce";
+const REQ_FILE: &str = "req";
 
 /// Write `contents` root-owned and readable by root only: it is `caos`, which is
 /// setuid-root, that reads these, never the worker.
@@ -873,6 +875,14 @@ fn write_root_file(path: &Path, contents: &str) -> Result<(), String> {
 /// [`trust_job_context_files`]); anything else is not in a job and has none.
 pub fn job_nonce() -> Option<String> {
     read_context_file(NONCE_FILE)
+}
+
+/// The request hash (ArgTree) of the job a worker is running, from the file its
+/// runner writes beside the nonce. Not a secret, but read the same way, so only
+/// the worker-side `caos` has it; a worker that hands it to a client on another
+/// stack (`caos job-req`) is choosing to.
+pub fn job_req() -> Option<String> {
+    read_context_file(REQ_FILE)
 }
 
 /// The salt of the job a worker is running. In the worker-side `caos` it is the
@@ -1213,7 +1223,7 @@ fn reset_after_job(cfg: &Config) {
 /// the scratch directories, and every process. That is the point of staying.
 fn narrow_reset() {
     let cas = crate::cas_dir();
-    for name in ["args", "out", "out-trace", NONCE_FILE] {
+    for name in ["args", "out", "out-trace", NONCE_FILE, REQ_FILE] {
         let path = cas.join(name);
         let _ = if path.is_dir() && !path.is_symlink() {
             std::fs::remove_dir_all(&path)

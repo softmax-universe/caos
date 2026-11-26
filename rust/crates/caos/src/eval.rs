@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::{percent_encode, request_compute_url, Secrets, Transport};
+use super::{percent_encode, request_compute_url_with, Secrets, Transport};
 
 /// The shared walk's kind/mode helper, re-exported so the rest of the client
 /// keeps naming it through `eval::` — the same function the server uses.
@@ -72,11 +72,40 @@ pub(crate) fn eval_path(
     secrets: &Secrets,
 ) -> Result<(String, String), String> {
     t.ensure_pushed(start_tree)?;
-    request_compute_url(
+    request_compute_url_with(
         &t.server_url()?,
         &format!("/eval?root:hash={start_tree}&path={}", percent_encode(path)),
         secrets,
+        trace_headers(),
     )
+}
+
+/// The headers that say which trace node the server should record an
+/// evaluation's dispatches under, so that what a job had to BUILD in order to
+/// evaluate a tree (the test daemon evaluating `dev/run-tests` builds the whole
+/// core) is in that job's trace, not an unlinked record no one reads.
+///
+/// A worker-side `caos` presents its job nonce, which its own server resolves.
+/// A client that is not a worker has none; if `CAOS_TRACE_PARENT` names a trace
+/// node (a worker got it from `caos job-req` and passed it on), it presents that
+/// instead, which a server honors only when started with `CAOS_TRACE_PARENTS=yes`
+/// (a dev stack: its evaluations belong to a job on another server). With neither
+/// there is nothing to say, and nothing is sent.
+pub(crate) fn trace_headers() -> Vec<(&'static str, String)> {
+    if let Some(nonce) = crate::runner::job_nonce() {
+        return vec![(caos_world::TRACE_NONCE_HEADER, nonce)];
+    }
+    match std::env::var("CAOS_TRACE_PARENT") {
+        Ok(parent)
+            if parent.len() == 40
+                && parent
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')) =>
+        {
+            vec![(caos_world::TRACE_PARENT_HEADER, parent)]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// `eval-path [--tree=<oid>] <path>` — evaluate the `.caos-expr` files from the

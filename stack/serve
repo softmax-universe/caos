@@ -91,6 +91,12 @@
 #                             none, which is what makes it safe to start
 #                             runnerds on OTHER machines — they are plain
 #                             runnerds too.
+#   CAOS_STACK_TRACE_PARENTS  "yes" lets a request name its own trace parent
+#                             (CAOS_TRACE_PARENTS on the server). A dev stack
+#                             sets it: the test daemon evaluates a tree on THIS
+#                             server for a job that lives on another one, and
+#                             hands the client that job's request hash so what
+#                             the evaluation builds is in the job's trace.
 #   CAOS_PENDING_TIMEOUT_SECS how long a job waits for a runner to exist
 #   CAOS_STACK_IROH           "yes" to answer `caos://` clients as well
 #                             (design/iroh-transport.md): an iroh endpoint that
@@ -300,6 +306,7 @@ start server env \
   CAOS_NIX_IMAGE_FILE="$CAOS_NIX_IMAGE_FILE" \
   CAOS_REDIS_ADDR="$REDIS_ADDR" \
   CAOS_CACHE_NAMESPACE="${CAOS_CACHE_NAMESPACE:-}" \
+  CAOS_TRACE_PARENTS="${CAOS_STACK_TRACE_PARENTS:-no}" \
   CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \
   "$CAOS_STACK_BIN/server"
 ok=""

@@ -3348,10 +3348,11 @@ pub fn eval_remote_arg(
         return Ok(hit);
     }
 
-    let (kind, hash) = request_compute_url(
+    let (kind, hash) = request_compute_url_with(
         &t.server_url()?,
         &format!("/eval?root:@@={}", percent_encode(value)),
         secrets,
+        eval::trace_headers(),
     )
     .map_err(|e| format!("git ref {value:?}: {e}"))?;
     let resolved = (eval::mode_of_kind(&kind), parse_oid(&hash)?);
@@ -4207,6 +4208,19 @@ pub fn caos_trace_child(t: &dyn Transport, name: &str, arg_tree: &str) -> Result
             timeout_secs: Some(5),
         },
     )?;
+    Ok(())
+}
+
+/// `job-req` — print the request hash of the job this worker is running.
+///
+/// For handing to a client on ANOTHER STACK as `CAOS_TRACE_PARENT`, so that what
+/// the client evaluates is recorded under this job's trace (the test daemon
+/// evaluating `dev/run-tests`, which builds the core). A client on the same
+/// server needs nothing: the worker-side `caos` already presents its job nonce.
+pub fn caos_job_req() -> Result<(), String> {
+    let req = runner::job_req()
+        .ok_or_else(|| "job-req is available only inside a running worker".to_string())?;
+    println!("{req}");
     Ok(())
 }
 
@@ -5066,7 +5080,19 @@ fn request_compute_url(
     path: &str,
     secrets: &Secrets,
 ) -> Result<(String, String), String> {
-    let headers = secrets.headers();
+    request_compute_url_with(base, path, secrets, Vec::new())
+}
+
+/// [`request_compute_url`] with `extra` headers beside the secrets: which job or
+/// trace node an evaluation belongs to (`caos_world::TRACE_*_HEADER`).
+fn request_compute_url_with(
+    base: &str,
+    path: &str,
+    secrets: &Secrets,
+    extra: Vec<(&'static str, String)>,
+) -> Result<(String, String), String> {
+    let mut headers = secrets.headers();
+    headers.extend(extra);
     // NO TIMEOUT, deliberately: this is the call that waits for the work. A run
     // takes as long as the worker does.
     let body = server_call(

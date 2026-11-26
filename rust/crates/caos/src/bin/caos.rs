@@ -142,6 +142,12 @@ fn run(args: &[String]) -> Result<(), String> {
             (Some(name), Some(arg_tree), None) => caos::caos_trace_child(&http()?, name, arg_tree),
             _ => Err(usage(args)),
         },
+        // `job-req` — print the request hash of the job this worker is running,
+        // for a client on another stack to take as CAOS_TRACE_PARENT.
+        Some("job-req") => match args.get(2) {
+            None => caos::caos_job_req(),
+            Some(_) => Err(usage(args)),
+        },
         // `ref-set <ref> (--new[:@]=<v> | --delete) (--expected[:@]=<v> |
         // --force)` — compare-and-swap a named mutable ref under refs/heads/
         // (design/refs.md). `ref-get` is dispatched in `main`, for its exit
@@ -210,6 +216,7 @@ fn usage(args: &[String]) -> String {
          {prog} ref-set <ref> (--new=<hash> | --new:@=<cas-path> | --delete)\n      (--expected=<hash|absent> | --expected:@=<cas-path> | --force)\n  \
          {prog} ref-then <ref> [--expected=<hash|absent> | --expected:@=<cas-path>]\n      [--timeout=<secs>] [--then:<type>=<image>] [--catch]\n  \
          {prog} trace-child <name> <arg-tree-hash>\n  \
+         {prog} job-req\n  \
          {prog} prepare-request --base:<type>=<image-or-arg tree> [--name=value | --name:@=path ...]\n  \
          {prog} resolve-image <hex hash | docker://<ref>>\n  \
          {prog} curry [--unbind=<name> ...] --base:<type>=<arg tree> [--name=value | --name:@=path ...]\n    \

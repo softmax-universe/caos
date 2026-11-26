@@ -8,6 +8,21 @@ pub mod secrets;
 /// (design/secrets.md). Present only when the run is granted ≥1 secret.
 pub const SECRET_HASH_ARG: &str = "secret-hash";
 
+/// Request header naming the in-flight job an evaluation belongs to, by its job
+/// nonce. The server records the dispatches that evaluation makes as children
+/// of that job's trace node, so what a job had to build to evaluate a tree shows
+/// up in the job's own trace. The nonce is the authority, exactly as for
+/// `/sub-run` and `/trace/child`: it names one claimed job and dies with it. A
+/// header and not a query parameter, because a query string is logged.
+pub const TRACE_NONCE_HEADER: &str = "X-Caos-Job-Nonce";
+
+/// Request header naming a trace node directly, by ArgTree hash. For an
+/// evaluation that runs on ANOTHER STACK than the job it belongs to (a dev stack
+/// brought up inside a worker), where the job's nonce means nothing. Only a
+/// server started with `CAOS_TRACE_PARENTS=yes` honors it: anyone who can send it
+/// can hang edges under any trace node.
+pub const TRACE_PARENT_HEADER: &str = "X-Caos-Trace-Parent";
+
 /// Canonical bytes to hash for the [`SECRET_HASH_ARG`] entry: the granted
 /// secrets' `(worker-visible name, entropy)` pairs, sorted and de-duplicated,
 /// each serialized `name\0entropy\n`. Whoever assembles an ArgTree hashes THIS

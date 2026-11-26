@@ -227,7 +227,7 @@ Documented elsewhere; listed here so the surface is in one place.
 
 | endpoint | purpose | see |
 |---|---|---|
-| `GET /run?req=<argtree hash>` | run an ArgTree already in the store | SPEC "Submitting work" |
+| `GET /run?req=<argtree hash>` | run an ArgTree already in the store; `X-Caos-Cache` and optional `X-Caos-Image` describe this invocation | SPEC "Submitting work"; [Run receipts](../README.md#run-receipts) |
 | `GET /eval?root:hash=<oid>&path=<p>` or `root:@@=<locator>` | evaluate a path under `.caos-expr` | SPEC "Evaluating a path" |
 | `GET /status/<ticket or arg tree hash>[?all=1]` | trace of a run | SPEC "Tracing" |
 | `GET\|HEAD /object/<hash>`, `POST /object` | content-addressed storage | `design/commits.md` |

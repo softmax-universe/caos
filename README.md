@@ -383,7 +383,7 @@ unchanged (`"<type> <hash>"`), so existing clients are unaffected.
   times.
 - **Single-flight.** When identical calls overlap, exactly one owns the run and
   reports `miss`; every call that parks on it reports `hit`, and receives the
-  same result and the same `X-Caos-Image`. A call that re-reads the cache after
+  same result (and image reference when available). A call that re-reads the cache after
   claiming the flight and finds the result there also reports `hit`.
   The one exception is the cycle-breaking duplicate (design/map-then.md), which
   really does run the worker again and so reports `miss`.
@@ -399,8 +399,13 @@ unchanged (`"<type> <hash>"`), so existing clients are unaffected.
   tag-to-digest resolution; that is the caller's job. The internal `seeded*`
   rendezvous sentinels have no digest and are reported as written. The image is
   part of the cache key, so a `hit` reports the image that produced the cached
-  result. If the image cannot be resolved the call still succeeds and
-  `X-Caos-Image` is omitted; `X-Caos-Cache` is always present on success.
+  result. Receipt reporting only reads the image conversion memo; it never
+  converts an image or pushes to a registry. If that independently evictable
+  memo is absent (or Redis is unavailable), `X-Caos-Image` is omitted, even
+  though the result is still returned. Git images passed through by
+  `CAOS_IMAGE_RESOLVE=none` likewise omit it: their raw git hash is not a
+  resolved container digest. Pinned `docker://` bases need no memo.
+  `X-Caos-Cache` is always present on success.
 - **Errors** carry neither header. Promise sub-runs and `/eval/*` / `/wait`
   tickets report nothing; only a top-level `GET /run` does.
 

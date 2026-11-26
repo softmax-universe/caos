@@ -529,31 +529,56 @@ pub(crate) fn run(
     query: &str,
     secrets: &crate::secrets::Context,
 ) -> Result<RunResponse, HttpError> {
+    run_with(config, query, |arg_tree| {
+        run_work_request_receipt(
+            config,
+            &WorkRequest {
+                arg_tree,
+                stack: &[],
+                secrets,
+            },
+        )
+    })
+}
+
+fn run_with(
+    config: &Config,
+    query: &str,
+    execute: impl FnOnce(&str) -> Result<(String, Origin), HttpError>,
+) -> Result<RunResponse, HttpError> {
     let arg_tree = parse_arg_tree(query)?;
     // An HTTP run is by definition top-level: the run stack (cycle detection)
     // exists only inside the server, threaded through promise sub-runs.
-    let result = run_work_request_receipt(
-        config,
-        &WorkRequest {
-            arg_tree: &arg_tree,
-            stack: &[],
-            secrets,
-        },
-    );
+    let result = execute(&arg_tree);
     // Top-level publication is part of `run_work_request`: a flight owner pins
     // before releasing its ownership, and waiters receive that combined
     // compute-and-publication outcome.
     let (result, origin) = result?;
-    // The image this ArgTree's worker runs on. It is part of the ArgTree (hence
-    // of the cache key), so the reference that produced a cached result is the
-    // one resolving it now yields; conversion and registry pushes are
-    // themselves cached, so on a hit this is a lookup. Failing to resolve must
-    // not turn a good result into an error, so the header is simply absent then.
+    // Reporting must never convert or push an image, even if its independently
+    // evictable image memo disappeared while the result memo survived.
     let image = read_arg_tree(config, &arg_tree)
-        .and_then(|(image, _)| resolve_image(config, &image))
-        .map_err(|e| eprintln!("receipt: no image for arg_tree={arg_tree}: {}", e.message()))
-        .ok();
+        .ok()
+        .and_then(|(image, _)| {
+            receipt_image(&image, |key| {
+                if std::env::var("CAOS_IMAGE_RESOLVE").as_deref() == Ok("none") {
+                    return None;
+                }
+                cache_get(&config.redis_addr, key)
+                    .ok()
+                    .flatten()
+                    .map(|digest| image_ref(config, &digest))
+            })
+        });
     Ok(RunResponse::new(result, origin, image))
+}
+
+fn receipt_image(image: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+    if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
+        return validate_docker_reference(reference, true)
+            .ok()
+            .map(|_| reference.to_string());
+    }
+    lookup(&format!("caos:image:{image}"))
 }
 
 /// Whether a run's result came from executing the worker or from a result that
@@ -4386,11 +4411,66 @@ mod receipt_tests {
     }
 
     fn response(origin: Origin) -> RunResponse {
-        RunResponse::new(
-            "tree x".into(),
-            origin,
-            Some(format!("registry:5000/caos/img@{DIGEST}")),
-        )
+        // Real ArgTree decoding and production response assembly, with only
+        // the worker/cache pipeline injected (no registry or runner required).
+        let dir = std::env::temp_dir().join(format!(
+            "caos-receipt-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let repo = gix::open(&dir).unwrap();
+        let base = repo
+            .write_blob(format!("docker://registry:5000/caos/img@{DIGEST}"))
+            .unwrap()
+            .detach();
+        let tree = gix::objs::Tree {
+            entries: vec![gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: "base".into(),
+                oid: base,
+            }],
+        };
+        let arg_tree = repo.write_object(&tree).unwrap().to_string();
+        let config = Config {
+            registry_push_url: "http://127.0.0.1:1".into(),
+            registry_pull_host: "registry:5000".into(),
+            redis_addr: "127.0.0.1:1".into(),
+            cache_namespace: "receipt-test".into(),
+            git_dir: dir.to_str().unwrap().into(),
+            secrets_git: dir.to_str().unwrap().into(),
+            repo: repo.into_sync(),
+        };
+        let answer = run_with(&config, &format!("req={arg_tree}"), |actual| {
+            assert_eq!(actual, arg_tree);
+            Ok(("tree x".into(), origin))
+        })
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        answer
+    }
+
+    #[test]
+    fn receipt_image_cache_eviction_never_converts() {
+        let image = "a".repeat(40);
+        assert_eq!(
+            receipt_image(&image, |key| {
+                assert_eq!(key, format!("caos:image:{image}"));
+                None
+            }),
+            None
+        );
+        let reference = format!("registry:5000/caos/img@{DIGEST}");
+        assert_eq!(
+            receipt_image(&image, |_| Some(reference.clone())),
+            Some(reference)
+        );
     }
 
     fn header<'a>(response: &'a RunResponse, name: &str) -> Option<&'a str> {
@@ -4403,6 +4483,23 @@ mod receipt_tests {
 
     fn assert_receipt(response: &RunResponse, cache: &str) {
         assert_eq!(header(response, "X-Caos-Cache"), Some(cache));
+        let wire = crate::run_http_response(RunResponse {
+            body: response.body.clone(),
+            headers: response.headers.clone(),
+        });
+        assert_eq!(wire.status_code().0, 200);
+        for (name, expected) in [
+            (CACHE_HEADER, cache.to_string()),
+            (IMAGE_HEADER, format!("registry:5000/caos/img@{DIGEST}")),
+        ] {
+            assert_eq!(
+                wire.headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str()),
+                Some(expected.as_str())
+            );
+        }
         let image = header(response, "X-Caos-Image").expect("image header");
         assert!(
             image.ends_with(&format!("@{DIGEST}")),

@@ -784,21 +784,22 @@ fn serve_run(config: &Arc<Config>, request: Request) -> std::io::Result<()> {
     let answer =
         secret_context(config, &request).and_then(|secrets| compute::run(config, query, &secrets));
     match answer {
-        Ok(run) => {
-            let mut response = Response::from_data(run.body);
-            for (name, value) in run.headers {
-                if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
-                {
-                    response = response.with_header(header);
-                }
-            }
-            request.respond(response)
-        }
+        Ok(run) => request.respond(run_http_response(run)),
         Err(err) => request.respond(
             Response::from_string(format!("{}\n", err.message))
                 .with_status_code(tiny_http::StatusCode(err.status)),
         ),
     }
+}
+
+fn run_http_response(run: compute::RunResponse) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut response = Response::from_data(run.body);
+    for (name, value) in run.headers {
+        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response = response.with_header(header);
+        }
+    }
+    response
 }
 
 /// `POST /mcp`: one JSON-RPC message in, its answer out (`202` with no body for
@@ -911,10 +912,6 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
     };
 
     match request.method() {
-        Method::Get if path == "/run" => {
-            let secrets = secret_context(config, request)?;
-            compute::run(config, &query, &secrets).map(|run| run.body)
-        }
         Method::Get if path.starts_with("/status/") => {
             status::serve(config, path.trim_start_matches("/status/"), &query)
         }

@@ -148,6 +148,14 @@ struct WorkRequest<'a> {
 pub(crate) fn resolve_image_endpoint(config: &Config, query: &str) -> Result<Vec<u8>, HttpError> {
     let image = query_param(query, "image")
         .ok_or_else(|| HttpError::new(400, "resolve-image needs ?image=<hash|docker://ref>"))?;
+    let bare = image.strip_prefix(DOCKER_SCHEME).unwrap_or(&image);
+    if let Some(pool) = bare.strip_prefix("seeded-") {
+        if !pool.is_empty() {
+            if let Some(worker_image) = crate::runner::resolve_pool_worker_image(pool)? {
+                return Ok(worker_image.into_bytes());
+            }
+        }
+    }
     let reference = resolve_image(config, &image)?;
     Ok(reference.into_bytes())
 }
@@ -657,6 +665,17 @@ fn result_key(config: &Config, arg_tree: &str) -> String {
     }
 }
 
+/// Redis key recording the concrete executing worker identity (`X-Caos-Image`)
+/// alongside a cached `caos:result:` entry so warm hits on native pool jobs
+/// (`seeded-<pool>`) return the exact worker binary digest that computed the result.
+fn run_image_key(config: &Config, arg_tree: &str) -> String {
+    if config.cache_namespace.is_empty() {
+        format!("caos:run-image:{arg_tree}")
+    } else {
+        format!("caos:run-image:{}:{arg_tree}", config.cache_namespace)
+    }
+}
+
 fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, HttpError> {
     run_work_request_inner(config, request, false).map(|(result, _, _)| result)
 }
@@ -696,11 +715,11 @@ fn run_work_request_inner(
                     pin_result(config, arg_tree, result)
                 });
                 let result = outcome.map_err(|(status, msg)| HttpError::new(status, msg))?;
-                return Ok((
-                    result,
-                    CacheStatus::Hit,
-                    peek_resolved_image(config, &image),
-                ));
+                let hit_image = cache_get(&config.redis_addr, &run_image_key(config, arg_tree))
+                    .ok()
+                    .flatten()
+                    .or_else(|| peek_resolved_image(config, &image));
+                return Ok((result, CacheStatus::Hit, hit_image));
             }
             Ok(None) => {
                 eprintln!("cache miss: arg_tree={arg_tree} (image={image}); running worker")
@@ -804,7 +823,13 @@ fn run_work_request_inner(
         None => outcome,
     };
     let result = outcome.map_err(|(status, msg)| HttpError::new(status, msg))?;
-    let resolved_image = dispatched_image.or_else(|| peek_resolved_image(config, &image));
+    let resolved_image = dispatched_image
+        .or_else(|| {
+            cache_get(&config.redis_addr, &run_image_key(config, arg_tree))
+                .ok()
+                .flatten()
+        })
+        .or_else(|| peek_resolved_image(config, &image));
     Ok((result, cache_status, resolved_image))
 }
 
@@ -864,9 +889,8 @@ fn run_dispatch_inner(
     // against), and hand the job to a polling runner. The dispatch blocks this
     // server thread until a runner posts the result; capacity is runner-side
     // (the set of parked polls), so there's no server-side slot to hold.
-    let result = {
+    let (result, effective_image_header) = {
         let image_ref = resolve_image(config, image).map_err(fail)?;
-        *dispatched_image = Some(header_image_ref(&image_ref));
         let arg_entries = args_entries(config, arg_tree).map_err(fail)?;
         // Whether this job SAYS it is answered by a seeder, which it does by
         // carrying `required-pool=seeded` — the same arg that keeps the generic
@@ -887,7 +911,7 @@ fn run_dispatch_inner(
         // cache key — and the container runner drops them at `/secret/<name>`.
         // Read from `arg_entries` before dispatch takes ownership of it.
         let granted = crate::secrets::grant(config, secrets, &arg_entries);
-        crate::runner::dispatch(
+        let (res, runner_worker_image) = crate::runner::dispatch(
             arg_tree,
             arg_entries,
             &image_ref,
@@ -901,7 +925,13 @@ fn run_dispatch_inner(
                 }
             },
         )
-        .map_err(fail)?
+        .map_err(fail)?;
+        let header_img = match runner_worker_image {
+            Some(wi) => header_image_ref(&wi),
+            None => header_image_ref(&image_ref),
+        };
+        *dispatched_image = Some(header_img.clone());
+        (res, header_img)
     };
 
     if result_hash(&result).is_empty() {
@@ -927,6 +957,11 @@ fn run_dispatch_inner(
     if caught {
         eprintln!("ran worker: arg_tree={arg_tree} -> {result} (not cached: caught a failure)");
     } else if let Some(key) = cache_key {
+        let _ = cache_set(
+            &config.redis_addr,
+            &run_image_key(config, arg_tree),
+            &effective_image_header,
+        );
         match cache_set(&config.redis_addr, key, &result) {
             Ok(()) => eprintln!("ran worker: arg_tree={arg_tree} -> {result} (cached)"),
             Err(e) => {
@@ -2436,6 +2471,7 @@ fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), 
 /// `CAOS_IMAGE_RESOLVE=none` stays bare.
 fn header_image_ref(resolved: &str) -> String {
     if resolved.starts_with(DOCKER_SCHEME)
+        || resolved.starts_with("native@sha256:")
         || (resolved.len() == 40 && resolved.bytes().all(|b| b.is_ascii_hexdigit()))
     {
         resolved.to_string()

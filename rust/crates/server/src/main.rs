@@ -1855,5 +1855,233 @@ mod tests {
                 Some(format!("blob {out}").as_str())
             );
         }
+
+        #[test]
+        fn native_pool_worker_image_resolves_sentinel_stamps_miss_and_hit_and_rejects_pool_conflict(
+        ) {
+            let h = TestHarness::start();
+            let pool_name = format!("unforged-test-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+            let sentinel = format!("docker://seeded-{pool_name}");
+            let base_blob = h.store_blob(sentinel.as_bytes());
+            let (arg_tree, pool_oid) = h.store_pooled_arg_tree(
+                gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: b"base".to_vec().into(),
+                    oid: base_blob,
+                },
+                &pool_name,
+            );
+            let worker_img_v1 = format!("native@sha256:{}", "b2".repeat(32));
+            let worker_img_v2 = format!("native@sha256:{}", "c3".repeat(32));
+            let out_v1 = h.store_blob(b"native-out-v1");
+            let out_v2 = h.store_blob(b"native-out-v2");
+
+            // 1. Park a native runner advertising `worker_img_v1`: `/resolve-image` resolves
+            //    BOTH `seeded-<pool>` and `docker://seeded-<pool>` to `worker_img_v1`!
+            let base_url = h.base_url.clone();
+            let p_oid = pool_oid.clone();
+            let img_v1 = worker_img_v1.clone();
+            let res_v1 = format!("blob {out_v1}");
+            let runner_v1 = std::thread::spawn(move || {
+                let poll_body = serde_json::json!({
+                    "required": { caos_world::REQUIRED_POOL_ARG: p_oid },
+                    "ttl_ms": 5000,
+                    "worker_image": img_v1,
+                })
+                .to_string();
+                let poll_resp = minreq::post(format!("{base_url}/runner/poll"))
+                    .with_body(poll_body)
+                    .send()
+                    .unwrap();
+                assert_eq!(poll_resp.status_code, 200);
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(poll_resp.as_bytes()).unwrap();
+                let job = parsed["job"].clone();
+                let result_body = serde_json::json!({
+                    "req": job["req"],
+                    "nonce": job["nonce"],
+                    "ok": true,
+                    "result": res_v1,
+                    "worker_image": img_v1,
+                })
+                .to_string();
+                let r = minreq::post(format!("{base_url}/runner/result"))
+                    .with_body(result_body)
+                    .send()
+                    .unwrap();
+                assert_eq!(r.status_code, 200);
+            });
+
+            // Wait briefly for `runner_v1`'s poll to park, then verify `/resolve-image`!
+            let mut resolved_body = String::new();
+            for _ in 0..50 {
+                let r = minreq::get(format!(
+                    "{}/resolve-image?image=seeded-{pool_name}",
+                    h.base_url
+                ))
+                .send()
+                .unwrap();
+                if r.status_code == 200 {
+                    let s = r.as_str().unwrap().to_string();
+                    if s == worker_img_v1 {
+                        resolved_body = s;
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(resolved_body, worker_img_v1);
+
+            // 2. Cold `/run`: returns `X-Caos-Cache: miss` and `X-Caos-Image: native@sha256:...`
+            let miss_resp = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            runner_v1.join().unwrap();
+            assert_eq!(miss_resp.status_code, 200);
+            assert_eq!(miss_resp.as_str().unwrap(), format!("blob {out_v1}\n"));
+            assert_eq!(
+                miss_resp
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert_eq!(
+                miss_resp
+                    .headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(worker_img_v1.as_str())
+            );
+
+            // 3. Warm `/run` with ZERO runners parked: returns `X-Caos-Cache: hit` AND preserves
+            //    `X-Caos-Image: native@sha256:...` from `caos:run-image:` (never raw sentinel)!
+            let hit_resp = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            assert_eq!(hit_resp.status_code, 200);
+            assert_eq!(hit_resp.as_str().unwrap(), format!("blob {out_v1}\n"));
+            assert_eq!(
+                hit_resp
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("hit")
+            );
+            assert_eq!(
+                hit_resp
+                    .headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(worker_img_v1.as_str())
+            );
+
+            // 4. `nocache=1` replay on an upgraded runner (`worker_img_v2`) returns `v2` receipt
+            //    without overwriting cached `v1` result or image!
+            let base_url2 = h.base_url.clone();
+            let p_oid2 = pool_oid.clone();
+            let img_v2 = worker_img_v2.clone();
+            let res_v2 = format!("blob {out_v2}");
+            let runner_v2 = std::thread::spawn(move || {
+                let poll_body = serde_json::json!({
+                    "required": { caos_world::REQUIRED_POOL_ARG: p_oid2 },
+                    "ttl_ms": 5000,
+                    "worker_image": img_v2,
+                })
+                .to_string();
+                let poll_resp = minreq::post(format!("{base_url2}/runner/poll"))
+                    .with_body(poll_body)
+                    .send()
+                    .unwrap();
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(poll_resp.as_bytes()).unwrap();
+                let job = parsed["job"].clone();
+                let result_body = serde_json::json!({
+                    "req": job["req"],
+                    "nonce": job["nonce"],
+                    "ok": true,
+                    "result": res_v2,
+                })
+                .to_string();
+                minreq::post(format!("{base_url2}/runner/result"))
+                    .with_body(result_body)
+                    .send()
+                    .unwrap();
+            });
+            let nocache_resp = minreq::get(format!("{}/run?req={arg_tree}&nocache=1", h.base_url))
+                .send()
+                .unwrap();
+            runner_v2.join().unwrap();
+            assert_eq!(nocache_resp.status_code, 200);
+            assert_eq!(nocache_resp.as_str().unwrap(), format!("blob {out_v2}\n"));
+            assert_eq!(
+                nocache_resp
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert_eq!(
+                nocache_resp
+                    .headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(worker_img_v2.as_str())
+            );
+
+            // 5. Two concurrent parked runners advertising different `worker_image`s in the same
+            //    pool cause `/resolve-image` to fail closed with `409 Conflict`!
+            let conflict_pool = format!("conflict-pool-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+            let conflict_oid = crate::runner::pool_oid(&conflict_pool);
+            let spawn_idle_poll = |img: String| {
+                let u = h.base_url.clone();
+                let p = conflict_oid.clone();
+                std::thread::spawn(move || {
+                    let b = serde_json::json!({
+                        "required": { caos_world::REQUIRED_POOL_ARG: p },
+                        "ttl_ms": 600,
+                        "worker_image": img,
+                    })
+                    .to_string();
+                    let _ = minreq::post(format!("{u}/runner/poll")).with_body(b).send();
+                })
+            };
+            let c1 = spawn_idle_poll(worker_img_v1.clone());
+            let c2 = spawn_idle_poll(worker_img_v2.clone());
+            let mut saw_409 = false;
+            for _ in 0..40 {
+                let r = minreq::get(format!(
+                    "{}/resolve-image?image=seeded-{conflict_pool}",
+                    h.base_url
+                ))
+                .send()
+                .unwrap();
+                if r.status_code == 409 {
+                    saw_409 = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                saw_409,
+                "conflicting live runner worker_image digests in one pool must fail closed with 409!"
+            );
+            c1.join().unwrap();
+            c2.join().unwrap();
+
+            // 6. Mutable / unpinned `worker_image` on `/runner/poll` is rejected with `400`!
+            let bad_poll = minreq::post(format!("{}/runner/poll", h.base_url))
+                .with_body(
+                    serde_json::json!({
+                        "required": {},
+                        "ttl_ms": 50,
+                        "worker_image": "ubuntu:latest",
+                    })
+                    .to_string(),
+                )
+                .send()
+                .unwrap();
+            assert_eq!(bad_poll.status_code, 400);
+        }
     }
 }

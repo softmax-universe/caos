@@ -272,19 +272,28 @@ are the kind of thing that is invisible until 29 clients arrive at once.
   (`timeout 1 bash -c "exec 3<>/dev/tcp/$host/$port"`), and do not re-probe an
   address already proven dead — wait for it to CHANGE.
 
-- **An idle machine mid-run means a job is waiting, and a `docker://seeded…`
-  job is the one that waits in silence.** A seeded sentinel defers generic
-  runners for its whole pending window (900s in a stack), so when its key
-  doesn't match the seed record NOTHING happens — no container, no log line —
-  and the eventual `no runner for arg_tree …` blames capacity, the one thing
-  that isn't wrong. The server now proves this instead: a parked poll whose
-  `required["base"]` equals the job's `base` IS that sentinel's seeder, so a
-  disagreement is permanent, and after `CAOS_SEEDED_GRACE_SECS` (45s) the 503
-  names the differing args. **Read that message rather than re-deriving it** —
-  it prints both oids, and the fix is always one of the two sides being stale.
-  Anything you hand-roll that forms a seeded key (a `caos run-then` against a
-  sentinel, in `caos-tools/*/worker.sh`) must match `build-builtins.sh`'s record
-  exactly, `strip_caos_expr` included; nothing else checks that agreement.
+- **An idle machine mid-run is usually a job waiting, and the longest wait is a
+  COLD CORE.** The core (runner, flake-builder, cargo, rustc, deep-deps) is built
+  by the `nix=v1` primitive when the root expression is first evaluated, from
+  the tree's own flake, so the first evaluation after an edit that reaches the
+  flake builds the whole Rust workspace and the 3.4 GB cargo image inside the
+  primitive's container: 30 to 50 minutes with nothing in the run log but a
+  pending ticket. That is not a hang. What re-keys it: anything under `rust/`,
+  `std/cargo`, `std/flake-builder`, the flake and its lock. What does NOT: edits
+  to `tests/`, `dev/`, `design/`, `examples/`, `spec/`, `.github/` and the top-level
+  docs (`README.md`, `AGENTS.md`, `CLAUDE.md`, `SPEC.md`), which the
+  root expression blanks before the nix builds see the repo (`NIXIN` in
+  `.caos-expr`). Once built, the core is cached by key, so the next stack or
+  tree that reaches it is a hit.
+- **A fresh dev stack's first run can lose its mock API key to a cold core.**
+  `dev/test-stack/worker.sh` grants the mock key by evaluating `std/llm-call`,
+  `llm-step`, `dev/worker-test` and `std/go` at the tree's commit, and records
+  the grant as done even when that evaluation timed out behind the build above.
+  Every test that needs the key then fails the same way (`the stub received no
+  request at all`, or a turn that never finishes), and nothing retries. If a
+  run shows that pattern after a Rust edit, run `--only=hello` first to warm the
+  core, change something under `tests/` so the next run gets a new stack, and
+  run the suite again.
 
 # Several dev stacks at once
 
@@ -295,23 +304,17 @@ work is **share what is keyed by CONTENT, and give everything else a name of
 the container's own.** Where it was backwards, none of the failures looked like
 concurrency.
 
-- **A seed record is keyed by NAME, so a second publisher REPLACES yours.** This
-  is why the seed tree is now PASSED BY VALUE — `stack/serve` runs
-  `stack/build-builtins.sh`, takes the tree it prints on stdout, and starts the
-  seeder with it — rather than written to `refs/caos/seed` and polled for. With
-  a ref, two trees differing under `std/` differ in `required`, so the loser's
-  keys vanish and its jobs park until the 503 that blames capacity; and two
-  BUILDS of caos are worse, because `required` is identical and only `result`
-  differs, so the loser's seeder silently answers with the winner's binaries.
-  The whole visible trace of that was one line —
-  `core-seeder-runner: deep-deps now answers tree X (was tree Y)`. Both
-  reproduced with two dev stacks against one host. If you ever reintroduce a
-  name between a publisher and an answerer, this is what you are signing up for.
+- **A name between a publisher and an answerer is a place two stacks collide.**
+  The core used to be answered from seed records keyed by NAME, so a second
+  publisher replaced the first's and its seeder silently answered with the
+  other build's binaries. There is no seeder now: the core is built by a
+  primitive whose key is the flake it builds. If you ever reintroduce a shared
+  name for something a stack publishes, this is what you are signing up for.
 - **One fixed path under a shared volume is one stack's answer for all of
   them.** `/caos-dev/bin` was the symlink `std/caos-test` reads to find the
   client it just built, so the stack that started second repointed it and the
   first drove its own server with the OTHER build's `caos-cli`.
-  `/caos-dev/publish-client-repo` was two publishers staging `seed-deep-deps`
+  `/caos-dev/publish-client-repo` was two publishers staging their binaries
   into one repo under one name — reproduced as `ln: failed to create symbolic
   link '/caos-dev/publish-client-repo/layer-additions/usr/bin/env': File
   exists`, which killed a whole bring-up. `/caos-dev/stack.ready` is `rm -f`'d
@@ -335,15 +338,10 @@ concurrency.
 - **A concurrency fix is not tested by one stack.** Run two, from two trees that
   really differ, at the same time — `git clone --local` two worktrees, put an
   `eprintln!` marker in `worker-deep-deps` in each, `caos-cli run-tool caos-test
-  --only=hello` in both at once — and then read
-  `/caos-dev/runs/*/logs/core-seeder-runner.log`: each stack must answer its OWN
-  `deep-deps` tree, and each `runs/*/bin` must point at its own
-  `caos-test-stack-inputs`. A green suite from one of them proves nothing.
-  Do NOT diverge the trees by editing a SEEDED std entry (`std/deep-deps`,
-  `std/rustc`, `std/runner`, `std/cargo`, `std/flake-builder`): the HOST's
-  seeder has to answer for those while resolving `caos-test`'s own image, so the
-  run dies at the host with a 503 naming `docker://seeded-…` before either dev
-  stack exists. Diverge `rust/` instead.
+  --only=hello` in both at once — and then check that each `runs/*/bin` points
+  at its own `caos-test-stack-inputs` and that each stack's core was built from
+  its own tree. A green suite from one of them proves nothing. Diverge `rust/`
+  rather than `tests/`, which the core's build never sees.
 
 # Before committing
 
@@ -371,15 +369,15 @@ concurrency.
   that true is the RESULT CACHE'S NAMESPACE.** The binary is not in the key and
   cannot be: a worker image's `/bin/caos` is copied in by the flake-builder
   (`std/flake-builder/worker`: `cp /bin/caos "$l/usr/bin/caos"`), and the
-  flake-builder is itself reached through a seeded sentinel whose ArgTree is
-  `{base: docker://seeded…, in: <std entry tree>}` — checked-in text and nothing
-  else, with the binary appearing only in the seeder's ANSWER. Downstream is
-  fine (a std entry's `base` is the flake-builder delta, which literally
-  contains `layer00/bin/caos`), so the whole chain hangs on those five seeded
-  keys moving. They don't — `run_work_request` reads redis BEFORE dispatching to
-  any runner, so the fresh seed record is never asked and the previous deploy's
-  delta comes back. Every entry then bases on it, consistently, which is why
-  nothing disagrees. What closes it is `CAOS_CACHE_NAMESPACE`: the nix out path
+  flake-builder is itself part of the core. The core used to be answered by a
+  seeder under keys that named only a sentinel and checked-in text, with the
+  binary appearing only in the answer, so a rebuilt `caos` left those keys
+  unmoved and `run_work_request` (which reads redis BEFORE dispatching) handed
+  back the previous deploy's delta. The core is built by the `nix=v1` primitive
+  now, under a key that names the flake it is built from, so that particular
+  hole is closed at its source; the namespace is kept until the stack has run
+  without it, and dropping it is a later step. What it does today is
+  `CAOS_CACHE_NAMESPACE`: the nix out path
   of the stack inputs, prefixed onto `caos:result:` keys only, set by
   `stack/bootstrap` for the host stack and by `dev/stack-up` for a dev one.
   A different build is a different namespace, so it cannot read the old answers.
@@ -411,9 +409,6 @@ concurrency.
     and `run_work_request` consults only that namespaced key.
   - not `refs/caos/res/`, which is written for clients to fetch and never read
     back as a cache.
-  - not the rustc seed. `build-builtins.sh` does `rm -rf` + `cp -RL` +
-    `git add`, and the staged blob, the worktree blob and
-    `rust/crates/worker-common/src/lib.rs` all hashed the same.
   - not `git_ingest` reading `HEAD`: the client repo has NO commits, so
     `is_clean` is false and the content path is taken.
   What it points at instead is the CARGO IMAGE. `std/cargo`'s bake builds the

@@ -109,7 +109,7 @@ Caos runs well-defined binaries with well-defined inputs and well-defined enviro
 | `server` | `caos-server` | One daemon: object storage, compute, and a git smart-HTTP transport, over its own repo. See [server](#server). |
 | `runnerd` | `caos-runnerd` | The generic host agent: long-polls the server for jobs and runs worker containers. The server itself runs nothing. See `design/runner-protocol.md`. |
 | `worker-common` | — | Shared library for the Rust workers. |
-| `worker-runner` | — (`std/runner`'s `/worker`) | The in-image runner trampoline: receives a compiled worker binary as its `worker1` arg and execs it, so every compiled worker rides one shared image as `curry(std/runner, worker1=<binary>)`. |
+| `worker-runner` | — (`caos-core/runner`'s `/worker`) | The in-image runner trampoline: receives a compiled worker binary as its `worker1` arg and execs it, so every compiled worker rides one shared image as `curry(caos-core/runner, worker1=<binary>)`. |
 | `worker-rustc` | — (run as `curry(runner, worker1)`) | Builds a worker from Rust source. See [workers](#workers). |
 | `worker-bash-tool`, `worker-llm-call`, `worker-llm-step`, `worker-rgrep` | — (run as `curry(runner, worker1)`) | The agent harness: bounded bash, stateless LLM calls, durable LLM turns, and recursive grep. See `design/chat.md` for the current chat protocol and `design/agent-harness.md` for its historical rationale. |
 | `worker-cargo` | — (`std/cargo`'s `/worker`) | Whole-workspace `cargo check/build/test` as `std/cargo` (pinned toolchain + pre-compiled deps + this binary as `/worker`; its image is host-built and streamed like the runner, `caos-worker-cargo-docker` — see `std/cargo/` and `design/cargo-workers.md`) — the agent's `caos-build`/`caos-test` tools. |
@@ -133,7 +133,7 @@ No Rust toolchain is needed system-wide; the flake pins it.
 | `rust/crates/caos-cli/` | Session protocol plus the user-facing `caos-cli` line client and TUI |
 | `rust/crates/server/` | The `server` crate → `caos-server` |
 | `rust/crates/worker-*/` | The worker crates |
-| `stack/` | The one bring-up: `bootstrap` (store + `nix build`), `serve` (daemons, publish, seeder), `build-builtins.sh` (the seeded core) |
+| `stack/` | The one bring-up: `bootstrap` (store + `nix build`), `serve` (daemons, the nix primitive's image), `build-builtins.sh` (streams that image) |
 | `tests/` | The integration suites (the `caos-build`/`caos-test`/`caos-test-result` tools now live under `std/`, offered by the agent harness) |
 
 ## Development
@@ -203,7 +203,7 @@ Only a few images are nix-built here: the `flake-builder`
 (`caos-worker-cargo-docker`) — each host-built and streamed. Every other std
 worker is a flake-built worker image (`std/bash`, `std/merge` — complete flakes
 in `std/`, imaged on demand by the flake-builder) or a
-`curry(std/runner, worker1=<binary>)` over the runner —
+`curry(caos-core/runner, worker1=<binary>)` over the runner —
 see `design/flake-images.md`.
 
 > On macOS, see [Building on macOS](BUILDING_ON_MACOS.md).
@@ -723,8 +723,7 @@ parse arm and a case in each resolver. The worker `caos` has no host filesystem
 
 - `import-image <docker-archive>` (`caos-cli`) — store a docker-archive image
   (`nix build .#caos-*-docker` output) as a git-docker tree on the server,
-  printing its hash. Used to ingest images into caos so they can be `run` (and to
-  assemble the std library — see `build-builtins.sh`).
+  printing its hash. Used to ingest images into caos so they can be `run`.
 - `put <src-path> <cas-path>` (`caos`) — store an outside path into the CAS and
   record it at a `/cas` path. Files become blobs, directories trees; a symlink
   into the CAS reuses the recorded hash.
@@ -787,13 +786,13 @@ A worker image is an image whose definition includes `/worker` — the
 executable `caos runner` execs. An *interpreter* image's `/worker` runs its
 argument (the `worker1` arg — like `python:3` runs a script), which is how
 the compiled workers below ride one shared image: each is
-`curry(std/runner, worker1=<binary>)`, and the binary reads `/cas/args` and
+`curry(caos-core/runner, worker1=<binary>)`, and the binary reads `/cas/args` and
 writes `/cas/out`. The Rust workers share `worker-common` (arg helpers,
 `caos`/`map_then`/`caos curry` wrappers, result staging).
 
 The example workers are TEST FIXTURES, not std entries: each test carries
 its worker's source (`tests/<name>/worker.rs`, single-file, linking only
-`worker-common`) and builds it with `std/rustc` at test start — memoized,
+`worker-common`) and builds it with `caos-core/rustc` at test start — memoized,
 one compile per source edit. `hello.rs` in `examples/consumer/` shows the
 same flow for consumers. The fixtures worth reading:
 
@@ -840,27 +839,27 @@ driving `caos tui` had to declare caos' entry points under the names this
 client happened to use, which is exactly the ambient library the rest of this
 section removes.
 
-The five entries that cannot be built by the machinery they ARE — `flake-builder`
-(a flake built by the flake-builder), `cargo`, `runner`, `rustc` and `deep-deps`
-— name a `docker://seeded…` sentinel instead of a builder.
-`stack/build-builtins.sh` hand-builds what each expression would have produced
-and prints a tree of seed records; the core-seeder-runner answers those exact
-keys, spawning no container.
+The core — `flake-builder`, `cargo`, `runner`, `rustc` and `deep-deps` — is
+the part that cannot be built by the machinery it IS, and it is no longer
+seeded. The repo's root `.caos-expr` builds it from the tree's own flake with the
+`nix=v1` primitive (`run --base:nix=v1 --in=<flake> --attr=<attr>`, which builds
+a flake attribute with the stack's own nix and adds nothing), assembles the
+rustc and deep-deps curries as expression lines, and grafts the result into the
+evaluated tree at `caos-core/`. A `DEPS` line names a core item like any other
+dependency (`../../caos-core/rustc rustc`). Nothing names a core item by a
+commit hash, and whichever caos commit a tree is, it builds ITS core; see
+[design/nix-bootstrap.md](design/nix-bootstrap.md).
 
-It is not run by hand in normal use, and it does not publish to a ref.
-`stack/serve` is its only caller: it publishes once the server and registry are
-up, and starts the seeder with the tree the publish returned — two adjacent
-steps with a value between them, so there is no name a second stack could
-overwrite. Bringing a stack up IS publishing; there is no separate command.
+The one image a stack still builds itself is the primitive's own, because it
+cannot be built by the primitive. `stack/build-builtins.sh` streams it to the
+registry and names it for the server. It is not run by hand: `stack/serve` is
+its only caller, once the server and registry are up. Bringing a stack up IS
+publishing; there is no separate command, and there is nothing to seed.
 
-```bash
-./stack/build-builtins.sh                 # bootstrap the seeded core, by hand
-```
-
-It takes no arguments. The five entries it seeds are interdependent — cargo's
-record is keyed on flake-builder's delta, rustc's on runner's and cargo's — so
-a subset would not be a smaller bootstrap but a seed tree missing records,
-whose jobs park until a 503 that blames capacity.
+The first evaluation after an edit under `rust/`, `std/cargo`, `std/flake-builder`
+or the flake builds the whole core inside the primitive, which takes 30 to 50
+minutes on a cold cache. Edits to `tests/`, `dev/` and `design/` do not touch it.
+See AGENTS.md.
 
 ## Local testing
 
@@ -917,11 +916,11 @@ their separate cache keys. Use it when intentionally exercising that wider
 path, such as push-path validation, rather than for the normal test benchmark.
 See [the performance section of SPEC.md](SPEC.md#principles-of-performance).
 
-nix builds only the *host* stack — the server, the runner daemon, the seeder,
-and the seeded core images. Everything the suite tests is compiled from the
-tree under test, inside caos, by `std/cargo` and `std/rustc`; no host binary
-is handed in. (After a Rust edit: `nix build && caosd up`, then test. After
-editing anything under `std/`, the same — a std tree is part of the seed keys.)
+nix builds only the *host* stack — the server, the runner daemon, and the nix
+primitive's image. Everything the suite tests, including the core, is compiled
+from the tree under test, inside caos, by the `nix=v1` primitive, `caos-core/cargo`
+and `caos-core/rustc`; no host binary is handed in. (After a Rust edit:
+`nix build && caosd up`, then test.)
 
 The test tool is `std/caos-test/` — a DIRECTORY whose `.caos-expr` names the
 image it runs on and carries its `help` (SPEC, "Tools"), with `worker.sh` as

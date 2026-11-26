@@ -399,7 +399,7 @@
           };
         };
 
-        # The core's FAST-MOVING parts, one tiny derivation each
+        # The core's FAST-MOVING parts, as one small derivation
         # (design/nix-bootstrap.md, "The core images carry caos"). The core
         # images above are CLEAN: they depend on nothing in the workspace and
         # change only with nixpkgs, the toolchain or the baked deps. What a Rust
@@ -414,17 +414,22 @@
         # the mode when it rebuilds the layer, so nix never holds a setuid file.
         # The static pieces (user db, /usr/bin/env, /tmp) are checked in at
         # stack/core-layers/static, since they never move.
-        coreLayerCaos = pkgs.runCommand "caos-core-layer-caos" { } ''
-          mkdir -p $out/bin
-          install -m 755 ${workspaceBins}/bin/caos $out/bin/caos
-          printf '{"mode":"4755","uid":0,"gid":0}' > $out/bin/caos.caosmeta
+        #
+        # ALL OF THEM IN ONE OUTPUT, `caos-core-parts`, because each `nix=v1` job
+        # runs in a fresh container and five jobs that each depend on the
+        # workspace built it five times (measured: 330 to 450 s each, serially,
+        # about 31 of a 46 minute cold core). One output is one job and one
+        # build. The root expression names the pieces by path
+        # (`$PARTS/caos-layer`, `$PARTS/worker-runner-layer`, ...).
+        caosCoreParts = pkgs.runCommand "caos-core-parts" { } ''
+          mkdir -p $out/caos-layer/bin $out/worker-runner-layer $out/worker-cargo-layer
+          install -m 755 ${workspaceBins}/bin/caos $out/caos-layer/bin/caos
+          printf '{"mode":"4755","uid":0,"gid":0}' > $out/caos-layer/bin/caos.caosmeta
+          install -m 755 ${workspaceBins}/bin/worker-runner $out/worker-runner-layer/worker
+          install -m 755 ${workspaceBins}/bin/worker-cargo $out/worker-cargo-layer/worker
+          install -m 755 ${workspaceBins}/bin/worker-deep-deps $out/worker-deep-deps
+          install -m 755 ${workspaceBins}/bin/worker-rustc $out/worker-rustc
         '';
-        coreLayerWorker =
-          name:
-          pkgs.runCommand "caos-core-layer-${name}" { } ''
-            mkdir -p $out
-            install -m 755 ${workspaceBins}/bin/${name} $out/worker
-          '';
 
         # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
         # the one script that builds a flake attribute and adds nothing to it.
@@ -459,6 +464,9 @@
                   linuxPkgs.gnutar
                   linuxPkgs.skopeo
                   linuxPkgs.jq
+                  # flock (the seed lock) and mount (the bind over /nix), for
+                  # the persistent store below.
+                  linuxPkgs.util-linux
                 ];
               })
             ];
@@ -474,6 +482,26 @@
                 # Root: the nix store is root-owned.
                 "CAOS_WORKER_UID=0"
                 "CAOS_WORKER_GID=0"
+                # A PERSISTENT STORE, the way dev/devbox gets one. Each job used
+                # to start with the image's own /nix and rebuild the toolchain,
+                # the ~176 crate dependencies and the workspace from nothing, so
+                # a cold core took ~48 minutes (measured, design/nix-bootstrap.md).
+                # The caosd runner backs /mounted-nix with the host's shared nix
+                # store volume, and stack/nix-worker seeds it with whatever the
+                # image has that it lacks and binds it over /nix (that bind is why
+                # the SYS_ADMIN grant). Only the caosd runner grants either, and
+                # only to jobs carrying `--required-caosd=true`, which the root
+                # expression's `nix=v1` lines do. A derivation built once is then
+                # a store hit for the next job and the next stack, and nix
+                # serializes concurrent builds in one store with its own locks.
+                #
+                # THIS WIDENS WHAT A FLAKE BUILD CAN DO. The container already
+                # runs nix unsandboxed, as root; with SYS_ADMIN and no seccomp or
+                # apparmor confinement it is much nearer the host. Same grant as
+                # dev/devbox, which runs only this repo's own code; this runs
+                # whatever flake an evaluated tree names.
+                "CAOS_GRANT_VOLUMES=/mounted-nix"
+                "CAOS_GRANT_SYS_ADMIN=1"
               ];
             };
             # An in-image `nix build` needs the closure REGISTERED, not merely
@@ -1889,10 +1917,10 @@ sandbox = false''
           caos-worker-cargo-docker = workerCargoImage;
           # The nix primitive's image (design/nix-bootstrap.md).
           caos-worker-nix-docker = workerNixImage;
-          # The core's fast-moving layers (see `coreLayerCaos`).
-          caos-core-layer-caos = coreLayerCaos;
-          caos-core-layer-worker-runner = coreLayerWorker "worker-runner";
-          caos-core-layer-worker-cargo = coreLayerWorker "worker-cargo";
+          # Everything in the core that depends on the workspace, as ONE output
+          # (see `caosCoreParts`): the caos and /worker layers and the two
+          # worker binaries.
+          caos-core-parts = caosCoreParts;
 
           # The flake-builder contract (design/flake-images.md): handed a tree,
           # the builder builds `#caosImage`. What this flake defines under that

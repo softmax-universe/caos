@@ -317,12 +317,15 @@ op_run_tests() {
     echo "==> granting llm-call, llm-step, dev/worker-test and std/go a mock key" >&2
   fi
 
-  # THE SUITE'S REQUEST, NAMED BEFORE IT RUNS, so the two stacks' traces join up.
-  # The dev stack writes its trace records to the SAME redis as the host — a trace
-  # key carries no cache namespace — so both sets already sit side by side; what
-  # was missing was an edge from this job to the suite's, and `caos trace-child`
-  # records exactly that. `prepare-request` forms and pushes the very ArgTree the
-  # `run` below will form, so the hash is known before any work starts.
+  # THE SUITE'S REQUEST, NAMED BEFORE IT RUNS, so the suite hangs under THIS job
+  # in the one trace a caller already has: the `trace:` hash every tool result
+  # ends with. The dev stack writes its trace records to the SAME redis as the
+  # host — a trace key carries no cache namespace — so both sets already sit side
+  # by side; what links them is an edge from this job to the suite's, and `caos
+  # trace-child` records exactly that. `prepare-request` forms and pushes the very
+  # ArgTree the `run` below will form, so the hash is known before any work
+  # starts. The suite's own hash is deliberately NOT printed or put in the
+  # report: there is one root trace, and it already contains the suite.
   #
   # CAOS_SALT IS SET HERE, for the inner client, from this message's file. The
   # (A worker has no CAOS_SALT of its own; see the header.)
@@ -335,9 +338,6 @@ op_run_tests() {
     "$CLI" prepare-request --base:@=dev/run-tests --in:@=. --cli:@=.caos-test-cli "${args[@]}") \
     || fail "forming the suite request"
   caos trace-child suite "$suite_req" || fail "linking the suite's trace to this job"
-  echo "==> suite request $suite_req (caos-cli status --all $suite_req)" >&2
-  echo "==> full trace JSON:" >&2
-  echo "    curl -s localhost:9090/status/$suite_req?all=1 | jless" >&2
 
   phase "running the suite"
   # A previous run's checkout is read-only, and this one is its replacement.
@@ -352,19 +352,12 @@ op_run_tests() {
     fail "the suite did not produce a report (exit $status)"
   fi
 
-  # THE TRACE COMMAND GOES IN THE REPORT, not just on stderr above: this job's
-  # stderr is relayed only when it FAILS, and the run you most want to take apart
-  # is a green one that was slower than it should have been. The result tree is
-  # a checkout, so its files are read-only.
+  # WHERE THE STACK'S OWN LOGS ARE goes in the report, since this job's stderr is
+  # relayed only when it FAILS. (There is no trace line: the call's trace is the
+  # `trace:` hash the tool result already ends with.) The result tree is a
+  # checkout, so its files are read-only.
   chmod u+w /tmp/suite/report
   {
-    echo
-    echo "full trace (the host reads the dev stack's records — a trace key carries"
-    echo "no cache namespace, so both stacks write to the one redis):"
-    echo "  curl -s localhost:9090/status/$suite_req?all=1 | jless"
-    echo
-    echo "and while a run is in flight, CAOS_WATCH_LINES=0 shows every node"
-    echo "instead of the first 16."
     echo
     if [ -f "$RUN/logs/runnerd.log" ]; then
       echo "runnerd: $(grep -c 'running job' "$RUN/logs/runnerd.log" || true) claimed," \

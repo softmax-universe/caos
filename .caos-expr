@@ -22,26 +22,29 @@
 EMPTY=graft --keep=x
 NIXIN=graft --in:@=. --tests=$EMPTY --dev=$EMPTY --design=$EMPTY --examples=$EMPTY --spec=$EMPTY --.github=$EMPTY --README.md=x --AGENTS.md=x --CLAUDE.md=x --SPEC.md=x
 
+# Every `nix=v1` job here carries `--required-caosd=true`, which routes it to the
+# caosd runner, the one that grants the persistent nix store (the primitive's
+# image declares it). So a derivation built by one of these jobs is a store hit
+# for the next, and for the next stack.
+
+# EVERYTHING THAT DEPENDS ON THE WORKSPACE, as ONE job: the caos binary and the
+# runner/cargo /worker as layer trees, and the two worker binaries. Five jobs
+# for these each built the workspace from scratch, serially (measured: ~31 of a
+# 46 minute cold core). The user db, /usr/bin/env and /tmp never move, so they
+# are checked in (stack/core-layers/static).
+PARTS=run --base:nix=v1 --in=$NIXIN --attr=caos-core-parts --required-caosd=true
 # The three images, built CLEAN: they depend on nothing in the workspace.
-RUNNERCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-runner-docker
-FBCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-flake-builder-docker
-CARGOCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-cargo-docker
-# What a Rust edit moves, each its own small nix output: the caos binary (with
-# its setuid sidecar) and the runner/cargo /worker. The user db, /usr/bin/env and
-# /tmp never move, so they are checked in (stack/core-layers/static).
-CAOSL=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-caos
-RUNNERW=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-worker-runner
-CARGOW=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-worker-cargo
+CARGOCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-cargo-docker --required-caosd=true
+RUNNERCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-runner-docker --required-caosd=true
+FBCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-flake-builder-docker --required-caosd=true
 # Each image is the delta `build-builtins.sh` stages by hand, {base, config.json,
 # layer<NN>...}: the clean image with its layers grafted on.
-RUNNER=graft --in=$RUNNERCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$RUNNERW
-FB=graft --in=$FBCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL
-CARGO=graft --in=$CARGOCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$CARGOW
+RUNNER=graft --in=$RUNNERCLEAN --layer00:@=stack/core-layers/static --layer01=$PARTS/caos-layer --layer02=$PARTS/worker-runner-layer
+FB=graft --in=$FBCLEAN --layer00:@=stack/core-layers/static --layer01=$PARTS/caos-layer
+CARGO=graft --in=$CARGOCLEAN --layer00:@=stack/core-layers/static --layer01=$PARTS/caos-layer --layer02=$PARTS/worker-cargo-layer
 
-DDBIN=run --base:nix=v1 --in=$NIXIN --attr=worker-deep-deps
-RUSTCBIN=run --base:nix=v1 --in=$NIXIN --attr=worker-rustc
-DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps
-RUSTC=curry --base=$RUNNER --worker1=$RUSTCBIN/bin/worker-rustc --cargo=$CARGO --runner=$RUNNER --worker-common:@=rust/crates/worker-common
+DD=curry --base=$RUNNER --worker1=$PARTS/worker-deep-deps
+RUSTC=curry --base=$RUNNER --worker1=$PARTS/worker-rustc --cargo=$CARGO --runner=$RUNNER --worker-common:@=rust/crates/worker-common
 CORE=graft --runner=$RUNNER --flake-builder=$FB --cargo=$CARGO --rustc=$RUSTC --deep-deps=$DD
 T=mount --in:@=. --caos-core=$CORE
 run --base=$DD --in=$T

@@ -762,8 +762,18 @@ fn handle(config: Arc<Config>, mut request: Request) -> std::io::Result<()> {
             );
         }
     }
-    match route(&config, &mut request) {
-        Ok(body) => request.respond(Response::from_data(body)),
+    let mut headers = Vec::new();
+    match route(&config, &mut request, &mut headers) {
+        Ok(body) => {
+            let mut response = Response::from_data(body);
+            for (name, value) in headers {
+                if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+                {
+                    response.add_header(header);
+                }
+            }
+            request.respond(response)
+        }
         Err(err) => request.respond(
             Response::from_string(format!("{}\n", err.message))
                 .with_status_code(tiny_http::StatusCode(err.status)),
@@ -873,7 +883,11 @@ fn git_token(request: &Request) -> Result<Option<String>, HttpError> {
 /// Match the request to a handler and produce the response body. Serves the
 /// storage endpoints (`/object*`), compute (`/run`, `/sub-run`), and the runner
 /// protocol (`/runner/poll`, `/runner/result`).
-fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpError> {
+fn route(
+    config: &Arc<Config>,
+    request: &mut Request,
+    headers: &mut Vec<(&'static str, String)>,
+) -> Result<Vec<u8>, HttpError> {
     let url = request.url().to_string();
     let (path, query) = match url.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -883,7 +897,15 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
     match request.method() {
         Method::Get if path == "/run" => {
             let secrets = secret_context(config, request)?;
-            compute::run(config, &query, &secrets)
+            let run = compute::run(config, &query, &secrets)?;
+            headers.push((
+                compute::RUN_CACHE_HEADER,
+                run.cache.as_header_value().to_string(),
+            ));
+            if let Some(image) = run.image {
+                headers.push((compute::RUN_IMAGE_HEADER, image));
+            }
+            Ok(run.body)
         }
         Method::Get if path.starts_with("/status/") => {
             status::serve(config, path.trim_start_matches("/status/"), &query)
@@ -1336,5 +1358,502 @@ mod tests {
             .iter()
             .any(|(key, value)| *key == "core.hooksPath" && value == &hooks.display().to_string()));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    mod run_http_tests {
+        use std::collections::HashMap;
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use gix::objs::tree::EntryKind;
+
+        use crate::storage::{store_git_blob, store_git_tree};
+        use crate::{compute, handle, initialize_repo, secret_store, Config};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        struct StubRedis {
+            addr: String,
+            kv: Arc<Mutex<HashMap<String, String>>>,
+            stop: Arc<AtomicBool>,
+        }
+
+        impl StubRedis {
+            fn start() -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap().to_string();
+                let kv: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+                let lists: Arc<Mutex<HashMap<String, Vec<String>>>> =
+                    Arc::new(Mutex::new(HashMap::new()));
+                let stop = Arc::new(AtomicBool::new(false));
+                let kv_bg = Arc::clone(&kv);
+                let lists_bg = Arc::clone(&lists);
+                let stop_bg = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while let Ok((mut stream, _)) = listener.accept() {
+                        if stop_bg.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let kv = Arc::clone(&kv_bg);
+                        let lists = Arc::clone(&lists_bg);
+                        std::thread::spawn(move || {
+                            let mut reader = BufReader::new(stream.try_clone().unwrap());
+                            while let Some(args) = Self::read_command(&mut reader) {
+                                let cmd = args.first().map(|s| s.to_ascii_uppercase());
+                                match cmd.as_deref() {
+                                    Some("GET") if args.len() == 2 => {
+                                        let val = kv.lock().unwrap().get(&args[1]).cloned();
+                                        match val {
+                                            Some(v) => {
+                                                let _ = write!(stream, "${}\r\n", v.len());
+                                                let _ = stream.write_all(v.as_bytes());
+                                                let _ = stream.write_all(b"\r\n");
+                                            }
+                                            None => {
+                                                let _ = stream.write_all(b"$-1\r\n");
+                                            }
+                                        }
+                                    }
+                                    Some("SET") if args.len() >= 3 => {
+                                        kv.lock().unwrap().insert(args[1].clone(), args[2].clone());
+                                        let _ = stream.write_all(b"+OK\r\n");
+                                    }
+                                    Some("RPUSH") if args.len() >= 3 => {
+                                        let mut guard = lists.lock().unwrap();
+                                        let list = guard.entry(args[1].clone()).or_default();
+                                        for item in &args[2..] {
+                                            list.push(item.clone());
+                                        }
+                                        let _ = write!(stream, ":{}\r\n", list.len());
+                                    }
+                                    Some("LRANGE") if args.len() >= 4 => {
+                                        let items = lists
+                                            .lock()
+                                            .unwrap()
+                                            .get(&args[1])
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let _ = write!(stream, "*{}\r\n", items.len());
+                                        for item in items {
+                                            let _ = write!(stream, "${}\r\n", item.len());
+                                            let _ = stream.write_all(item.as_bytes());
+                                            let _ = stream.write_all(b"\r\n");
+                                        }
+                                    }
+                                    _ => {
+                                        let _ = stream.write_all(b"-ERR unsupported\r\n");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+                Self { addr, kv, stop }
+            }
+
+            fn read_command(reader: &mut BufReader<impl Read>) -> Option<Vec<String>> {
+                let mut line = String::new();
+                if reader.read_line(&mut line).ok()? == 0 {
+                    return None;
+                }
+                let count: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    line.clear();
+                    reader.read_line(&mut line).ok()?;
+                    let len: usize = line.trim().strip_prefix('$')?.parse().ok()?;
+                    let mut buf = vec![0u8; len + 2];
+                    reader.read_exact(&mut buf).ok()?;
+                    buf.truncate(len);
+                    args.push(String::from_utf8(buf).ok()?);
+                }
+                Some(args)
+            }
+
+            fn get(&self, key: &str) -> Option<String> {
+                self.kv.lock().unwrap().get(key).cloned()
+            }
+
+            fn set(&self, key: &str, val: &str) {
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_string(), val.to_string());
+            }
+        }
+
+        impl Drop for StubRedis {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+                let _ = std::net::TcpStream::connect(&self.addr);
+            }
+        }
+
+        struct TestHarness {
+            dir: PathBuf,
+            config: Arc<Config>,
+            redis: StubRedis,
+            base_url: String,
+            server: Arc<tiny_http::Server>,
+        }
+
+        impl TestHarness {
+            fn start() -> Self {
+                let n = SEQ.fetch_add(1, Ordering::Relaxed);
+                let dir = std::env::temp_dir()
+                    .join(format!("caos-run-http-test-{}-{n}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let git_dir = dir.join("git");
+                initialize_repo(git_dir.to_str().unwrap()).unwrap();
+                let secrets_git = dir.join("secrets.git");
+                secret_store::init(secrets_git.to_str().unwrap()).unwrap();
+                let repo = gix::open(&git_dir).unwrap().into_sync();
+                let redis = StubRedis::start();
+                let config = Arc::new(Config {
+                    registry_push_url: "http://127.0.0.1:9".to_string(),
+                    registry_pull_host: "localhost:5000".to_string(),
+                    redis_addr: redis.addr.clone(),
+                    cache_namespace: format!("ns-{n}"),
+                    git_dir: git_dir.display().to_string(),
+                    secrets_git: secrets_git.display().to_string(),
+                    repo,
+                });
+                let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+                let base_url = format!("http://{}", server.server_addr().to_ip().unwrap());
+                let server_bg = Arc::clone(&server);
+                let config_bg = Arc::clone(&config);
+                std::thread::spawn(move || {
+                    for req in server_bg.incoming_requests() {
+                        let cfg = Arc::clone(&config_bg);
+                        std::thread::spawn(move || {
+                            let _ = handle(cfg, req);
+                        });
+                    }
+                });
+                Self {
+                    dir,
+                    config,
+                    redis,
+                    base_url,
+                    server,
+                }
+            }
+
+            fn store_blob(&self, bytes: &[u8]) -> gix::ObjectId {
+                store_git_blob(&self.config, bytes).unwrap()
+            }
+
+            fn store_pooled_arg_tree(
+                &self,
+                base_entry: gix::objs::tree::Entry,
+                pool: &str,
+            ) -> (String, String) {
+                let pool_oid = self.store_blob(pool.as_bytes());
+                let mut entries = vec![
+                    base_entry,
+                    gix::objs::tree::Entry {
+                        mode: EntryKind::Blob.into(),
+                        filename: caos_world::REQUIRED_POOL_ARG.as_bytes().to_vec().into(),
+                        oid: pool_oid,
+                    },
+                ];
+                entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+                let tree = store_git_tree(&self.config, entries).unwrap();
+                (tree.to_string(), pool_oid.to_string())
+            }
+
+            /// Claim one job from `pool_oid` via `/runner/poll` and answer it via
+            /// `/runner/result`, returning the claimed job JSON.
+            fn serve_one_runner_job(
+                &self,
+                pool_oid: String,
+                result_text: String,
+            ) -> std::thread::JoinHandle<serde_json::Value> {
+                let base_url = self.base_url.clone();
+                std::thread::spawn(move || {
+                    let poll_body = serde_json::json!({
+                        "required": { caos_world::REQUIRED_POOL_ARG: pool_oid },
+                        "ttl_ms": 5000,
+                    })
+                    .to_string();
+                    let poll_resp = minreq::post(format!("{base_url}/runner/poll"))
+                        .with_body(poll_body)
+                        .send()
+                        .unwrap();
+                    assert_eq!(poll_resp.status_code, 200);
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(poll_resp.as_bytes()).unwrap();
+                    let job = parsed["job"].clone();
+                    assert!(job.is_object(), "expected claimed job, got {parsed}");
+                    let result_body = serde_json::json!({
+                        "req": job["req"],
+                        "nonce": job["nonce"],
+                        "ok": true,
+                        "result": result_text,
+                    })
+                    .to_string();
+                    let res_resp = minreq::post(format!("{base_url}/runner/result"))
+                        .with_body(result_body)
+                        .send()
+                        .unwrap();
+                    assert_eq!(res_resp.status_code, 200);
+                    job
+                })
+            }
+
+            fn result_cache_key(&self, arg_tree: &str) -> String {
+                format!("caos:result:{}:{arg_tree}", self.config.cache_namespace)
+            }
+        }
+
+        impl Drop for TestHarness {
+            fn drop(&mut self) {
+                self.server.unblock();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        #[test]
+        fn run_reports_cache_and_image_headers_and_nocache_bypasses_read_and_write() {
+            let h = TestHarness::start();
+            let image_digest = "a1".repeat(32);
+            let docker_ref = format!("docker://example.com/worker@sha256:{image_digest}");
+            let base_blob = h.store_blob(docker_ref.as_bytes());
+            let (arg_tree, pool_oid) = h.store_pooled_arg_tree(
+                gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: b"base".to_vec().into(),
+                    oid: base_blob,
+                },
+                "test-pool-nocache-1",
+            );
+            let out_1 = h.store_blob(b"first-output");
+            let out_2 = h.store_blob(b"replay-output");
+
+            // 1. Cold `/run`: dispatches to the runner, returns `miss` + resolved image,
+            //    and caches `out_1` in Redis.
+            let runner = h.serve_one_runner_job(pool_oid.clone(), format!("blob {out_1}"));
+            let resp = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            let claimed = runner.join().unwrap();
+            assert_eq!(claimed["req"].as_str(), Some(arg_tree.as_str()));
+            assert_eq!(resp.status_code, 200);
+            assert_eq!(resp.as_str().unwrap(), format!("blob {out_1}\n"));
+            assert_eq!(
+                resp.headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert_eq!(
+                resp.headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(docker_ref.as_str())
+            );
+            assert_eq!(
+                h.redis.get(&h.result_cache_key(&arg_tree)).as_deref(),
+                Some(format!("blob {out_1}").as_str())
+            );
+
+            // 2. Warm `/run` with NO runner: answered from Redis with `hit` + resolved image.
+            let hit = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            assert_eq!(hit.status_code, 200);
+            assert_eq!(hit.as_str().unwrap(), format!("blob {out_1}\n"));
+            assert_eq!(
+                hit.headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("hit")
+            );
+            assert_eq!(
+                hit.headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(docker_ref.as_str())
+            );
+
+            // 3. `/run?req=...&nocache=1`: genuinely dispatches the exact unsalted ArgTree
+            //    to a runner (`miss`), and leaves the existing Redis entry untouched.
+            let replay_runner = h.serve_one_runner_job(pool_oid.clone(), format!("blob {out_2}"));
+            let replay = minreq::get(format!("{}/run?req={arg_tree}&nocache=1", h.base_url))
+                .send()
+                .unwrap();
+            let replay_claimed = replay_runner.join().unwrap();
+            assert_eq!(replay_claimed["req"].as_str(), Some(arg_tree.as_str()));
+            assert_eq!(replay.status_code, 200);
+            assert_eq!(replay.as_str().unwrap(), format!("blob {out_2}\n"));
+            assert_eq!(
+                replay
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert_eq!(
+                replay
+                    .headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(docker_ref.as_str())
+            );
+            assert_eq!(
+                h.redis.get(&h.result_cache_key(&arg_tree)).as_deref(),
+                Some(format!("blob {out_1}").as_str()),
+                "nocache=1 must not overwrite an existing cached result"
+            );
+
+            // 4. `/run?req=...&nocache=1` on a cold ArgTree leaves Redis unpopulated.
+            let (cold_tree, cold_pool) = h.store_pooled_arg_tree(
+                gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: b"base".to_vec().into(),
+                    oid: base_blob,
+                },
+                "test-pool-nocache-cold",
+            );
+            let cold_runner = h.serve_one_runner_job(cold_pool, format!("blob {out_1}"));
+            let cold_replay = minreq::get(format!("{}/run?req={cold_tree}&nocache=1", h.base_url))
+                .send()
+                .unwrap();
+            cold_runner.join().unwrap();
+            assert_eq!(cold_replay.status_code, 200);
+            assert_eq!(
+                cold_replay
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert!(
+                h.redis.get(&h.result_cache_key(&cold_tree)).is_none(),
+                "nocache=1 on a cold ArgTree must not populate Redis"
+            );
+
+            // 5. Malformed `nocache` parameter is rejected with 400.
+            let bad = minreq::get(format!("{}/run?req={arg_tree}&nocache=bogus", h.base_url))
+                .send()
+                .unwrap();
+            assert_eq!(bad.status_code, 400);
+        }
+
+        #[test]
+        fn git_image_cache_hit_uses_cached_manifest_digest_without_cold_conversion() {
+            let h = TestHarness::start();
+            let cfg_blob = h.store_blob(b"{}");
+            let image_tree = store_git_tree(
+                &h.config,
+                vec![gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: b"config.json".to_vec().into(),
+                    oid: cfg_blob,
+                }],
+            )
+            .unwrap();
+            let (arg_tree, _pool_oid) = h.store_pooled_arg_tree(
+                gix::objs::tree::Entry {
+                    mode: EntryKind::Tree.into(),
+                    filename: b"base".to_vec().into(),
+                    oid: image_tree,
+                },
+                "test-pool-git-image-hit",
+            );
+            let out = h.store_blob(b"cached-tree-result");
+            h.redis
+                .set(&h.result_cache_key(&arg_tree), &format!("blob {out}"));
+
+            // When `caos:image:<hash>` is absent, the result hit still succeeds without
+            // attempting a cold OCI conversion against the unreachable registry.
+            let hit_unconverted = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            assert_eq!(hit_unconverted.status_code, 200);
+            assert_eq!(hit_unconverted.as_str().unwrap(), format!("blob {out}\n"));
+            assert_eq!(
+                hit_unconverted
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("hit")
+            );
+            assert!(!hit_unconverted
+                .headers
+                .contains_key(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase()));
+
+            // Once the converted manifest digest is in `caos:image:<hash>`, a hit
+            // surfaces the full digest-pinned image reference.
+            let manifest_digest = format!("sha256:{}", "d4".repeat(32));
+            h.redis
+                .set(&format!("caos:image:{image_tree}"), &manifest_digest);
+            let hit_with_image = minreq::get(format!("{}/run?req={arg_tree}", h.base_url))
+                .send()
+                .unwrap();
+            assert_eq!(hit_with_image.status_code, 200);
+            assert_eq!(
+                hit_with_image
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("hit")
+            );
+            assert_eq!(
+                hit_with_image
+                    .headers
+                    .get(&compute::RUN_IMAGE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some(format!("docker://localhost:5000/caos@{manifest_digest}").as_str())
+            );
+        }
+
+        #[test]
+        fn concurrent_nocache_does_not_prevent_normal_caller_from_caching() {
+            let h = TestHarness::start();
+            let image_digest = "e5".repeat(32);
+            let docker_ref = format!("docker://example.com/worker@sha256:{image_digest}");
+            let base_blob = h.store_blob(docker_ref.as_bytes());
+            let (arg_tree, pool_oid) = h.store_pooled_arg_tree(
+                gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: b"base".to_vec().into(),
+                    oid: base_blob,
+                },
+                "test-pool-concurrent-nocache",
+            );
+            let out = h.store_blob(b"deterministic-step");
+
+            let r1 = h.serve_one_runner_job(pool_oid.clone(), format!("blob {out}"));
+            let r2 = h.serve_one_runner_job(pool_oid, format!("blob {out}"));
+
+            let url_normal = format!("{}/run?req={arg_tree}", h.base_url);
+            let url_nocache = format!("{}/run?req={arg_tree}&nocache=1", h.base_url);
+            let t_normal = std::thread::spawn(move || minreq::get(url_normal).send().unwrap());
+            let t_nocache = std::thread::spawn(move || minreq::get(url_nocache).send().unwrap());
+
+            let resp_normal = t_normal.join().unwrap();
+            let resp_nocache = t_nocache.join().unwrap();
+            r1.join().unwrap();
+            r2.join().unwrap();
+
+            assert_eq!(resp_normal.status_code, 200);
+            assert_eq!(resp_nocache.status_code, 200);
+            assert_eq!(
+                resp_nocache
+                    .headers
+                    .get(&compute::RUN_CACHE_HEADER.to_ascii_lowercase())
+                    .map(String::as_str),
+                Some("miss")
+            );
+            assert_eq!(
+                h.redis.get(&h.result_cache_key(&arg_tree)).as_deref(),
+                Some(format!("blob {out}").as_str())
+            );
+        }
     }
 }

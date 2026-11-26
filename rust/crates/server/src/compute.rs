@@ -47,6 +47,41 @@ const REGISTRY_REPO: &str = "caos";
 /// than one of our git images (the default).
 const DOCKER_SCHEME: &str = "docker://";
 
+/// Response header on `GET /run` stating whether the top-level ArgTree was
+/// answered from the Redis result cache (`hit`) or executed on a runner (`miss`).
+pub(crate) const RUN_CACHE_HEADER: &str = "X-Caos-Cache";
+
+/// Response header on `GET /run` naming the top-level ArgTree's resolved worker
+/// image (`docker://<ref>@sha256:<digest>`) when known without forcing a cold
+/// git-image conversion on a cache hit.
+pub(crate) const RUN_IMAGE_HEADER: &str = "X-Caos-Image";
+
+/// Whether a top-level `GET /run` was answered from the Redis result cache or
+/// dispatched to a runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheStatus {
+    Hit,
+    Miss,
+}
+
+impl CacheStatus {
+    pub(crate) fn as_header_value(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+        }
+    }
+}
+
+/// A `GET /run` response: the unchanged `"<kind> <hash>\n"` body alongside the
+/// execution facts reported in response headers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RunResponse {
+    pub(crate) body: Vec<u8>,
+    pub(crate) cache: CacheStatus,
+    pub(crate) image: Option<String>,
+}
+
 /// Media type for the uncompressed-tar layers we build from git trees. Base
 /// layers pulled from another registry keep their own (often gzipped) media type.
 const OCI_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
@@ -511,15 +546,18 @@ fn flat_arg_tree(
     Ok(Some((base, bound)))
 }
 
-/// `GET /run?req=<argTreeHash>` — run the ArgTree `<argTreeHash>` (which carries
-/// the worker image and salt under reserved entries) and return its result
-/// as `"<type> <hash>"`. (`req` is the query param's historical name; its value
-/// is the ArgTree hash.)
+/// `GET /run?req=<argTreeHash>[&nocache=1]` — run the ArgTree `<argTreeHash>`
+/// (which carries the worker image and salt under reserved entries) and return
+/// its result as `"<type> <hash>"`. (`req` is the query param's historical
+/// name; its value is the ArgTree hash.)
 ///
 /// The ArgTree being a content-addressed object means its hash *is* the cache key
 /// (it captures everything — image, salt and the rest)
 /// and the rendezvous id: an external run also pins
 /// `refs/caos/res/<argTreeHash>` at the result, so a client can fetch it by ref.
+/// `nocache=1` bypasses both reading and writing the Redis result cache for this
+/// top-level call so a replay check can force genuine runner execution of the
+/// exact unsalted ArgTree without leaving one-off salted cache entries behind.
 /// Most worker sub-runs are promise resolutions the server performs itself
 /// ([`run_work_request`] recursion). Detached worker work enters through
 /// `POST /sub-run`, which starts this same pipeline with the launching job's
@@ -528,23 +566,28 @@ pub(crate) fn run(
     config: &Config,
     query: &str,
     secrets: &crate::secrets::Context,
-) -> Result<Vec<u8>, HttpError> {
+) -> Result<RunResponse, HttpError> {
     let arg_tree = parse_arg_tree(query)?;
+    let nocache = parse_nocache(query)?;
     // An HTTP run is by definition top-level: the run stack (cycle detection)
     // exists only inside the server, threaded through promise sub-runs.
-    let result = run_work_request(
+    // Top-level publication is part of `run_work_request_inner`: a flight owner
+    // pins before releasing its ownership, and waiters receive that combined
+    // compute-and-publication outcome.
+    let (result, cache, image) = run_work_request_inner(
         config,
         &WorkRequest {
             arg_tree: &arg_tree,
             stack: &[],
             secrets,
         },
-    );
-    // Top-level publication is part of `run_work_request`: a flight owner pins
-    // before releasing its ownership, and waiters receive that combined
-    // compute-and-publication outcome.
-    let result = result?;
-    Ok(format!("{result}\n").into_bytes())
+        nocache,
+    )?;
+    Ok(RunResponse {
+        body: format!("{result}\n").into_bytes(),
+        cache,
+        image,
+    })
 }
 
 /// Parse and validate the request identity.
@@ -562,6 +605,39 @@ fn parse_arg_tree(query: &str) -> Result<String, HttpError> {
         ));
     }
     Ok(arg_tree)
+}
+
+/// Parse the optional `nocache` query parameter on `GET /run`.
+fn parse_nocache(query: &str) -> Result<bool, HttpError> {
+    let mut found = None;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("nocache", value)) => {
+                if found.is_some() {
+                    return Err(HttpError::new(400, "duplicate 'nocache' query parameter"));
+                }
+                let decoded = percent_decode(value);
+                found = Some(match decoded.as_str() {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    other => {
+                        return Err(HttpError::new(
+                            400,
+                            format!("invalid nocache value: {other:?}; expected 0 or 1"),
+                        ))
+                    }
+                });
+            }
+            None if pair == "nocache" => {
+                if found.is_some() {
+                    return Err(HttpError::new(400, "duplicate 'nocache' query parameter"));
+                }
+                found = Some(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(found.unwrap_or(false))
 }
 
 /// Run WorkRequest `request` (its ArgTree, with `request.stack` the chain of
@@ -582,6 +658,14 @@ fn result_key(config: &Config, arg_tree: &str) -> String {
 }
 
 fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, HttpError> {
+    run_work_request_inner(config, request, false).map(|(result, _, _)| result)
+}
+
+fn run_work_request_inner(
+    config: &Config,
+    request: &WorkRequest,
+    nocache: bool,
+) -> Result<(String, CacheStatus, Option<String>), HttpError> {
     let WorkRequest {
         arg_tree,
         stack,
@@ -604,16 +688,25 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
     // so a hit never re-resolves. A hit skips image conversion and the container
     // run. Redis is best-effort: a lookup error just means we run uncached.
     let key = &result_key(config, arg_tree);
-    match cache_get(&config.redis_addr, key) {
-        Ok(Some(result)) => {
-            eprintln!("cache hit: arg_tree={arg_tree} -> {result}");
-            let outcome = complete_cache_hit(arg_tree, stack, result, |result| {
-                pin_result(config, arg_tree, result)
-            });
-            return outcome.map_err(|(status, msg)| HttpError::new(status, msg));
+    if !nocache {
+        match cache_get(&config.redis_addr, key) {
+            Ok(Some(result)) => {
+                eprintln!("cache hit: arg_tree={arg_tree} -> {result}");
+                let outcome = complete_cache_hit(arg_tree, stack, result, |result| {
+                    pin_result(config, arg_tree, result)
+                });
+                let result = outcome.map_err(|(status, msg)| HttpError::new(status, msg))?;
+                return Ok((
+                    result,
+                    CacheStatus::Hit,
+                    peek_resolved_image(config, &image),
+                ));
+            }
+            Ok(None) => {
+                eprintln!("cache miss: arg_tree={arg_tree} (image={image}); running worker")
+            }
+            Err(e) => eprintln!("cache lookup failed ({e}); running worker: arg_tree={arg_tree}"),
         }
-        Ok(None) => eprintln!("cache miss: arg_tree={arg_tree} (image={image}); running worker"),
-        Err(e) => eprintln!("cache lookup failed ({e}); running worker: arg_tree={arg_tree}"),
     }
 
     // Re-entering an ArgTree already on the stack has no fixpoint — fail, listing
@@ -629,6 +722,21 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
             400,
             format!("run cycle detected:\n  {listing}"),
         ));
+    }
+
+    // A `nocache=1` call asks for an independent execution of this ArgTree:
+    // joining `flights()` could hand it a concurrent cache-hit publication
+    // without running a worker, or suppress `cache_set` for a concurrent
+    // ordinary caller parked behind it.
+    if nocache {
+        eprintln!("cache bypass (nocache=1): arg_tree={arg_tree} (image={image}); running worker");
+        let mut dispatched_image = None;
+        let result = run_dispatch(config, request, &image, &salt, None, &mut dispatched_image)
+            .map_err(|(status, msg)| HttpError::new(status, msg))?;
+        if stack.is_empty() {
+            pin_result(config, arg_tree, &result)?;
+        }
+        return Ok((result, CacheStatus::Miss, dispatched_image));
     }
 
     // Single-flight: identical concurrent requests share one run. A diamond
@@ -648,27 +756,43 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
     // errors cleanly. An owner guard clears and broadcasts if its thread
     // unwinds; a waiter never promotes itself merely because a valid run is
     // slow, since duplicate execution may repeat external side effects.
-    let (outcome, owner) = match claim_flight_after_miss(arg_tree, stack, || {
-        cache_get(&config.redis_addr, key)
-    }) {
-        FlightDisposition::Run(owner) => (run_dispatch(config, request, &image, &salt, key), owner),
-        FlightDisposition::Complete {
-            outcome,
-            cache_hit,
-            owner,
-        } => {
-            // A hit HERE is the post-claim re-read catching a result that
-            // landed while this arrival was between its own miss and the
-            // flight — the near-duplicate the re-read exists to prevent.
-            // Logged beside the ordinary hit/miss lines because it is the
-            // only place that saving is visible; the trace records nothing
-            // for it, since this arrival performed no work.
-            if cache_hit {
-                eprintln!("cache hit after claiming the flight: arg_tree={arg_tree}");
+    let mut dispatched_image = None;
+    let (outcome, cache_status, owner) =
+        match claim_flight_after_miss(arg_tree, stack, || cache_get(&config.redis_addr, key)) {
+            FlightDisposition::Run(owner) => (
+                run_dispatch(
+                    config,
+                    request,
+                    &image,
+                    &salt,
+                    Some(key),
+                    &mut dispatched_image,
+                ),
+                CacheStatus::Miss,
+                owner,
+            ),
+            FlightDisposition::Complete {
+                outcome,
+                cache_hit,
+                owner,
+            } => {
+                // A hit HERE is the post-claim re-read catching a result that
+                // landed while this arrival was between its own miss and the
+                // flight — the near-duplicate the re-read exists to prevent.
+                // Logged beside the ordinary hit/miss lines because it is the
+                // only place that saving is visible; the trace records nothing
+                // for it, since this arrival performed no work.
+                if cache_hit {
+                    eprintln!("cache hit after claiming the flight: arg_tree={arg_tree}");
+                }
+                let status = if cache_hit {
+                    CacheStatus::Hit
+                } else {
+                    CacheStatus::Miss
+                };
+                (outcome, status, owner)
             }
-            (outcome, owner)
-        }
-    };
+        };
     let outcome = match owner {
         // Any top-level participant marks the shared flight for publication,
         // even when its executor entered as a promise sub-run. The owner keeps
@@ -679,7 +803,9 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
         // has no ancestors, so it can never take the unsafe path.
         None => outcome,
     };
-    outcome.map_err(|(status, msg)| HttpError::new(status, msg))
+    let result = outcome.map_err(|(status, msg)| HttpError::new(status, msg))?;
+    let resolved_image = dispatched_image.or_else(|| peek_resolved_image(config, &image));
+    Ok((result, cache_status, resolved_image))
 }
 
 /// The dispatch + promise-resolution + cache-store tail of [`run_work_request`],
@@ -697,7 +823,8 @@ fn run_dispatch(
     request: &WorkRequest,
     image: &str,
     salt: &str,
-    key: &str,
+    cache_key: Option<&str>,
+    dispatched_image: &mut Option<String>,
 ) -> Result<String, (u16, String)> {
     // `requested` before anything else, `ended` however we leave — including
     // the continuation resolution inside, which is why this wraps the whole
@@ -706,7 +833,7 @@ fn run_dispatch(
     // the container would place every child after its parent's end and make
     // the reader call all of them evicted-and-rerun.
     crate::status::requested(config, request.arg_tree);
-    let outcome = run_dispatch_inner(config, request, image, salt, key);
+    let outcome = run_dispatch_inner(config, request, image, salt, cache_key, dispatched_image);
     crate::status::ended(config, request.arg_tree, outcome.is_ok());
     outcome
 }
@@ -716,7 +843,8 @@ fn run_dispatch_inner(
     request: &WorkRequest,
     image: &str,
     salt: &str,
-    key: &str,
+    cache_key: Option<&str>,
+    dispatched_image: &mut Option<String>,
 ) -> Result<String, (u16, String)> {
     let WorkRequest {
         arg_tree,
@@ -738,6 +866,7 @@ fn run_dispatch_inner(
     // (the set of parked polls), so there's no server-side slot to hold.
     let result = {
         let image_ref = resolve_image(config, image).map_err(fail)?;
+        *dispatched_image = Some(header_image_ref(&image_ref));
         let arg_entries = args_entries(config, arg_tree).map_err(fail)?;
         // Whether this job SAYS it is answered by a seeder, which it does by
         // carrying `required-pool=seeded` — the same arg that keeps the generic
@@ -791,18 +920,21 @@ fn run_dispatch_inner(
     };
 
     // Cache the (resolved) result for next time (best-effort) — unless a `catch`
-    // folded a sub-run failure into it. A failed sub-run is deliberately never
-    // cached; memoizing the parent that swallowed it would reintroduce exactly
-    // the memoized red that rule exists to prevent, and make it unretryable.
+    // folded a sub-run failure into it, or the caller requested `nocache=1`.
+    // A failed sub-run is deliberately never cached; memoizing the parent that
+    // swallowed it would reintroduce exactly the memoized red that rule exists
+    // to prevent, and make it unretryable.
     if caught {
         eprintln!("ran worker: arg_tree={arg_tree} -> {result} (not cached: caught a failure)");
-    } else {
+    } else if let Some(key) = cache_key {
         match cache_set(&config.redis_addr, key, &result) {
             Ok(()) => eprintln!("ran worker: arg_tree={arg_tree} -> {result} (cached)"),
             Err(e) => {
                 eprintln!("ran worker: arg_tree={arg_tree} -> {result} (cache store failed: {e})")
             }
         }
+    } else {
+        eprintln!("ran worker: arg_tree={arg_tree} -> {result} (not cached: nocache=1)");
     }
 
     Ok(result)
@@ -2296,6 +2428,41 @@ fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Format a runner-pullable image reference from [`resolve_image`] for
+/// [`RUN_IMAGE_HEADER`]. Digest-pinned registry refs and `seeded*` sentinels
+/// carry [`DOCKER_SCHEME`]; a raw 40-hex git tree passed through under
+/// `CAOS_IMAGE_RESOLVE=none` stays bare.
+fn header_image_ref(resolved: &str) -> String {
+    if resolved.starts_with(DOCKER_SCHEME)
+        || (resolved.len() == 40 && resolved.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        resolved.to_string()
+    } else {
+        format!("{DOCKER_SCHEME}{resolved}")
+    }
+}
+
+/// Resolve `image` for [`RUN_IMAGE_HEADER`] when the answer is already known,
+/// without running a cold git-image conversion or pushing layers to the
+/// registry. A result-cache hit intentionally skips image conversion; tarring
+/// and uploading a layer tree just to stamp a header would turn a cache hit
+/// into a build and fail when the registry is absent.
+fn peek_resolved_image(config: &Config, image: &str) -> Option<String> {
+    if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
+        validate_docker_reference(reference, true).ok()?;
+        return Some(header_image_ref(reference));
+    }
+    if !image.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    if std::env::var("CAOS_IMAGE_RESOLVE").as_deref() == Ok("none") {
+        return Some(header_image_ref(image));
+    }
+    let image_key = format!("caos:image:{image}");
+    let manifest_digest = cache_get(&config.redis_addr, &image_key).ok().flatten()?;
+    Some(header_image_ref(&image_ref(config, &manifest_digest)))
 }
 
 /// Resolve the `image` parameter to a reference the host docker daemon can run.
@@ -4237,5 +4404,51 @@ mod continuation_shape_tests {
         assert!(pinned.status.success());
         assert_eq!(String::from_utf8(pinned.stdout).unwrap().trim(), hash);
         std::fs::remove_dir_all(git_dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod run_header_and_nocache_tests {
+    use super::*;
+
+    #[test]
+    fn nocache_query_parameter_parses_strictly() {
+        let req = format!("req={}", "a".repeat(40));
+        assert!(!parse_nocache(&req).unwrap());
+        assert!(!parse_nocache(&format!("{req}&nocache=0")).unwrap());
+        assert!(!parse_nocache(&format!("{req}&nocache=false")).unwrap());
+        assert!(parse_nocache(&format!("{req}&nocache=1")).unwrap());
+        assert!(parse_nocache(&format!("nocache=1&{req}")).unwrap());
+        assert!(parse_nocache(&format!("{req}&nocache=true")).unwrap());
+        assert!(parse_nocache(&format!("{req}&nocache")).unwrap());
+        assert!(parse_nocache(&format!("{req}&nocache=%31")).unwrap());
+
+        for invalid in [
+            format!("{req}&nocache="),
+            format!("{req}&nocache=2"),
+            format!("{req}&nocache=yes"),
+            format!("{req}&nocache=1&nocache=0"),
+            format!("{req}&nocache&nocache=1"),
+        ] {
+            let err = parse_nocache(&invalid)
+                .expect_err(&format!("{invalid:?} should be rejected as 400"));
+            assert_eq!(err.status(), 400, "{invalid:?}: {}", err.message());
+        }
+    }
+
+    #[test]
+    fn header_image_ref_uses_docker_scheme_except_for_raw_git_hashes() {
+        let digest = "b".repeat(64);
+        assert_eq!(
+            header_image_ref(&format!("localhost:5000/caos@sha256:{digest}")),
+            format!("docker://localhost:5000/caos@sha256:{digest}")
+        );
+        assert_eq!(
+            header_image_ref(&format!("docker://ghcr.io/example/worker@sha256:{digest}")),
+            format!("docker://ghcr.io/example/worker@sha256:{digest}")
+        );
+        assert_eq!(header_image_ref("seeded-rustc"), "docker://seeded-rustc");
+        let git_tree = "c".repeat(40);
+        assert_eq!(header_image_ref(&git_tree), git_tree);
     }
 }

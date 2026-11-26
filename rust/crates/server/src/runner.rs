@@ -128,8 +128,12 @@ enum PollReply {
 
 /// What a dispatch is answered with (over its per-dispatch channel).
 enum Outcome {
-    /// The worker's `"<type> <hash>"` (possibly a `promise` the caller resolves).
-    Done(String),
+    /// The worker's `"<type> <hash>"` (possibly a `promise` the caller resolves),
+    /// alongside any immutable `worker_image` digest advertised by the runner.
+    Done {
+        result: String,
+        worker_image: Option<String>,
+    },
     /// The runner reported failure.
     Failed(String),
 }
@@ -189,6 +193,9 @@ struct ParkedPoll {
     /// Set on the poll of a key's OWNER: the tenure it polls on behalf of. Such
     /// a poll is answered only from that owner's queue.
     tenure: Option<String>,
+    /// Optional digest-pinned worker binary/image identity (`<name>@sha256:<64-hex>`)
+    /// advertised by a native pool runner on `/runner/poll`.
+    worker_image: Option<String>,
 }
 
 /// A dispatched job's lifecycle phase.
@@ -233,6 +240,8 @@ struct Job {
     key: Option<String>,
     /// The tenure whose owner this job was handed to, once it has been.
     tenure: Option<String>,
+    /// Immutable worker binary/image identity advertised by the poll that claimed this job.
+    claimed_worker_image: Option<String>,
 }
 
 /// The runner that owns one key: the only one that is ever handed a job for it.
@@ -247,6 +256,10 @@ struct Owner {
     current: Option<u64>,
     /// The id of its parked poll, when it is between jobs.
     parked: Option<u64>,
+    /// Required args of the runner holding this ownership (for pool identity queries).
+    required: ArgTree,
+    /// Optional immutable worker binary/image identity of this owner.
+    worker_image: Option<String>,
 }
 
 /// The rendezvous state: parked polls and dispatched jobs, one lock.
@@ -467,9 +480,105 @@ fn payload(job: &Job) -> String {
     body.to_string()
 }
 
+/// Validate an optional runner-advertised `worker_image` identity (`<name>@sha256:<64-lowercase-hex>`,
+/// with or without a leading `docker://` scheme). Mutable tags and rendezvous sentinels are rejected.
+fn parse_optional_worker_image(v: &serde_json::Value) -> Result<Option<String>, HttpError> {
+    let Some(field) = v.get("worker_image") else {
+        return Ok(None);
+    };
+    if field.is_null() {
+        return Ok(None);
+    }
+    let Some(raw) = field.as_str() else {
+        return Err(HttpError::new(400, "worker_image must be a string"));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(HttpError::new(400, "worker_image cannot be empty"));
+    }
+    let without_scheme = trimmed.strip_prefix("docker://").unwrap_or(trimmed);
+    if without_scheme == "seeded" || without_scheme.starts_with("seeded-") {
+        return Err(HttpError::new(
+            400,
+            "worker_image cannot be a seeded sentinel",
+        ));
+    }
+    let Some((name, digest)) = without_scheme.rsplit_once("@sha256:") else {
+        return Err(HttpError::new(
+            400,
+            format!(
+                "worker_image {trimmed:?} must be pinned as <name>@sha256:<64 lowercase hex digits>"
+            ),
+        ));
+    };
+    if name.is_empty() || name.bytes().any(|b| b <= b' ' || b == 0x7f) || !valid_hex(digest, 64) {
+        return Err(HttpError::new(
+            400,
+            format!(
+                "invalid worker_image {trimmed:?}; expected <name>@sha256:<64 lowercase hex digits>"
+            ),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Resolve the immutable `worker_image` advertised by live runners polling `required-pool = pool`.
+///
+/// - Returns `Ok(None)` when no live runner in `pool` advertises a `worker_image` (preserving
+///   existing behavior for `seeded` core-seeder runners).
+/// - Returns `Ok(Some(image))` when all live runners in `pool` advertising `worker_image` agree.
+/// - Fails closed (`409 Conflict`) if live runners in `pool` advertise conflicting digests.
+pub(crate) fn resolve_pool_worker_image(pool: &str) -> Result<Option<String>, HttpError> {
+    let target_oid = pool_oid(pool);
+    let now = Instant::now();
+    let st = lock();
+    let mut images = std::collections::BTreeSet::new();
+    for p in &st.parked {
+        if now < p.matchable_until
+            && p.required.get(caos_world::REQUIRED_POOL_ARG) == Some(&target_oid)
+        {
+            if let Some(ref img) = p.worker_image {
+                images.insert(img.clone());
+            }
+        }
+    }
+    for owner in st.owners.values() {
+        if now < owner.lease_until
+            && owner.required.get(caos_world::REQUIRED_POOL_ARG) == Some(&target_oid)
+        {
+            if let Some(ref img) = owner.worker_image {
+                images.insert(img.clone());
+            }
+        }
+    }
+    for job in st.jobs.values() {
+        if matches!(job.phase, Phase::Inflight)
+            && job.arg_entries.get(caos_world::REQUIRED_POOL_ARG) == Some(&target_oid)
+        {
+            if let Some(ref img) = job.claimed_worker_image {
+                images.insert(img.clone());
+            }
+        }
+    }
+    match images.len() {
+        0 => Ok(None),
+        1 => Ok(images.into_iter().next()),
+        _ => {
+            let list: Vec<String> = images.into_iter().collect();
+            Err(HttpError::new(
+                409,
+                format!(
+                    "pool {pool:?} has live runners advertising conflicting worker_image digests: {}",
+                    list.join(", ")
+                ),
+            ))
+        }
+    }
+}
+
 /// Run ArgTree `arg_tree` (its top level `arg_entries`, resolved image
 /// `image_ref`) through the runner rendezvous, blocking until a runner posts its
-/// result.
+/// result. Returns `(result_spec, optional_runner_worker_image)`.
 pub(crate) fn dispatch(
     arg_tree: &str,
     arg_entries: ArgTree,
@@ -478,7 +587,7 @@ pub(crate) fn dispatch(
     secrets: Vec<(String, String)>,
     mut start_sub_run: impl FnMut(&str) -> Result<(), HttpError>,
     mut on_note: impl FnMut(Note),
-) -> Result<String, HttpError> {
+) -> Result<(String, Option<String>), HttpError> {
     let (event_tx, event_rx) = mpsc::channel();
     let id = {
         let mut st = lock();
@@ -519,6 +628,7 @@ pub(crate) fn dispatch(
                 events: event_tx,
                 key,
                 tenure: None,
+                claimed_worker_image: None,
             },
         );
         offer_job(&mut st, id);
@@ -561,7 +671,10 @@ pub(crate) fn dispatch(
         };
         match event_rx.recv_timeout(wait.max(Duration::from_millis(10))) {
             Ok(DispatchEvent::Note(note)) => on_note(note),
-            Ok(DispatchEvent::Outcome(Outcome::Done(result))) => return Ok(result),
+            Ok(DispatchEvent::Outcome(Outcome::Done {
+                result,
+                worker_image,
+            })) => return Ok((result, worker_image)),
             Ok(DispatchEvent::Outcome(Outcome::Failed(message))) => {
                 return Err(HttpError::new(500, message))
             }
@@ -779,6 +892,7 @@ fn requeue(st: &mut State, id: u64, defer_generic: Option<Duration>) {
     let old = {
         let job = st.jobs.get_mut(&id).expect("job present under lock");
         let old = std::mem::replace(&mut job.nonce, nonce.clone());
+        job.claimed_worker_image = None;
         job.phase = Phase::Pending {
             deadline: Instant::now() + pending_timeout(),
             defer_generic_until: defer_generic.map(|d| Instant::now() + d),
@@ -832,7 +946,13 @@ fn offer_job(st: &mut State, id: u64) {
         .map(|(i, _)| i);
     if let Some(i) = best {
         let poll = st.parked.remove(i);
-        claim(st, id, &poll.reply);
+        claim(
+            st,
+            id,
+            &poll.reply,
+            &poll.required,
+            poll.worker_image.clone(),
+        );
         return;
     }
     // No match: kick the deepest poll whose lineage covers the job. One kick
@@ -859,15 +979,22 @@ fn offer_job(st: &mut State, id: u64) {
 /// keyed and its key has no owner yet, the poll's runner becomes the owner in
 /// this same step, under the one lock that every offer takes — so two first
 /// messages cannot both claim, and the second finds an owner and queues.
-fn claim(st: &mut State, id: u64, reply: &mpsc::Sender<PollReply>) {
+fn claim(
+    st: &mut State,
+    id: u64,
+    reply: &mpsc::Sender<PollReply>,
+    runner_required: &ArgTree,
+    worker_image: Option<String>,
+) {
     let key = st.jobs.get(&id).and_then(|job| job.key.clone());
     if let Some(key) = key {
         if !st.by_key.contains_key(&key) {
-            create_owner(st, id, key);
+            create_owner(st, id, key, runner_required.clone(), worker_image.clone());
         }
     }
     let job = st.jobs.get_mut(&id).expect("job present under lock");
     job.phase = Phase::Inflight;
+    job.claimed_worker_image = worker_image;
     let _ = job.events.send(DispatchEvent::Note(Note::Started));
     let body = payload(job);
     let _ = reply.send(PollReply::Job(body));
@@ -876,7 +1003,13 @@ fn claim(st: &mut State, id: u64, reply: &mpsc::Sender<PollReply>) {
 /// Make the runner that is taking job `id` the owner of `key`, and pull every
 /// other pending job for the key into its queue. Jobs for the key that arrive
 /// from now on queue through [`offer_job`].
-fn create_owner(st: &mut State, id: u64, key: String) {
+fn create_owner(
+    st: &mut State,
+    id: u64,
+    key: String,
+    required: ArgTree,
+    worker_image: Option<String>,
+) {
     let tenure = new_nonce(st.next_id);
     st.next_id += 1;
     let mut waiting: Vec<(Instant, u64)> = st
@@ -904,6 +1037,8 @@ fn create_owner(st: &mut State, id: u64, key: String) {
             queue: waiting.into_iter().map(|(_, other)| other).collect(),
             current: Some(id),
             parked: None,
+            required,
+            worker_image,
         },
     );
     st.by_key.insert(key, tenure.clone());
@@ -948,7 +1083,13 @@ fn drain_owner(st: &mut State, tenure: &str) {
     let id = owner.queue.pop_front().expect("queue checked non-empty");
     owner.current = Some(id);
     st.jobs.get_mut(&id).expect("job present under lock").tenure = Some(tenure.to_string());
-    claim(st, id, &poll.reply);
+    claim(
+        st,
+        id,
+        &poll.reply,
+        &poll.required,
+        poll.worker_image.clone(),
+    );
 }
 
 /// The owner's job has finished. With `keep` the runner stays the owner and is
@@ -1075,6 +1216,7 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
     let margin = (ttl / 5).min(MAX_POLL_MARGIN);
 
     let tenure = v["tenure"].as_str().map(str::to_string);
+    let worker_image = parse_optional_worker_image(&v)?;
 
     let (reply_tx, reply_rx) = mpsc::channel();
     let poll_id = {
@@ -1091,6 +1233,7 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
                 matchable_until: Instant::now() + ttl - margin,
                 reply: reply_tx,
                 tenure: Some(tenure.clone()),
+                worker_image,
             };
             if !owner_poll(&mut st, tenure, poll)? {
                 // Answered from the queue at once.
@@ -1103,7 +1246,7 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
         } else {
             // A pending job may already be waiting for exactly this runner.
             if let Some(id) = best_pending(&st, &required) {
-                claim(&mut st, id, &reply_tx);
+                claim(&mut st, id, &reply_tx, &required, worker_image);
                 match reply_rx.recv() {
                     Ok(PollReply::Job(payload)) => return reply_job(&payload),
                     _ => return Err(HttpError::new(500, "poll reply lost")),
@@ -1118,6 +1261,7 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
                 matchable_until: Instant::now() + ttl - margin,
                 reply: reply_tx,
                 tenure: None,
+                worker_image,
             });
             id
         }
@@ -1167,10 +1311,17 @@ fn owner_poll(st: &mut State, tenure: &str, poll: ParkedPoll) -> Result<bool, Ht
         return Err(HttpError::new(409, "tenure has a job in flight"));
     }
     owner.lease_until = Instant::now() + lease_ttl();
+    if poll.worker_image.is_some() {
+        owner.worker_image = poll.worker_image.clone();
+    }
     if let Some(id) = owner.queue.pop_front() {
         owner.current = Some(id);
+        let eff_img = poll
+            .worker_image
+            .clone()
+            .or_else(|| st.owners.get(tenure).and_then(|o| o.worker_image.clone()));
         st.jobs.get_mut(&id).expect("job present under lock").tenure = Some(tenure.to_string());
-        claim(st, id, &poll.reply);
+        claim(st, id, &poll.reply, &poll.required, eff_img);
         return Ok(false);
     }
     owner.parked = Some(poll.id);
@@ -1231,6 +1382,8 @@ pub(crate) fn result(authorization: Option<&str>, body: &str) -> Result<Vec<u8>,
         return Err(HttpError::new(400, "result missing req/nonce"));
     }
 
+    let result_worker_image = parse_optional_worker_image(&v)?;
+
     let mut st = lock();
     let Some(&id) = st.by_nonce.get(nonce) else {
         return Err(HttpError::new(410, "unknown or consumed nonce"));
@@ -1270,9 +1423,13 @@ pub(crate) fn result(authorization: Option<&str>, body: &str) -> Result<Vec<u8>,
             .events
             .send(DispatchEvent::Note(Note::OutTrace(oid.to_string())));
     }
+    let effective_worker_image = result_worker_image.or_else(|| job.claimed_worker_image.clone());
     let outcome = if v["ok"].as_bool() == Some(true) {
         match v["result"].as_str() {
-            Some(result) if !result.trim().is_empty() => Outcome::Done(result.trim().to_string()),
+            Some(result) if !result.trim().is_empty() => Outcome::Done {
+                result: result.trim().to_string(),
+                worker_image: effective_worker_image,
+            },
             _ => Outcome::Failed("runner posted ok without a result".to_string()),
         }
     } else {
@@ -1403,6 +1560,7 @@ mod tests {
                 enqueued: Instant::now(),
                 events,
                 tenure: None,
+                claimed_worker_image: None,
             },
         );
         offer_job(st, id);
@@ -1421,6 +1579,7 @@ mod tests {
             matchable_until: Instant::now() + Duration::from_secs(60),
             reply,
             tenure: None,
+            worker_image: None,
         });
         rx
     }
@@ -1437,6 +1596,7 @@ mod tests {
             matchable_until: Instant::now() + Duration::from_secs(60),
             reply,
             tenure: Some(tenure.to_string()),
+            worker_image: None,
         };
         let Ok(parked) = owner_poll(st, tenure, poll) else {
             panic!("the tenure is not live");
@@ -1599,6 +1759,7 @@ mod tests {
             matchable_until: Instant::now() + Duration::from_secs(60),
             reply,
             tenure: Some(tenure.clone()),
+            worker_image: None,
         };
         assert!(owner_poll(&mut st, &tenure, poll).is_err());
     }

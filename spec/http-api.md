@@ -227,7 +227,8 @@ Documented elsewhere; listed here so the surface is in one place.
 
 | endpoint | purpose | see |
 |---|---|---|
-| `GET /run?req=<argtree hash>` | run an ArgTree already in the store | SPEC "Submitting work" |
+| `GET /run?req=<argtree hash>[&nocache=1]` | run an ArgTree already in the store (`nocache=1` skips reading and writing the Redis result cache; `200` responses carry `X-Caos-Cache: hit\|miss` and, when resolved, `X-Caos-Image: <image ref>`) | SPEC "Submitting work" |
+| `GET /resolve-image?image=<hash\|docker://ref\|seeded-pool>` | resolve an image tree, `docker://` tag, or live `seeded-<pool>` worker pool to its pinned `<name>@sha256:<digest>` identity (`409` on conflicting pool digests) | `rust/crates/server/src/main.rs` |
 | `GET /eval?root:hash=<oid>&path=<p>` or `root:@@=<locator>` | evaluate a path under `.caos-expr` | SPEC "Evaluating a path" |
 | `GET /status/<ticket or arg tree hash>[?all=1]` | trace of a run | SPEC "Tracing" |
 | `GET\|HEAD /object/<hash>`, `POST /object` | content-addressed storage | `design/commits.md` |

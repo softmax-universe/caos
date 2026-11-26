@@ -14,9 +14,9 @@
 # Undeclared is UNAVAILABLE, deliberately: a missing line fails the
 # test loudly rather than letting it borrow something ambient. An
 # unnecessary line only over-keys the test, so when in doubt, declare.
-../../std/runner runner
-../../std/rustc rustc
-../../std/cargo cargo
+../../caos-core/runner runner
+../../caos-core/rustc rustc
+../../caos-core/cargo cargo
 # The image this client test runs in, with the client-repo setup as its
 # /worker: a dependency, not a harness.
 ../../std/bash bash

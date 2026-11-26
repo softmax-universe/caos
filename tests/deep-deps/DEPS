@@ -1,4 +1,4 @@
 # What this test reaches for (format `<path> <name>`).
 ../../std/bash bash
-../../std/deep-deps deep-deps
-../../std/runner runner
+../../caos-core/deep-deps deep-deps
+../../caos-core/runner runner

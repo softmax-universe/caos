@@ -1,6 +1,6 @@
 # DEPS format and dependency-closure rules are documented in
 # design/caos-expr.md.
-../../std/cargo cargo
+../../caos-core/cargo cargo
 # The image this client test runs in, with the client-repo setup as its
 # /worker: a dependency, not a harness.
 ../../dev/cli-test cli-test

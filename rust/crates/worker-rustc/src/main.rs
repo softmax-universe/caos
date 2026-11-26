@@ -38,6 +38,33 @@ use worker_common::{
     run_then, run_worker, scratch, Arg,
 };
 
+/// An image bound as an arg, in either form a curry can carry: a blob holding
+/// the image's hash (what `build-builtins.sh` binds, `--cargo=<hash>`), or the
+/// image tree itself (what the repo's root expression binds, `--cargo=$CARGO`).
+enum Image {
+    Hash(String),
+    Path(String),
+}
+
+fn read_image(name: &str) -> Result<Image, String> {
+    let at = arg(name);
+    caos(["get", &at])?;
+    if Path::new(&at).is_dir() {
+        Ok(Image::Path(at))
+    } else {
+        Ok(Image::Hash(read_arg(name)?))
+    }
+}
+
+impl Image {
+    fn as_arg(&self) -> Arg<'_> {
+        match self {
+            Image::Hash(hash) => Arg::Hash(hash),
+            Image::Path(path) => Arg::Path(path),
+        }
+    }
+}
+
 fn main() -> ExitCode {
     run_worker("rustc", run)
 }
@@ -74,13 +101,13 @@ fn start() -> Result<(), String> {
     // The cargo worker's image ref rides as a literal (a hash string, read as
     // content): rustc is a SEEDED core item, so bootstrap hand-builds its curry
     // binding `--cargo=<cargo image hash>` (design/caos-expr.md, Phase 3).
-    let cargo = read_arg("cargo")?;
+    let cargo = read_image("cargo")?;
     // The default runner arrives the SAME way and is not normally a caller's
     // argument: rustc DEPENDS on it and curries onto it itself. A tool that
     // needs extra runtime capabilities can pass the distinct `output-runner`
     // arg; do not rebind `runner`, which is already part of the seeded rustc
     // curry and also determines where this factory executes.
-    let runner = read_arg("runner")?;
+    let runner = read_image("runner")?;
 
     let proj = scratch("proj")?;
     let src = arg("src");
@@ -136,7 +163,7 @@ fn start() -> Result<(), String> {
     // (musl, dev) precompiled the dependency graph at — so the tool's deps are
     // reused from the seeded target/ rather than recompiled. musl still links
     // static regardless of profile, so the binary runs on any base.
-    let build = caos_curry(Arg::Hash(&cargo), &[("cmd", Arg::Lit("build"))])?;
+    let build = caos_curry(cargo.as_arg(), &[("cmd", Arg::Lit("build"))])?;
     // Ourselves, in the `finish` position: rebuild our own curry (the runner
     // image with our bin re-bound) plus what finish needs. `cargo` and
     // `worker-common` deliberately don't ride — finish's cache key is just
@@ -144,7 +171,7 @@ fn start() -> Result<(), String> {
     let bin = arg("worker1");
     let output_runner = arg("output-runner");
     let mut kvs: Vec<(&str, Arg)> =
-        vec![("stage", Arg::Lit("finish")), ("runner", Arg::Lit(&runner))];
+        vec![("stage", Arg::Lit("finish")), ("runner", runner.as_arg())];
     if Path::new(&output_runner).exists() {
         kvs.push(("output-runner", Arg::Path(&output_runner)));
     }
@@ -181,8 +208,8 @@ fn finish() -> Result<(), String> {
     let runtime = if Path::new(&output_runner).exists() {
         Arg::Path(&output_runner)
     } else {
-        default_runner = read_arg("runner")?;
-        Arg::Hash(&default_runner)
+        default_runner = read_image("runner")?;
+        default_runner.as_arg()
     };
     let curried = caos_curry(runtime, &[("worker1", Arg::Path(&bin))])?;
     caos(["get-hash", &curried, "/cas/out"])

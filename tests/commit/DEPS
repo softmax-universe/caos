@@ -14,7 +14,7 @@
 # Undeclared is UNAVAILABLE, deliberately: a missing line fails the
 # test loudly rather than letting it borrow something ambient. An
 # unnecessary line only over-keys the test, so when in doubt, declare.
-../../std/runner runner
+../../caos-core/runner runner
 ../../std/bash bash
-../../std/cargo cargo
-../../std/rustc rustc
+../../caos-core/cargo cargo
+../../caos-core/rustc rustc

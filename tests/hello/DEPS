@@ -1,5 +1,5 @@
 # What this test reaches for (format `<path> <name>`).
 ../../std/bash bash
 ../../std/hello hello
-../../std/rustc rustc
-../../std/cargo cargo
+../../caos-core/rustc rustc
+../../caos-core/cargo cargo

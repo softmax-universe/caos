@@ -6,5 +6,5 @@
 # rust   everything cargo compiles: Cargo.toml, Cargo.lock, rust-toolchain.toml
 #        and crates/, in one directory precisely so a package can declare it
 ../../std/bash bash
-../../std/cargo cargo
+../../caos-core/cargo cargo
 ../../rust rust

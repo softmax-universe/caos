@@ -6,7 +6,7 @@
 ../../std/bash-tool bash-tool
 ../../std/llm-step llm-step
 ../../std/rgrep rgrep
-../../std/cargo cargo
+../../caos-core/cargo cargo
 ../../std/bash bash
 # The image this client test runs in, with the client-repo setup as its
 # /worker: a dependency, not a harness.

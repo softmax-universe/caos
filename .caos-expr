@@ -1,24 +1,46 @@
-# The REPO's root expression (design/caos-expr.md, "Deep deps"): "Most repos
-# will have a top-level `.caos-expr` that invokes `std/deep-deps` on the tree,
-# allowing any directory to declare deps outside its subtree." This is that.
+# The REPO's root expression (design/caos-expr.md, "Deep deps"; design/nix-bootstrap.md,
+# section 3). Any directory in this tree may carry a `DEPS` file naming what it
+# depends on by PATH, and evaluating the tree mounts each dependency — recursively
+# deepened and shared by hash — inside the directory that declared it, at
+# `DEEP-DEPS/<name>`.
 #
-# Any directory in this tree may carry a `DEPS` file naming what it depends on
-# by PATH, and evaluating the tree mounts each dependency — recursively deepened
-# and shared by hash — inside the directory that declared it, at
-# `DEEP-DEPS/<name>`. `tests/<name>/DEPS` is the live consumer: a test declares
-# `../../std/rgrep rgrep` and the suite hands it exactly that subgraph, so what
-# re-keys a test is what the test actually reaches for.
+# The CORE (runner, flake-builder, cargo, rustc, deep-deps) is no longer seeded. It
+# is built here, from THIS tree's own flake, by the `nix=v1` primitive, and grafted
+# into the evaluated tree at `caos-core/`. std, tests and dev name a core item by a
+# `DEPS` path (`../../caos-core/rustc rustc`), like any other dependency. Nothing
+# here knows its own rev: whichever caos commit this tree is, it builds ITS core.
 #
-# `std/deep-deps` is named BY PATH, and that is what breaks the cycle:
-# `resolve_expr_base` evaluates a path-named subtree against ITSELF, so it sees
-# `std/deep-deps`'s own `.caos-expr` — the `docker://seeded-deep-deps` sentinel
-# the core-seeder-runner answers — and never re-enters this expression. Nor does
-# the result: `eval_path` descends into what an expression produced without
-# re-checking that result's own root, so the deepened tree's copy of this file
-# is inert.
-#
-# This works only because every dependency a directory names is IN the tree.
-# That is why `std/runner` exists as a seeded `{.caos-expr}` sentinel rather
-# than a name published straight from a host-built delta, and why the test
-# fixture binary moved to `std/llm-stub` instead of riding in a build output.
-run --base:@=std/deep-deps --in:@=.
+# This is the seed half of `stack/build-builtins.sh`, written as an expression.
+# `--in:@=.` is the whole repo; nix keeps the repeated builds cheap, and each key
+# is cached per rev.
+
+# WHAT THE NIX BUILDS SEE: the repo with the directories the flake never reads
+# blanked, so an edit to a test, a dev script or a design note does not re-key
+# the whole core. (The flake builds from rust/, std/cargo, std/flake-builder, its
+# own files and the small integrations/prod/tools it names; nothing else.)
+EMPTY=graft --keep=x
+NIXIN=graft --in:@=. --tests=$EMPTY --dev=$EMPTY --design=$EMPTY --examples=$EMPTY --spec=$EMPTY --.github=$EMPTY
+
+# The three images, built CLEAN: they depend on nothing in the workspace.
+RUNNERCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-runner-docker
+FBCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-flake-builder-docker
+CARGOCLEAN=run --base:nix=v1 --in=$NIXIN --attr=caos-worker-cargo-docker
+# What a Rust edit moves, each its own small nix output: the caos binary (with
+# its setuid sidecar) and the runner/cargo /worker. The user db, /usr/bin/env and
+# /tmp never move, so they are checked in (stack/core-layers/static).
+CAOSL=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-caos
+RUNNERW=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-worker-runner
+CARGOW=run --base:nix=v1 --in=$NIXIN --attr=caos-core-layer-worker-cargo
+# Each image is the delta `build-builtins.sh` stages by hand, {base, config.json,
+# layer<NN>...}: the clean image with its layers grafted on.
+RUNNER=graft --in=$RUNNERCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$RUNNERW
+FB=graft --in=$FBCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL
+CARGO=graft --in=$CARGOCLEAN --layer00:@=stack/core-layers/static --layer01=$CAOSL --layer02=$CARGOW
+
+DDBIN=run --base:nix=v1 --in=$NIXIN --attr=worker-deep-deps
+RUSTCBIN=run --base:nix=v1 --in=$NIXIN --attr=worker-rustc
+DD=curry --base=$RUNNER --worker1=$DDBIN/bin/worker-deep-deps
+RUSTC=curry --base=$RUNNER --worker1=$RUSTCBIN/bin/worker-rustc --cargo=$CARGO --runner=$RUNNER --worker-common:@=rust/crates/worker-common
+CORE=graft --runner=$RUNNER --flake-builder=$FB --cargo=$CARGO --rustc=$RUSTC --deep-deps=$DD
+T=mount --in:@=. --caos-core=$CORE
+run --base=$DD --in=$T

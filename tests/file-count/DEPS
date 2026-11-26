@@ -15,6 +15,6 @@
 # test loudly rather than letting it borrow something ambient. An
 # unnecessary line only over-keys the test, so when in doubt, declare.
 ../../std/bash bash
-../../std/runner runner
-../../std/rustc rustc
-../../std/cargo cargo
+../../caos-core/runner runner
+../../caos-core/rustc rustc
+../../caos-core/cargo cargo

@@ -399,6 +399,33 @@
           };
         };
 
+        # The core's FAST-MOVING parts, one tiny derivation each
+        # (design/nix-bootstrap.md, "The core images carry caos"). The core
+        # images above are CLEAN: they depend on nothing in the workspace and
+        # change only with nixpkgs, the toolchain or the baked deps. What a Rust
+        # edit moves is the caos binary and the runner/cargo /worker, so they are
+        # separate outputs the root expression grafts on as layers, in the same
+        # git-docker layer-tree shape build-builtins.sh stages (layer<NN>/ trees
+        # with a `<name>.caosmeta` sidecar for the modes git cannot record). They
+        # are plain directories, so the `nix=v1` primitive returns them as trees,
+        # and a Rust edit rebuilds a few megabytes, never an image.
+        #
+        # setuid rides in the sidecar: it is DATA here, and the server applies
+        # the mode when it rebuilds the layer, so nix never holds a setuid file.
+        # The static pieces (user db, /usr/bin/env, /tmp) are checked in at
+        # stack/core-layers/static, since they never move.
+        coreLayerCaos = pkgs.runCommand "caos-core-layer-caos" { } ''
+          mkdir -p $out/bin
+          install -m 755 ${workspaceBins}/bin/caos $out/bin/caos
+          printf '{"mode":"4755","uid":0,"gid":0}' > $out/bin/caos.caosmeta
+        '';
+        coreLayerWorker =
+          name:
+          pkgs.runCommand "caos-core-layer-${name}" { } ''
+            mkdir -p $out
+            install -m 755 ${workspaceBins}/bin/${name} $out/worker
+          '';
+
         # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
         # the one script that builds a flake attribute and adds nothing to it.
         # HOST-BUILT and streamed like the runner, and deliberately NOT a std
@@ -1864,6 +1891,10 @@ sandbox = false''
           caos-worker-cargo-docker = workerCargoImage;
           # The nix primitive's image (design/nix-bootstrap.md).
           caos-worker-nix-docker = workerNixImage;
+          # The core's fast-moving layers (see `coreLayerCaos`).
+          caos-core-layer-caos = coreLayerCaos;
+          caos-core-layer-worker-runner = coreLayerWorker "worker-runner";
+          caos-core-layer-worker-cargo = coreLayerWorker "worker-cargo";
 
           # The flake-builder contract (design/flake-images.md): handed a tree,
           # the builder builds `#caosImage`. What this flake defines under that

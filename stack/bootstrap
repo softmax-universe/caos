@@ -81,8 +81,8 @@ fi
 
 # ---- the stack's inputs -----------------------------------------------------
 # ONE nix build for everything the stack needs: `bin/` (server, runnerd,
-# core-seeder-runner, caos-cli, caos) and `images/` (the clean worker images
-# build-builtins streams to the registry). One evaluation produces the lot —
+# caos-cli, caos) and `images/` (the nix primitive's image, which build-builtins
+# streams to the registry; the core images are built by the primitive itself). One evaluation produces the lot —
 # this used to be four, which was 12 seconds of a 16-second bring-up.
 #
 # `path:` rather than a bare path, so nix reads the DIRECTORY as it is rather
@@ -91,21 +91,18 @@ fi
 echo "stack/bootstrap: building $attr from $tree" >&2
 inputs=$(nix build "path:$tree#$attr" --no-link --print-out-paths) \
   || fail "building $attr"
-for b in server runnerd core-seeder-runner caos-cli caos; do
+for b in server runnerd caos-cli caos; do
   [ -x "$inputs/bin/$b" ] || fail "no $b in $inputs/bin"
 done
 echo "stack/bootstrap: inputs $inputs" >&2
 
 # ---- this build's cache namespace -------------------------------------------
 # THE RESULT CACHE MUST CARRY WHICH BUILD ANSWERED, because the ArgTree cannot.
-# The five seeded entries key on `{base: docker://seeded…, in: <source>}` —
-# checked-in text and nothing else — while the binary they answer WITH rides only
-# in the seeder's result. So a rebuilt `caos` leaves those keys unmoved, and
-# `run_work_request` reads redis BEFORE it dispatches to any runner: the fresh
-# seed record is never asked, the previous deploy's flake-builder delta comes
-# back, and every std entry bases on it. The whole tree is then consistently
-# stale, which is why nothing disagrees and why `caosd reset` looked like the
-# fix — it wiped the cache.
+# (This namespace was introduced for the seeded entries, whose keys named only
+# a sentinel and checked-in text, so a rebuilt `caos` left them unmoved and redis
+# answered with the previous deploy's image. The core is no longer seeded and
+# its keys name the flake they build from, so the namespace may no longer be
+# needed: dropping it is a later step, once the stack has run without it.)
 #
 # The inputs' nix out path IS that identity: it covers the daemons, the client,
 # and the binary composed into every worker image, and being input-addressed it

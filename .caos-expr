@@ -10,7 +10,8 @@
 # `DEPS` path (`../../caos-core/rustc rustc`), like any other dependency. Nothing
 # here knows its own rev: whichever caos commit this tree is, it builds ITS core.
 #
-# This is the seed half of `stack/build-builtins.sh`, written as an expression.
+# This is what `stack/build-builtins.sh` used to do by hand and publish as seed
+# records for a seeder to answer; now it is an expression, and there is no seeder.
 # `--in:@=.` is the whole repo; nix keeps the repeated builds cheap, and each key
 # is cached per rev.
 

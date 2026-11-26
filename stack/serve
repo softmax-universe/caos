@@ -54,13 +54,13 @@
 #                             which is what makes the seed legal inside the
 #                             flake-builder container (it holds no engine socket
 #                             grant, and does not need one).
-#   CAOS_STACK_PUBLISH        "yes" to publish std into this stack once the
-#                             server and registry are up — build-builtins.sh,
-#                             run HERE and nowhere else. This is the only
-#                             publish in the tree, and it is here because its
-#                             output (the seed tree) is what the seeder below
-#                             needs: adjacent lines, a value between them, no
-#                             name in the middle for anyone else to write.
+#   CAOS_STACK_PUBLISH        "yes" to run build-builtins.sh once the server
+#                             and registry are up: it streams the nix
+#                             primitive's image to the registry and names it
+#                             for the server (CAOS_NIX_IMAGE_FILE). Run HERE
+#                             and nowhere else. Nothing else is published:
+#                             the core is built by the primitive, from the
+#                             tree's own flake, when something asks for it.
 #   CAOS_STACK_PUBLISH_SCRIPT the build-builtins.sh to run (required when
 #                             PUBLISH=yes). Its DIRECTORY is the tree it
 #                             publishes from — build-builtins `cd`s to its own
@@ -70,15 +70,6 @@
 #                             CAOS_REGISTRY_HTTP) is inherited from ours;
 #                             CAOS_SERVER_URL is not, because this script knows
 #                             where its own server is.
-#   CAOS_STACK_SEEDER         "yes" to run the core-seeder-runner (the bootstrap
-#                             answerer, design/caos-expr.md Phase 3), "no"/unset
-#                             otherwise. It answers seeded arg-tree keys from
-#                             the seed tree, spawning no container. Default off:
-#                             the seed placement only PUBLISHES.
-#   CAOS_SEED_TREE            the tree of seed records the seeder answers from.
-#                             Normally produced by the publish above; settable
-#                             directly for a placement that seeds without
-#                             publishing. Required when SEEDER=yes.
 #   CAOS_STACK_SEED_GIT       optional: a prebuilt server repo to start from.
 #                             std published at image build time rides in the
 #                             image as one of these (design/one-stack-image.md,
@@ -477,49 +468,19 @@ if [ "${CAOS_STACK_RUNNER_TICKETS:-no}" = yes ]; then
   start_runner_endpoint redis 11207 "127.0.0.1:$CAOS_STACK_REDIS_PORT"
 fi
 
-# --- core-seeder-runner: the bootstrap answerer, when this placement wants it -
-# --- publish std, and seed the core from what it just published --------------
-# THE ONE PUBLISH IN THE TREE, for the same reason this is the one bring-up.
-# It used to be two — `caosd std_build` on the host and `dev/stack-up` inside
-# the dev worker — each with its own copy of build-builtins' environment, and
-# each responsible for getting the resulting records to a seeder it did not
-# start. Here the two steps are adjacent, so the seed tree is a VALUE handed
-# from one line to the next.
-#
-# ORDER. build-builtins needs the server (it pushes objects and asks
-# `HEAD /object/…`) and the registry (skopeo, and a `curl -I` for each manifest
-# digest) — both already up above. It needs NO runner and NO seeder: it
-# hand-assembles every `required` from deltas it built itself rather than by
-# running the evaluator, which is exactly what makes this order possible.
-#
-# STDOUT IS THE TREE. Everything build-builtins narrates goes to stderr, so the
-# capture below is the seed tree and nothing else.
+# --- the publish: stream the nix primitive's image -------------------------------
+# build-builtins.sh needs the server (it pushes objects and asks `HEAD /object/…`)
+# and the registry (skopeo, and a `curl -I` for each manifest digest), both up
+# above. It needs no runner. Its one job now is the image the `nix=v1` primitive
+# runs in, which it writes to CAOS_NIX_IMAGE_FILE for the server; the core itself
+# is built by that primitive, from the tree's own flake, when something asks.
 if [ "${CAOS_STACK_PUBLISH:-no}" = yes ]; then
   publish="${CAOS_STACK_PUBLISH_SCRIPT:?serve needs CAOS_STACK_PUBLISH_SCRIPT when CAOS_STACK_PUBLISH=yes}"
   [ -f "$publish" ] || fail "no publish script at $publish"
-  echo "caosd serve: publishing std ($publish)" >&2
-  CAOS_SEED_TREE=$(CAOS_SERVER_URL="$SERVER_URL" bash "$publish" 2>>"$CAOS_STACK_LOGS/publish.log") \
-    || { cat "$CAOS_STACK_LOGS/publish.log" >&2; fail "publishing std"; }
-  [ -n "$CAOS_SEED_TREE" ] || fail "the publish produced no seed tree (see $CAOS_STACK_LOGS/publish.log)"
-  echo "caosd serve: published, seed tree $CAOS_SEED_TREE" >&2
-fi
-
-# The bootstrap answerer (design/caos-expr.md, Phase 3): it reads the seed
-# records out of the tree we were just handed and long-polls the server,
-# answering each seeded arg-tree key with a pre-built result and spawning no
-# container. Optional and default OFF — the seed placement only PUBLISHES.
-#
-# Started AFTER the publish, with its records passed by value. There is no ref
-# and nothing to poll for: the process that produced the records starts the
-# process that serves them, so they cannot be replaced underneath it and there
-# is no window where the core is unanswered.
-if [ "${CAOS_STACK_SEEDER:-no}" = yes ]; then
-  : "${CAOS_SEED_TREE:?serve needs a seed tree for the seeder — set CAOS_STACK_PUBLISH=yes, or pass CAOS_SEED_TREE}"
-  start core-seeder-runner env \
-    CAOS_SERVER_URL="$SERVER_URL" \
-    CAOS_GIT_DIR="$CAOS_STACK_STATE/git" \
-    CAOS_SEED_TREE="$CAOS_SEED_TREE" \
-    "$CAOS_STACK_BIN/core-seeder-runner"
+  echo "caosd serve: publishing the nix primitive's image ($publish)" >&2
+  CAOS_SERVER_URL="$SERVER_URL" bash "$publish" >/dev/null 2>>"$CAOS_STACK_LOGS/publish.log" \
+    || { cat "$CAOS_STACK_LOGS/publish.log" >&2; fail "publishing the nix primitive's image"; }
+  echo "caosd serve: published" >&2
 fi
 
 # Not `[ ... ] && ...`: under `set -e` a false test would make that list the

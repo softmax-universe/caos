@@ -1,104 +1,49 @@
 #!/usr/bin/env bash
-# Bootstrap the SEEDED CORE: build the handful of images that cannot be built by
-# the machinery they are, and publish them as seed records under `refs/caos/seed`.
+# Stream the NIX PRIMITIVE's image to the stack: the one image a stack still builds
+# itself, because it cannot be built by the machinery it is.
+#
+# `run --base:nix=v1 --in:@=<flake> --attr=<attr>` (design/nix-bootstrap.md) builds
+# a flake attribute with the stack's own nix, in a container from this image. The
+# core (runner, flake-builder, cargo, rustc, deep-deps) is built that way, by the
+# repo's root expression, from the tree's own flake. So there is nothing to seed:
+# no hand-built core images, no seed records, no sentinel entries, no seeder. This
+# script used to do all of that; what is left is the primitive's own image.
 #
 # It publishes NO std library: every `std/<name>` is a checked-in source
 # directory whose `.caos-expr` says how it is built, and a consumer reaches it by
-# DESCENT — a `DEPS` line naming a path, expanded by a root `.caos-expr` into a
-# `DEEP-DEPS/<name>` mount (design/caos-expr.md). Nothing resolves a builtin by
-# an ambient name, so do not add a ref for one.
+# DESCENT (design/caos-expr.md). Nothing resolves a builtin by an ambient name.
 #
-# The irreducible core: five entries name a `docker://seeded…` sentinel instead
-# of a real builder, because each would otherwise have to build itself:
+# What it does: push the clean nix-primitive image to the registry once (keyed on
+# its store path alone), describe it as a git-docker delta (`base` + `config.json`
+# + the caos additions as one content-keyed layer), push the delta's objects to
+# the server, and write its hash to CAOS_NIX_IMAGE_FILE, which the server reads
+# per `nix:v1` job. The delta is pushed here because nothing else names it: the
+# server holds only what a request or a push gives it, and it never evaluates
+# this image, so without the push it could not read it ("converting git image
+# <hash>: object not found").
 #
-#   flake-builder  a flake built by the flake-builder
-#   cargo          a flake, so likewise
-#   runner         the pooled interpreter: a nix closure with no source here
-#   rustc          the worker factory; rustc compiling rustc
-#   deep-deps      the transform a tree needs before it can be deepened
-#
-# For each, this script hand-builds the artifact its expression WOULD have
-# produced and records it as `{ required: <the arg-tree key>, result: <what to
-# answer with> }`. The core-seeder-runner registers one poll per record and
-# answers that exact key, spawning no container. `required` is assembled from the
-# deltas already built here rather than by running the evaluator, so no seeder has
-# to be live during bootstrap.
-#
-# The keys must match what resolution forms, which is why the deepen pass below
-# exists: a seeded item's `in` is its DEEPENED entry, and this has to know that
-# hash before any stack exists to compute it. It must agree with the deep-deps
-# worker BYTE FOR BYTE (tests/deep-deps and the suite are the guardrail).
-#
-# Usage: ./stack/build-builtins.sh   (no arguments; see `names` below)
+# Usage: ./stack/build-builtins.sh   (no arguments)
 # Requires the dev server running and git + skopeo + curl on PATH. No docker:
-# this script composes no images — it pushes clean ones and describes deltas.
+# this script composes no images — it pushes the clean one and describes a delta.
+# stdout is empty; everything it says goes to stderr.
 set -euo pipefail
-# IN `stack/` BECAUSE `stack/serve` IS ITS ONLY CALLER. It used to sit at the
-# repo root and be invoked from two places — `caosd std_build` on the host and
-# `dev/stack-up` inside the dev worker — which is exactly the duplication that
-# let a publish and the seeder consuming it drift apart. There is one publish
-# now, and it lives beside the one bring-up that performs it.
-#
-# `..` because THE TREE IS THE SUBJECT, not this directory: everything below
-# reads `$PROJECT/std/<name>` and `$PROJECT/rust/crates/worker-common`, and
-# `nix build .#…` resolves the flake at the cwd. So this script runs from the
-# repo root wherever the file itself happens to live.
+# IN `stack/` BECAUSE `stack/serve` IS ITS ONLY CALLER, and `..` because THE TREE
+# IS THE SUBJECT: `nix build .#…` resolves the flake at the cwd, so this runs from
+# the repo root wherever the file itself happens to live.
 cd "$(dirname "$0")/.."
 PROJECT=$PWD
 
-# A name here is staged, hand-deepened and stripped; where no `add_seed_record` below
-# consumes that work, it produces one line of stderr
-names=(runner cargo flake-builder deep-deps rustc)
-
-# Which entries have a HOST-BUILT nix image behind them. This is the whole
-# partition: everything else is a checked-in source directory this script
-# only reads (to compute a seed key), never builds.
-#
-#   flake-builder  the bootstrap image
-#   runner         the pooled interpreter
-#   cargo          built by the root flake from the same `src` and toolchain as
-#                  the binaries, so its deps are cargoArtifacts rather than a
-#                  second compile of them
-#
-has_host_image() {
-  case "$1" in
-    flake-builder | runner | cargo) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-image_names=()
-for name in "${names[@]}"; do
-  if has_host_image "$name"; then image_names+=("$name"); fi
-done
-# The nix primitive's image (design/nix-bootstrap.md) streams like the others
-# but is NO std entry: nothing stages, deepens or seeds it. The server finds it
-# through CAOS_NIX_IMAGE_FILE, written below.
-image_names+=(nix)
-
-# caos-cli: a prebuilt binary if the caller injected one (CAOS_CLI — how caosd
-# runs us from a store copy with no `nix` at runtime), else built from the flake.
-if [ -n "${CAOS_CLI:-}" ]; then
-  caos=$CAOS_CLI
-else
-  nix build .#caos-cli -o result-caos
-  caos=$PROJECT/result-caos/bin/caos-cli
-fi
 SERVER_URL=${CAOS_SERVER_URL:-http://localhost:9090}
 export CAOS_SERVER_URL=$SERVER_URL
 
 # A local client working repo with the server as its `caos` remote — the same
-# shape a user has. `caos-cli` builds objects here (in-process via gix); `git
-# push` ships them to the server. Reused across runs (git init is idempotent).
-# CAOS_CLIENT_REPO relocates it off PROJECT (which is read-only when caosd runs
-# us from the store); caosd points it at $CAOS_DATA so it persists per-project.
+# shape a user has. Reused across runs (git init is idempotent). CAOS_CLIENT_REPO
+# relocates it off PROJECT (which is read-only when caosd runs us from the store).
 CLIENT=${CAOS_CLIENT_REPO:-$PROJECT/.caos-dev/client-repo}
 git init -q "$CLIENT"
-# When the caller says this repo dies with the process (caos-tools/build.sh runs
-# us against a /tmp client inside the build container), turn zlib OFF. Bootstrap
-# writes ~67 MB of freshly-compiled binaries as loose objects and then pushes
-# ~13 MB of pack to a server that was created empty seconds ago, and deflating
-# binaries at level 1 was measured as most of that push. A persistent client repo
-# (caosd's, under $CAOS_DATA) must NOT get this: there the objects are kept.
+# When the caller says this repo dies with the process, turn zlib OFF: deflating
+# freshly built binaries was measured as most of a push. A persistent client repo
+# must NOT get this: there the objects are kept.
 if [ "${CAOS_CLIENT_REPO_THROWAWAY:-no}" = yes ]; then
   git -C "$CLIENT" config core.compression 0
   git -C "$CLIENT" config pack.compression 0
@@ -106,75 +51,53 @@ fi
 git -C "$CLIENT" remote add caos "$SERVER_URL" 2>/dev/null \
   || git -C "$CLIENT" remote set-url caos "$SERVER_URL"
 
-image_attr() { echo "caos-worker-$1-docker"; } # std name -> nix docker image attr
-
-# The image tarball store paths. If the caller prebuilt them (CAOS_BUILTIN_IMAGES,
-# a whitespace-separated list — how caosd hands us the flake's images with no
-# `nix` at runtime), use those; else build every image in ONE nix invocation (the
-# builds run in parallel under a single, low-memory evaluation). Either way, map
-# each path back to its builtin via the image name baked into it
-# (<hash>-caos-worker-<name>.tar.gz).
+# The nix image tarball's store path. If the caller prebuilt it
+# (CAOS_BUILTIN_IMAGES, how caosd hands us the flake's images with no `nix` at
+# runtime), use that; else build it here. Either way pick it out by the image
+# name baked into its store path (<hash>-caos-worker-nix.tar.gz).
 if [ -n "${CAOS_BUILTIN_IMAGES:-}" ]; then
   built_paths=$CAOS_BUILTIN_IMAGES
 else
-  attrs=()
-  for name in "${image_names[@]}"; do attrs+=(".#$(image_attr "$name")"); done
-  echo "building ${#image_names[@]} images in parallel..." >&2
-  if ! built_paths=$(nix build "${attrs[@]}" --no-link --print-out-paths); then
+  echo "building the nix primitive's image..." >&2
+  if ! built_paths=$(nix build .#caos-worker-nix-docker --no-link --print-out-paths); then
     echo "build-builtins: nix build failed" >&2; exit 1
   fi
 fi
-declare -A img_path
-# Unquoted: word-split on whitespace, covering both nix-build's newline-per-path
-# output and a space-separated CAOS_BUILTIN_IMAGES. Store paths never contain
-# whitespace or glob chars, so this is safe.
+tarball=
+# Unquoted: word-split on whitespace (nix-build prints one path per line, and
+# CAOS_BUILTIN_IMAGES is space-separated). Store paths contain neither whitespace
+# nor glob characters.
 # shellcheck disable=SC2086
 for p in $built_paths; do
-  for name in "${image_names[@]}"; do
-    case "$p" in *-caos-worker-"$name".tar.gz) img_path[$name]=$p ;; esac
-  done
+  case "$p" in *-caos-worker-nix.tar.gz) tarball=$p ;; esac
 done
-for name in "${image_names[@]}"; do
-  [ -n "${img_path[$name]:-}" ] || { echo "build-builtins: no image built for $name" >&2; exit 1; }
-done
+[ -n "$tarball" ] || { echo "build-builtins: no nix image built" >&2; exit 1; }
 
-# The worker binaries published as curries over runner (bin_names below).
-# Prebuilt store paths arrive via CAOS_BUILTIN_BINS (how caosd avoids
-# runtime nix), else they're nix-built here. Nothing is staged into flake
-# trees: runner's /worker bakes into its streamed image, cargo's
-# compiles in-flake from the vendored source.
-bin_names=(deep-deps rustc)
+# Where `bin/caos` lives, for the additions layer below.
 if [ -n "${CAOS_BUILTIN_BINS:-}" ]; then
   bin_paths=$CAOS_BUILTIN_BINS
 else
-  attrs=()
-  for b in "${bin_names[@]}"; do attrs+=(".#worker-$b"); done
-  echo "building worker binaries..." >&2
-  if ! bin_paths=$(nix build "${attrs[@]}" --no-link --print-out-paths); then
-    echo "build-builtins: nix build failed" >&2; exit 1
-  fi
+  bin_paths=$(nix build .#caos --no-link --print-out-paths) \
+    || { echo "build-builtins: nix build failed" >&2; exit 1; }
 fi
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# A phase clock, into the SAME file the calling stage's `ts` writes
-# (caos-tools/build.sh), so this script's phases interleave with the build's in
-# the one report. Off unless the caller names a file: on the host this script
-# runs interactively and its stderr is the report.
+# A phase clock, into the SAME file the calling stage's `ts` writes, so this
+# script's phases interleave with the build's in one report. Off unless the
+# caller names a file.
 bts() { if [ -n "${CAOS_PHASES:-}" ]; then echo "$(date +%s%3N) builtins: $*" >> "$CAOS_PHASES"; fi; }
 bts "start"
 
-declare -A hash_of
-
 REGISTRY=localhost:5000 # the compose stack's registry, host-published (caosd)
 # The same registry as THIS SCRIPT reaches it over HTTP. On the host the two
-# names coincide. Inside the test stack (design/test-stack-image.md) they do
-# not: we run in a container on caos-net and must call it caos-registry:5000.
+# names coincide. Inside the test stack they do not: we run in a container on
+# caos-net and must call it caos-registry:5000.
 REGISTRY_HTTP=${CAOS_REGISTRY_HTTP:-$REGISTRY}
-# How the SERVER reaches the same registry: it pulls a delta's `base` with
-# skopeo from inside its own container, where the registry is a service on
-# the docker network. Mirrors the server's own CAOS_REGISTRY_PUSH_URL default.
+# How the SERVER reaches the same registry: it pulls a delta's `base` with skopeo
+# from inside its own container, where the registry is a service on the docker
+# network. Mirrors the server's own CAOS_REGISTRY_PUSH_URL default.
 REGISTRY_BASE_HOST=${CAOS_REGISTRY_BASE_HOST:-caos-registry:5000}
 # <repo:tag> -> the registry's manifest digest, or empty when the tag is absent.
 # ABSENT AND BROKEN ARE DIFFERENT: a 404 is the ordinary first-push case and
@@ -211,28 +134,15 @@ tool_bin() { # <name> -> the path of bin/<name> among the built paths
 }
 caos_bin=$(tool_bin caos)
 
-# Which workspace binary is a streamed image's `/worker`. These images are
-# HOST-BUILT and the host is their author, so their interpreter is composed on
-# here rather than baked into the nix image — the clean image then depends on
-# nothing in the workspace and is pushed once, keyed on its store path alone,
-# while the binary rides as a layer keyed on its BYTES. flake-builder is
-# absent because its /worker comes from its own flake, not from this
-# workspace.
-worker_bin_of() { # <std name> -> the workspace binary that is its /worker, or empty
-  case "$1" in
-    runner) echo worker-runner ;;
-    cargo) echo worker-cargo ;;
-    *) ;;
-  esac
-}
-
-# The caos additions, staged as a git-docker LAYER TREE — the same shape
-# std/flake-builder's stack stage emits, so both image paths in this tree
-# compose deltas exactly one way. The server rebuilds the layer tar from
-# this at convert time and applies the `<name>.caosmeta` sidecars for the
-# modes git cannot record (setuid, sticky).
+# The caos additions, staged as a git-docker LAYER TREE: /bin/caos (setuid), the
+# user db, /usr/bin/env, /tmp. The server rebuilds the layer tar from this at
+# convert time and applies the `<name>.caosmeta` sidecars for the modes git
+# cannot record (setuid, sticky). Staged inside CLIENT because only git-tracked
+# paths can be hashed here.
 #
-# Staged inside CLIENT because only git-tracked paths can be hashed here.
+# (The core images get the same pieces from the root expression, as layers built
+# by nix and a checked-in tree: stack/core-layers/static is the static half of
+# this.)
 ADD=$CLIENT/layer-additions
 rm -rf "${ADD:?}"
 mkdir -p "$ADD/bin" "$ADD/usr/bin" "$ADD/etc"
@@ -245,474 +155,68 @@ ln -s /bin/env "$ADD/usr/bin/env"
 printf 'root:x:0:0:root:/root:/sbin/nologin\nworker:x:1000:1000:caos worker:/tmp:/sbin/nologin\n' \
   > "$ADD/etc/passwd"
 printf 'root:x:0:\nworker:x:1000:\n' > "$ADD/etc/group"
-# The world-writable /tmp. Its 1777 mode rides in a sidecar because git records
-# no modes beyond the exec bit, and the DIRECTORY is carried by a keep-file
-# because it must not be EMPTY.
-#
-# An empty directory is a legal git tree entry, but it does not survive a
-# materialize -> read -> re-put round trip, so any worker that rebuilds a tree
-# from the filesystem silently drops it — deep-deps is one, and a dropped
-# `layer00/tmp` makes the worker-deepened entry disagree with the hand-deepen
-# below, which breaks every seeded key that reaches the runner. Do not replace
-# the keep-file with an empty tree.
+# The world-writable /tmp. Its 1777 mode rides in a sidecar, and the DIRECTORY is
+# carried by a keep-file because it must not be EMPTY: an empty directory is a
+# legal git tree entry but does not survive a materialize -> read -> re-put round
+# trip, so a worker that rebuilds a tree from the filesystem silently drops it.
 mkdir -p "$ADD/tmp"
 printf 'This file exists so that /tmp is a NON-EMPTY directory.\n\nAn empty directory is not representable in a git worktree and does not survive\na materialize -> read -> re-put round trip, so a worker that rebuilds a tree\nfrom the filesystem (deep-deps) drops it. /tmp must exist in the image, so it\ncarries this file. Its 1777 mode rides in the tmp.caosmeta sidecar.\n' \
   > "$ADD/tmp/.caos-keep"
 printf '{"mode":"1777","uid":0,"gid":0}' > "$ADD/tmp.caosmeta"
 git -C "$CLIENT" add layer-additions
-# `tmp` is an ordinary directory in the staged layout, so `write-tree` carries
-# it like everything else.
 additions_tree=$(git -C "$CLIENT" write-tree --prefix=layer-additions/)
+bts "staged the additions"
 
-# Each streamed image's /worker, its own layer. worker-runner is the pool
-# protocol's in-image half; worker-cargo is what the cargo image is FOR — and
-# neither belongs in the nix closure it runs on. The cargo image is 3.4 GB of
-# toolchain and baked deps, so baking a 5 MB binary into it made every Rust
-# edit re-tar and re-gzip all of it under `nix build` and then gunzip and
-# re-push it under `caosd up` (design/flake-images.md listed exactly this as
-# the open boundary-caching item).
-declare -A worker_tree
-for name in "${image_names[@]}"; do
-  wb=$(worker_bin_of "$name")
-  if [ -n "$wb" ]; then
-    WD=$CLIENT/layer-worker-$name
-    rm -rf "${WD:?}"
-    mkdir -p "$WD"
-    install -m 755 "$(tool_bin "$wb")" "$WD/worker"
-    git -C "$CLIENT" add "layer-worker-$name"
-    worker_tree[$name]=$(git -C "$CLIENT" write-tree --prefix="layer-worker-$name/")
-  fi
-done
-bts "staged worker layers"
-
-# The streamed std entries (design/one-stack-image.md): the nix tarball is the
-# CLEAN image — no caos, no user db, no /tmp — and it goes to the registry
-# ONCE, keyed on its store path ALONE. The clean images depend on nothing in
-# the workspace, so a Rust edit never re-pushes one.
-#
-# The std entry itself is a git-docker delta {base, config.json, layer<NN>}:
-# the server stacks our layers on that base and pushes the result the first
-# time something runs it, memoized in redis by the tree's hash. So no layer
-# bytes of the CLEAN image ever enter git, and this script does no image
-# composition at all — no docker, no build context, no manifest surgery.
-for name in "${image_names[@]}"; do
-  tarball=${img_path[$name]}
-  # KEYED ON THE TARBALL'S OWN STORE NAME, not on the path we reached it by.
-  # `$tarball` is `<inputs>/images/<hash>-caos-worker-<name>.tar.gz` — a symlink
-  # inside a per-BUILD aggregate — so hashing the whole path put the aggregate's
-  # hash in the tag, and every rebuild of the workspace re-pushed all three
-  # clean images even though not one byte of them had moved. That is 1.6 GB of
-  # `skopeo copy` (cargo alone is 1.5 GB) on a step that should have been three
-  # registry hits, and it is paid by every dev stack on every source edit. The
-  # basename is nix's own content-addressed name for the image, which is exactly
-  # the identity this tag wants.
-  ctag="clean-$name-$(basename "$tarball" | sha1sum | cut -c1-12)"
+# The clean image goes to the registry ONCE, keyed on its store path's own name
+# (not the path we reached it by, which sits inside a per-build aggregate), so a
+# rebuild of the workspace that leaves the image alone is a registry hit.
+ctag="clean-nix-$(basename "$tarball" | sha1sum | cut -c1-12)"
+digest=$(manifest_digest "$ctag")
+if [ -n "$digest" ]; then
+  echo "nix: registry hit for $ctag" >&2
+else
+  echo "nix: streaming clean image $ctag..." >&2
+  # skopeo's docker-archive transport reads an uncompressed tar; nix hands us
+  # .tar.gz.
+  gunzip -c "$tarball" > "$WORK/nix.tar"
+  skopeo --insecure-policy copy --dest-tls-verify=false \
+    "docker-archive:$WORK/nix.tar" "docker://$REGISTRY_HTTP/caos:$ctag" >&2
+  rm -f "$WORK/nix.tar"
   digest=$(manifest_digest "$ctag")
-  if [ -n "$digest" ]; then
-    echo "$name: registry hit for $ctag" >&2
-  else
-    echo "$name: streaming clean image $ctag..." >&2
-    # skopeo's docker-archive transport reads an uncompressed tar; nix hands
-    # us .tar.gz.
-    gunzip -c "$tarball" > "$WORK/$name.tar"
-    skopeo --insecure-policy copy --dest-tls-verify=false \
-      "docker-archive:$WORK/$name.tar" "docker://$REGISTRY_HTTP/caos:$ctag" >&2
-    rm -f "$WORK/$name.tar"
-    digest=$(manifest_digest "$ctag")
-    [ -n "$digest" ] || { echo "build-builtins: no digest for pushed $ctag" >&2; exit 1; }
-  fi
+  [ -n "$digest" ] || { echo "build-builtins: no digest for pushed $ctag" >&2; exit 1; }
+fi
 
-  img=$CLIENT/img-$name
-  rm -rf "${img:?}"
-  mkdir -p "$img"
-  # `base` is read by the SERVER, which pulls it with skopeo from inside its
-  # own container (crates/server/src/compute.rs, fetch_base) — so it carries
-  # the on-network registry name, not the host-published one the docker
-  # daemon uses.
-  printf 'docker://%s/caos@%s' "$REGISTRY_BASE_HOST" "$digest" > "$img/base"
-  # The clean image's own OCI config, verbatim: it already names the runner
-  # entrypoint and its PATH, because its flake said so.
-  skopeo --insecure-policy inspect --tls-verify=false --config \
-    "docker://$REGISTRY_HTTP/caos:$ctag" > "$img/config.json"
-  git -C "$CLIENT" add "img-$name"
-  hash_of[$name]=$(
-    {
-      git -C "$CLIENT" ls-tree "$(git -C "$CLIENT" write-tree --prefix="img-$name/")"
-      printf '040000 tree %s\tlayer00\n' "$additions_tree"
-      # Not `[ ... ] && printf`: this is the block's last command, so under
-      # `set -e -o pipefail` a false test would fail the whole substitution
-      # for every entry that carries no /worker of its own.
-      if [ -n "${worker_tree[$name]:-}" ]; then
-        printf '040000 tree %s\tlayer01\n' "${worker_tree[$name]}"
-      fi
-    } | git -C "$CLIENT" mktree
-  )
-  echo "$name: git-docker delta ${hash_of[$name]} over $ctag" >&2
-  bts "delta for $name"
-done
+img=$CLIENT/img-nix
+rm -rf "${img:?}"
+mkdir -p "$img"
+# `base` is read by the SERVER, which pulls it with skopeo from inside its own
+# container — so it carries the on-network registry name, not the host-published
+# one the docker daemon uses.
+printf 'docker://%s/caos@%s' "$REGISTRY_BASE_HOST" "$digest" > "$img/base"
+# The clean image's own OCI config, verbatim: it already names the runner
+# entrypoint and its PATH, because its flake said so.
+skopeo --insecure-policy inspect --tls-verify=false --config \
+  "docker://$REGISTRY_HTTP/caos:$ctag" > "$img/config.json"
+git -C "$CLIENT" add img-nix
+nix_delta=$(
+  {
+    git -C "$CLIENT" ls-tree "$(git -C "$CLIENT" write-tree --prefix=img-nix/)"
+    printf '040000 tree %s\tlayer00\n' "$additions_tree"
+  } | git -C "$CLIENT" mktree
+)
+echo "nix: git-docker delta $nix_delta over $ctag" >&2
+bts "delta for nix"
 
-# ---- the hand-deepen: SEED KEYS ONLY, never published -----------------------
-# A seeded core item's arg-tree `in` is its DEEPENED entry — what a root
-# `.caos-expr` produces — and bootstrap must know that hash before any stack
-# exists to compute it. So it hand-deepens here, and the hand-deepen must match
-# the deep-deps worker BYTE FOR BYTE or the seeder registers a key no caller ever
-# forms. Only `cargo` has DEPS among the seeded core (the rest are DEPS-free, so
-# their deepened form is identity), which is where that identity bites.
-
-# The image loop above left git-docker deltas in hash_of[]. Capture them before
-# the deepen pass overwrites those entries with their source trees: each delta is
-# a SEED RESULT.
-runner_delta=${hash_of[runner]:-}
-cargo_delta=${hash_of[cargo]:-}
-fb_delta=${hash_of[flake-builder]:-}
-
-# The nix primitive's image (design/nix-bootstrap.md): `caos-worker-nix`, whose
-# /worker builds a flake attribute and adds nothing. The server reads it per
-# `nix:v1` job from the file `stack/serve` names; it is never part of a key.
-# Written whole and renamed, so a reader never sees half.
+# Pushed under `refs/caos/req/<hash>`, where every other pushed object in this
+# system lands: content-addressed, so two publishers into one repo cannot
+# collide, and the server's request-ref pruner already sweeps it.
 #
-# PUSHED FIRST. The delta is assembled in CLIENT, and the other images reach
-# the server only because a seed record names them; nothing names this one, so
-# without its own push the server holds a hash it cannot read ("converting git
-# image <hash>: object not found"). Same content-addressed refspec as the seed
-# tree below, for the same reasons.
-nix_delta=${hash_of[nix]:-}
-if [ -n "${CAOS_NIX_IMAGE_FILE:-}" ] && [ -n "$nix_delta" ]; then
+# The server reads the image through the file CAOS_NIX_IMAGE_FILE names, per
+# `nix:v1` job. Written whole and renamed, so a reader never sees half.
+if [ -n "${CAOS_NIX_IMAGE_FILE:-}" ]; then
   git -C "$CLIENT" push -q --force caos "$nix_delta:refs/caos/req/$nix_delta"
   printf '%s\n' "$nix_delta" > "$CAOS_NIX_IMAGE_FILE.tmp"
   mv "$CAOS_NIX_IMAGE_FILE.tmp" "$CAOS_NIX_IMAGE_FILE"
   echo "nix primitive: $nix_delta" >&2
 fi
-
-# Map each worker binary to the store path that CONTAINS it (bin/worker-<b>) —
-# every worker binary shares one workspace store path, so existence of
-# bin/worker-<b> is the honest test.
-declare -A bin_path
-if [ -n "$runner_delta" ]; then
-  # shellcheck disable=SC2086
-  for p in $bin_paths; do
-    for b in "${bin_names[@]}"; do
-      if [ -x "$p/bin/worker-$b" ]; then
-        bin_path[$b]=$p
-      fi
-    done
-  done
-fi
-
-declare -A undeepened staged_sources is_file_dep
-
-# Stage a checked-in source into CLIENT and record it by dependency name. Most
-# are std/<name> directories; a DEPS path may point at source elsewhere, and
-# since deep-deps mounts a FILE dependency as-is (crates/worker-deep-deps), it
-# may also point at a file — the shared `flake.lock` every flake entry now
-# names instead of carrying a copy.
-#
-# `cp -RL`/`cp -L`: PROJECT may be an image layout of SYMLINKS into the nix
-# store (the test stack); dereference so what is published is the content.
-stage_source() { # <name> <source>
-  local name=$1 source=$2
-  rm -rf "${CLIENT:?}/$name"
-  if [ -d "$source" ]; then
-    cp -RL "$source" "$CLIENT/$name"
-    chmod -R u+w "$CLIENT/$name" # PROJECT may be a read-only store copy (caosd)
-    git -C "$CLIENT" add "$name"
-    undeepened[$name]=$(git -C "$CLIENT" write-tree --prefix="$name/")
-  else
-    # A FILE dep is a blob, not a tree: there is no `write-tree --prefix` for
-    # one, and nothing under it to deepen. Recorded as its blob oid, and
-    # emitted by deepen_entry as `100644 blob` — which is what the worker's
-    # `link()` + `caos put` produces for the same file.
-    cp -L "$source" "$CLIENT/$name"
-    chmod u+w "$CLIENT/$name"
-    undeepened[$name]=$(git -C "$CLIENT" hash-object -w "$CLIENT/$name")
-    is_file_dep[$name]=1
-  fi
-  staged_sources[$name]=1
-}
-
-# DEPS may also name source that is not itself a builtin. Its tree still
-# participates in the caller's deepened cache key, so bootstrap must stage it
-# before deepen_entry recurses into it. Follow paths from the declaring source
-# directory, like deep-deps, instead of maintaining a second name list.
-stage_source_closure() { # <name> <source>
-  local name=$1 source=$2 dep_path mount
-  if [ -n "${staged_sources[$name]:-}" ]; then return; fi
-  stage_source "$name" "$source"
-  # A file has no DEPS to follow.
-  if [ -f "$source/DEPS" ]; then
-    while read -r dep_path mount; do
-      if [ -n "$dep_path" ]; then
-        case "$dep_path" in
-          \#*) ;;
-          *) stage_source_closure "$(basename "$dep_path")" "$source/$dep_path" ;;
-        esac
-      fi
-    done < "$source/DEPS"
-  fi
-}
-
-for name in "${names[@]}"; do
-  # EVERY entry is a checked-in source dir, `runner` included: `std/rustc/DEPS`
-  # says `../runner`, and a tree cannot be self-resolving when a declared
-  # dependency is not IN it. Publishing runner as a bare delta would leave
-  # `std/runner` a name with no directory behind it; it is a `{.caos-expr}`
-  # sentinel, seeded like flake-builder (below).
-  stage_source_closure "$name" "$PROJECT/std/$name"
-done
-bts "staged ${#staged_sources[@]} local sources"
-
-# The hand-deepen — SEED KEYS ONLY, never published (see the block header).
-# deepen_entry(name) replaces the entry's top-level DEPS with a DEEP-DEPS/
-# subtree of its deepened local dependencies, recursively and memoized — so a
-# dep reached twice is ONE shared tree (git dedups the identical hash, matching
-# the deep-deps worker's
-# absolute-path sharing). An entry with no DEPS is identity (its subtrees are
-# DEPS-free, which the worker reproduces unchanged — so this matches byte for
-# byte). Divergence from the worker is not silent: the seeded key stops matching
-# the key resolution forms, the job falls through to the generic runner and dies
-# on a sentinel image, and every test that resolves the item goes red.
-declare -A deepened
-deepen_entry() { # <name> -> deepened tree hash (stdout)
-  local name=$1
-  if [ -n "${deepened[$name]:-}" ]; then echo "${deepened[$name]}"; return; fi
-  local tree=${undeepened[$name]} deps_oid="" meta file
-  while IFS=$'\t' read -r meta file; do
-    if [ "$file" = DEPS ]; then deps_oid=${meta##* }; fi
-  done < <(git -C "$CLIENT" ls-tree "$tree")
-
-  local result
-  if [ -z "$deps_oid" ]; then
-    result=$tree
-  else
-    # DEEP-DEPS/<mount> = deepened(declared path). DEPS lines are
-    # `<path> <name>`; comments/blank lines skipped. mktree sorts.
-    local dd_lines="" dep_path mount dep_name
-    while read -r dep_path mount; do
-      if [ -n "$dep_path" ]; then
-        case "$dep_path" in
-          \#*) ;;
-          # A FILE dep is mounted as-is, matching the worker: there is nothing
-          # under it to deepen. `100644 blob` is what `link()` + `caos put`
-          # record for a plain file, and a mode disagreement here would be a
-          # seed key that no caller ever forms.
-          *)
-            dep_name=$(basename "$dep_path")
-            if [ -n "${is_file_dep[$dep_name]:-}" ]; then
-              dd_lines+="100644 blob ${undeepened[$dep_name]}"$'\t'"$mount"$'\n'
-            else
-              dd_lines+="040000 tree $(deepen_entry "$dep_name")"$'\t'"$mount"$'\n'
-            fi
-            ;;
-        esac
-      fi
-    done < <(git -C "$CLIENT" cat-file blob "$deps_oid")
-    local dd_tree
-    dd_tree=$(printf '%s' "$dd_lines" | git -C "$CLIENT" mktree)
-    # The entry's own tree minus DEPS, plus the DEEP-DEPS subtree.
-    result=$(
-      {
-        git -C "$CLIENT" ls-tree "$tree" | while IFS=$'\t' read -r meta file; do
-          if [ "$file" != DEPS ]; then printf '%s\t%s\n' "$meta" "$file"; fi
-        done
-        printf '040000 tree %s\tDEEP-DEPS\n' "$dd_tree"
-      } | git -C "$CLIENT" mktree
-    )
-  fi
-  deepened[$name]=$result
-  echo "$result"
-}
-
-for name in "${names[@]}"; do
-  hash_of[$name]=$(deepen_entry "$name")
-  echo "$name: deepened entry (seed key) ${hash_of[$name]}" >&2
-done
-bts "hand-deepened ${#names[@]} entries"
-
-# What a caller's `--in:@=.` actually resolves to: the entry MINUS its own
-# `.caos-expr`. eval-path hands an expression its directory excluding the
-# directive (crates/caos/src/eval.rs `strip_caos_expr`), so every seeded item —
-# each of whose expressions is `run --base:<t>=<builder> --in:@=.` — forms an `in` that
-# is the stripped tree. Strip here too or the seeder registers a key no caller
-# ever forms, and the job falls through to the generic runner and dies on a
-# sentinel image.
-#
-# For the sentinel entries (`runner`, `rustc`, `deep-deps`) the whole directory
-# IS the `.caos-expr`, so this is the empty tree — honest: there is no source,
-# which is why they are seeded. Their sentinels differ, so their keys still do.
-strip_caos_expr() { # <tree> -> tree hash (stdout)
-  git -C "$CLIENT" ls-tree "$1" | while IFS=$'\t' read -r meta file; do
-    if [ "$file" != .caos-expr ]; then printf '%s\t%s\n' "$meta" "$file"; fi
-  done | git -C "$CLIENT" mktree
-}
-
-declare -A in_of
-for name in "${names[@]}"; do
-  in_of[$name]=$(strip_caos_expr "${hash_of[$name]}")
-done
-
-# ---- seed records (design/caos-expr.md, Phase 3) ----------------------------
-# The irreducible core can't be built by the machinery it IS, so bootstrap
-# hand-builds each core artifact and publishes a SEED RECORD per item; the
-# core-seeder-runner registers one poll per record and answers the arg-tree key
-# a caller forms, spawning no container.
-#
-#   <seed tree> -> { <name> -> { required: <JSON name→oid>, result: <obj> } }
-#
-# THE TREE IS THIS SCRIPT'S RETURN VALUE — printed on stdout, and the caller
-# (`stack/serve`) hands it straight to the seeder it then starts. NOT a ref, and
-# not because a ref was inconvenient: a record is keyed by NAME, so a ref is a
-# channel a second publisher can take over, and both ways that goes wrong are
-# silent.
-#
-#   different `required` — the two publishers' trees differ, so the loser's keys
-#     simply vanish. Its jobs then park unanswered and the eventual 503 blames
-#     capacity, the one thing that is not wrong (CLAUDE.md, "an idle machine
-#     mid-run means a job is waiting").
-#   same `required`, different `result` — the publishers' sources are identical
-#     but their BINARIES are not, which is precisely two builds of caos. The
-#     loser's seeder answers with the WINNER's binaries and nothing disagrees.
-#
-# Reproduced, both of them, with two dev stacks against one host. Passing the
-# tree by value removes the name they fought over, and with it the seeder's
-# rescan, its stale-answer window, and the 0-5s gap on every bring-up where a
-# freshly published core had no registered answerer.
-#
-# bootstrap HAND-ASSEMBLES each `required` from the deltas it already built —
-# NOT by running the evaluator — so it needs no live answerer and no seeder
-# during publish (the deltas are known; the key a caller's eval forms is
-# reproduced here). `required` OMITS `salt`: a core item's output depends only on
-# its `image`+`in`, and the server matches a required set as a SUBSET of the
-# job's arg entries (runner::matches) — so ONE record answers the whole family of
-# keys a caller can form, whatever salt the run carries and whatever else it
-# binds. That subset match is the thing a cache entry could not do: a cache is
-# keyed on one exact ArgTree, and `CAOS_SALT` moves that key on every run.
-#
-# (This used to say `std`/`salt`. There is no `std` arg any more — a
-# dependency rides inside `in` as a `DEEP-DEPS/<name>` mount — so `salt` is the
-# whole of what is omitted.)
-#
-# EVERY RECORD REQUIRES `required-pool=seeded`, and each seeded entry's
-# `.caos-expr` binds the same pair — which is what keeps the generic runner away
-# from a job only a seeder can answer (caos_world::SEEDED_POOL). Before it, the
-# seeder won only by being more specific among the polls parked at that instant,
-# so whenever it was between polls runnerd took the job and really tried to
-# build it. For `cargo` that meant `nix build` on a flake that deliberately
-# exposes no `caosImage`, reported as a nix error three layers from the cause.
-seeded_pool_oid=$(printf 'seeded' | git -C "$CLIENT" hash-object -w --stdin)
-seed_entries=""
-# The key a caller forms, as JSON — `base` and `in` plus the pool every seeded
-# entry declares. It OMITS `std`/`salt` (and cargo's `lock`): the server matches
-# a required set as a SUBSET of the job's arg entries, so a core item's answer
-# does not depend on what else the caller bound.
-seed_required() { # <base-oid> <in-oid> -> the required JSON
-  printf '{"base":"%s","in":"%s","required-pool":"%s"}' "$1" "$2" "$seeded_pool_oid"
-}
-add_seed_record() { # <name> <required-json> <result-tree>
-  local reqblob record
-  reqblob=$(printf '%s' "$2" | git -C "$CLIENT" hash-object -w --stdin)
-  record=$(printf '100644 blob %s\trequired\n040000 tree %s\tresult\n' \
-    "$reqblob" "$3" | git -C "$CLIENT" mktree)
-  seed_entries+="040000 tree $record"$'\t'"$1"$'\n'
-  echo "seed: $1 -> $3" >&2
-}
-
-if [ -n "$fb_delta" ] && [ -n "${hash_of[flake-builder]:-}" ]; then
-  # flake-builder: `run --base:docker=seeded --in:@=.`. The `base` a caller forms
-  # for a `docker://` ref is a BLOB naming it (base_arg_entry stores the bytes),
-  # so required `base` is that blob's oid; `in` is the (deepened, but DEPS-free
-  # so identity) flake-builder source entry.
-  seeded_blob=$(printf 'docker://seeded' | git -C "$CLIENT" hash-object -w --stdin)
-  add_seed_record flake-builder \
-    "$(seed_required "$seeded_blob" "${in_of[flake-builder]}")" "$fb_delta"
-fi
-
-if [ -n "$cargo_delta" ] && [ -n "${hash_of[cargo]:-}" ] && [ -n "$fb_delta" ]; then
-  # cargo: `run --base:@=DEEP-DEPS/flake-builder --in:@=.`. Resolving the mount yields
-  # the flake-builder image (fb_delta) curried with `required-caosd=true`, and a
-  # curried base FLATTENS into the job's arg tree: `base` is still fb_delta,
-  # `in` is the deepened cargo entry, and `required-caosd` rides alongside.
-  #
-  # So the record must require `required-caosd` too. A `required*` arg is the
-  # JOB saying which runners it accepts (server runner::matches), and a
-  # record that lacks it is a seeder the job refuses — cargo would then wait
-  # out its pending deadline in silence with the seeder parked right there.
-  caosd_oid=$(printf 'true' | git -C "$CLIENT" hash-object -w --stdin)
-  cargo_required=$(seed_required "$fb_delta" "${in_of[cargo]}")
-  cargo_required="${cargo_required%\}},\"required-caosd\":\"$caosd_oid\"}"
-  add_seed_record cargo "$cargo_required" "$cargo_delta"
-fi
-
-# rustc/deep-deps: SEEDED core. Their `.caos-expr` is a distinct sentinel
-# (`run --base:docker=seeded-{rustc,deep-deps} --in:@=.`), so the caller's key is
-# `{ image: <blob of that sentinel>, in: <the {.caos-expr} entry> }`. The RESULT
-# is the hand-built curry over the runner pool: a binary bound onto the runner,
-# which is what the entry would have resolved to if it could build itself.
-if [ -n "$runner_delta" ] && [ -n "${bin_path[deep-deps]:-}" ] && [ -n "${hash_of[deep-deps]:-}" ]; then
-  install -m 755 "${bin_path[deep-deps]}/bin/worker-deep-deps" "$CLIENT/seed-deep-deps"
-  git -C "$CLIENT" add seed-deep-deps
-  bts "staged deep-deps seed inputs"
-  dd_curry=$(cd "$CLIENT" && "$caos" curry \
-    "--base:hash=$runner_delta" "--worker1:@=seed-deep-deps")
-  bts "curried deep-deps"
-  dd_blob=$(printf 'docker://seeded-deep-deps' | git -C "$CLIENT" hash-object -w --stdin)
-  add_seed_record deep-deps \
-    "$(seed_required "$dd_blob" "${in_of[deep-deps]}")" "$dd_curry"
-fi
-
-if [ -n "$runner_delta" ] && [ -n "$cargo_delta" ] && [ -n "${bin_path[rustc]:-}" ] && [ -n "${hash_of[rustc]:-}" ]; then
-  install -m 755 "${bin_path[rustc]}/bin/worker-rustc" "$CLIENT/seed-rustc"
-  git -C "$CLIENT" add seed-rustc
-  rm -rf "${CLIENT:?}/seed-rustc-wc"
-  cp -RL "$PROJECT/rust/crates/worker-common" "$CLIENT/seed-rustc-wc"
-  chmod -R u+w "$CLIENT/seed-rustc-wc"
-  git -C "$CLIENT" add seed-rustc-wc
-  # curry(runner, worker1=<rustc bin>, cargo=<cargo image, a literal hash blob>,
-  # runner=<the same, for what rustc CURRIES ONTO>, worker-common=<tree>) — the
-  # worker factory's ready-to-run form.
-  #
-  # `--runner` is bootstrap REALIZING std/rustc/DEPS: rustc depends on the runner
-  # pool and curries every built binary onto it, so no caller passes one. A hash
-  # literal like `--cargo`, because that is what a seed result can bind — when
-  # rustc stops being seeded its expression binds DEEP-DEPS/runner instead.
-  bts "staged rustc seed inputs"
-  rustc_curry=$(cd "$CLIENT" && "$caos" curry \
-    "--base:hash=$runner_delta" \
-    "--worker1:@=seed-rustc" "--cargo=$cargo_delta" "--runner=$runner_delta" \
-    "--worker-common:@=seed-rustc-wc")
-  bts "curried rustc"
-  rustc_blob=$(printf 'docker://seeded-rustc' | git -C "$CLIENT" hash-object -w --stdin)
-  add_seed_record rustc \
-    "$(seed_required "$rustc_blob" "${in_of[rustc]}")" "$rustc_curry"
-fi
-
-# runner: the pooled interpreter, a self-contained nix closure with no source to
-# build from — so it is seeded exactly like flake-builder. Its checked-in entry
-# is the `docker://seeded-runner` sentinel and the host-built delta is the seed
-# RESULT. This is what gives `std/rustc/DEPS`'s `../runner` a directory to point
-# at, and so what lets the tree deepen itself.
-if [ -n "$runner_delta" ] && [ -n "${hash_of[runner]:-}" ]; then
-  runner_blob=$(printf 'docker://seeded-runner' | git -C "$CLIENT" hash-object -w --stdin)
-  add_seed_record runner \
-    "$(seed_required "$runner_blob" "${in_of[runner]}")" "$runner_delta"
-fi
-
-if [ -n "$seed_entries" ]; then
-  seed_tree=$(printf '%s' "$seed_entries" | git -C "$CLIENT" mktree)
-  bts "mktree"
-  # PUSHED UNDER `refs/caos/req/<hash>`, which is where every other pushed
-  # object in this system lands (`ensure_pushed`, crates/caos/src/lib.rs). The
-  # objects have to reach the server — the seeder opens the server's repo to
-  # read them — and a push needs a refspec; naming it by the tree's own hash
-  # makes it content-addressed, so two publishers into one repo cannot collide
-  # on it. Reusing the existing namespace rather than inventing one also means
-  # the server's request-ref pruner already sweeps it, and deleting it is safe
-  # for the reason that pruner gives: these refs anchor nothing, because GC is
-  # off here and almost every object is unreachable from any ref anyway.
-  git -C "$CLIENT" push -q --force caos "$seed_tree:refs/caos/req/$seed_tree"
-  echo "seed tree $seed_tree" >&2
-fi
-bts "pushed seed records"
-
-# THE RETURN VALUE, on stdout and alone there — everything else this script says
-# goes to stderr. `stack/serve` captures it and starts the seeder with it.
-echo "$seed_tree"
+bts "pushed the nix image"

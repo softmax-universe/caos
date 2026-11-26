@@ -992,11 +992,10 @@ sandbox = false''
         # tarball's store path). caosd hands these to build-builtins.sh so it
         # publishes the flake's own images without a runtime `nix build`.
         builtinWorkerImages = [
-          # Streamed to the registry by build-builtins.sh, never git-imported.
-          workerFlakeBuilderImage
-          workerRunnerImage
-          workerCargoImage
-          # Not a std entry: the nix primitive's image (see workerNixImage).
+          # The only host-built image left: the nix primitive's (see
+          # workerNixImage). The core images (runner, flake-builder, cargo) are
+          # built BY that primitive from this flake, so a stack no longer builds
+          # or streams them itself.
           workerNixImage
         ];
 
@@ -1575,7 +1574,6 @@ sandbox = false''
                 -e CAOS_STACK_REGISTRY=yes \
                 -e CAOS_STACK_REDIS=yes \
                 -e CAOS_STACK_RUNNERD=yes \
-                -e CAOS_STACK_SEEDER=yes \
                 -e CAOS_STACK_IROH="$IROH" \
                 -e CAOS_STACK_IROH_ADVERTISE="$IROH_ADVERTISE" \
                 -e CAOS_STACK_RUNNER_TICKETS="$RUNNER_TICKETS" \

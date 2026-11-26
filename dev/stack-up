@@ -143,7 +143,7 @@ fi
 # from `CAOS_BUILTIN_BINS`).
 phase "checking the stack binaries"
 echo "==> using the stack inputs at $inputs" >&2
-for b in server runnerd core-seeder-runner caos-cli caos; do
+for b in server runnerd caos-cli caos; do
   [ -x "$inputs/bin/$b" ] || fail "no $b in $inputs/bin"
 done
 
@@ -251,7 +251,6 @@ CAOS_STACK_REDIS_PORT=6379 \
 CAOS_STACK_REDIS_PERSIST=no \
 CAOS_STACK_REGISTRY=no \
 CAOS_STACK_RUNNERD=yes \
-CAOS_STACK_SEEDER=yes \
 CAOS_CACHE_NAMESPACE="$namespace" \
 CAOS_RUNNER_SLOTS="${CAOS_RUNNER_SLOTS:-48}" \
 CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \

@@ -393,13 +393,14 @@ unchanged (`"<type> <hash>"`), so existing clients are unaffected.
   Both execute on every call, so both report `miss`. `hit` always means the
   worker did not run for this call.
 - **Image.** The reference is the one the server resolves for the ArgTree's
-  `base` (a git image is converted and pushed, giving a digest reference; a
-  `docker://` base is passed through as given). It is part of the cache key, so
-  a `hit` reports the image that produced the cached result. CAOS does not
-  resolve unpinned Docker tags: a `docker://repo:tag` base is reported as
-  written, with no `@sha256:`, and resolving it is the caller's job. If the
-  image cannot be resolved the call still succeeds and `X-Caos-Image` is
-  omitted; `X-Caos-Cache` is always present on success.
+  `base`: a git image is converted and pushed, giving a digest reference; a
+  `docker://` base must already be digest-pinned (`name@sha256:…`; the server
+  refuses a mutable tag with a 400) and is reported as given. CAOS does no
+  tag-to-digest resolution; that is the caller's job. The internal `seeded*`
+  rendezvous sentinels have no digest and are reported as written. The image is
+  part of the cache key, so a `hit` reports the image that produced the cached
+  result. If the image cannot be resolved the call still succeeds and
+  `X-Caos-Image` is omitted; `X-Caos-Cache` is always present on success.
 - **Errors** carry neither header. Promise sub-runs and `/eval/*` / `/wait`
   tickets report nothing; only a top-level `GET /run` does.
 

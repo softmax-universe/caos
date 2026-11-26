@@ -9,10 +9,7 @@
 # ever sees one job, this one.
 #
 # NO INNER STACK PER TEST. A test is a plain worker on the dev stack, which IS
-# the stack under test, so there is nothing left to bring up. What used to make
-# that necessary — a client of one world driving a server of another — is
-# handled by the dev stack being built `CAOS_WORLD=test` while the host stays
-# `host`, so the guard still has two worlds to tell apart (tests/world-guard).
+# the stack under test, so there is nothing left to bring up.
 #
 # THREE STAGES, one script, selected by a curried --stage. Each exists because
 # the thing it needs is only knowable once the previous run finished — a worker

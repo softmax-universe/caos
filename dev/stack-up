@@ -137,12 +137,10 @@ fi
 # three more times for the images, which was 12 seconds of a 16-second bring-up
 # against ~1 second to actually start the stack.
 #
-# TEST world, not host: a dev stack is `.#caos-test-stack-inputs`, so a host
-# client is refused by it and vice versa (rust/crates/caos-world). It shares
-# every dependency with the host build — only the thin workspace compile
-# differs. The worker IMAGES are world-neutral userland (no caos binary is baked
-# in; build-builtins composes one on from `CAOS_BUILTIN_BINS`), which is why one
-# set of images serves both.
+# A dev stack is `.#caos-test-stack-inputs`, which is the host build of the
+# workspace now that there is no separate test world. The worker IMAGES are
+# plain userland (no caos binary is baked in; build-builtins composes one on
+# from `CAOS_BUILTIN_BINS`).
 phase "checking the stack binaries"
 echo "==> using the stack inputs at $inputs" >&2
 for b in server runnerd core-seeder-runner caos-cli caos; do

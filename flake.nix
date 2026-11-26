@@ -300,37 +300,12 @@
           }
         );
 
-        # The same workspace, stamped for the TEST world (crates/caos-world).
-        # A dev stack is built from this; the host's is built from the above, so
-        # a client of one is refused by the other's server.
-        #
-        # IT HAS TO BE A SECOND COMPILE, and that is not a design choice here:
-        # the tag is `option_env!`, read by rustc, because caos-world explains
-        # why it cannot be read at runtime — the interpreter exports its
-        # environment into `worker1`, so an env-carried tag would travel with it
-        # and declare the wrong binary correct. The tag is a property of the
-        # ARTIFACT, so two worlds are two artifacts.
-        #
-        # WHAT IT DOES NOT DUPLICATE IS THE EXPENSIVE HALF. `cargoArtifacts` is
-        # `buildDepsOnly commonArgs`, and this adds nothing to `commonArgs` — so
-        # the ~176 dependencies are one derivation shared by both worlds, and
-        # only the thin workspace compile happens twice. caos-tools/build's own
-        # guard measured that split: the deps are 12.6s of a 15.0s cold build,
-        # the workspace alone 2.4s.
-        #
-        # Do NOT move the stamp into `commonArgs` to "share more". It would land
-        # in the dependency key and rebuild all of them per world, which is the
-        # exact opposite of the intent.
-        testWorkspaceBins = craneLib.buildPackage (
-          commonArgs
-          // noVendorRefsToRemove
-          // {
-            inherit cargoArtifacts;
-            cargoExtraArgs = "--workspace";
-            doCheck = false;
-            CAOS_WORLD = "test";
-          }
-        );
+        # There used to be a second compile here, stamped for a TEST world that a
+        # dev stack's server and clients had to agree on (a host client was
+        # refused by a test server). The stacks are kept apart reliably now, so
+        # the world and its checks are gone and a dev stack is built from the
+        # same workspace. The name stays for the attrs and scripts that use it.
+        testWorkspaceBins = workspaceBins;
 
         # Every crate's binary is selected (by name, at copy time) from the one
         # build above, so these are all the same derivation. The generic `caos`
@@ -1865,8 +1840,8 @@ sandbox = false''
           # binaries stay available as `.#caos`.
           default = caos-tools;
           inherit caos server runnerd caos-cli caosd caos-tools;
-          # The workspace stamped for the TEST world — what dev/stack-up builds
-          # a dev stack from, so a host client cannot drive it (and vice versa).
+          # What dev/stack-up builds a dev stack from (the same workspace as the
+          # host's: there is no separate test world any more).
           caos-test-world = testWorkspaceBins;
 
           # The two stack-bring-up aggregates (see `stackInputs`): one nix

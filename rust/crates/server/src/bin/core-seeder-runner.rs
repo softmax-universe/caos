@@ -276,7 +276,6 @@ fn post(
 ) -> Result<minreq::Response, String> {
     let mut req = minreq::post(url)
         .with_header("content-type", "application/json")
-        .with_header(caos_world::WORLD_HEADER, caos_world::WORLD)
         .with_timeout(timeout_secs)
         .with_body(body.to_string());
     if let Some(token) = token {

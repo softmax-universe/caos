@@ -762,6 +762,11 @@ fn handle(config: Arc<Config>, mut request: Request) -> std::io::Result<()> {
             );
         }
     }
+    // `GET /run` answers with a receipt in its headers (README, "Run receipts"),
+    // which the body-only `route` cannot carry.
+    if *request.method() == Method::Get && path == "/run" {
+        return serve_run(&config, request);
+    }
     match route(&config, &mut request) {
         Ok(body) => request.respond(Response::from_data(body)),
         Err(err) => request.respond(
@@ -769,6 +774,32 @@ fn handle(config: Arc<Config>, mut request: Request) -> std::io::Result<()> {
                 .with_status_code(tiny_http::StatusCode(err.status)),
         ),
     }
+}
+
+/// `GET /run`: the result line, with `X-Caos-Cache` and `X-Caos-Image` saying
+/// what THIS invocation did (see `compute::run`).
+fn serve_run(config: &Arc<Config>, request: Request) -> std::io::Result<()> {
+    let url = request.url().to_string();
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let answer =
+        secret_context(config, &request).and_then(|secrets| compute::run(config, query, &secrets));
+    match answer {
+        Ok(run) => request.respond(run_http_response(run)),
+        Err(err) => request.respond(
+            Response::from_string(format!("{}\n", err.message))
+                .with_status_code(tiny_http::StatusCode(err.status)),
+        ),
+    }
+}
+
+fn run_http_response(run: compute::RunResponse) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut response = Response::from_data(run.body);
+    for (name, value) in run.headers {
+        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response = response.with_header(header);
+        }
+    }
+    response
 }
 
 /// `POST /mcp`: one JSON-RPC message in, its answer out (`202` with no body for
@@ -881,10 +912,6 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
     };
 
     match request.method() {
-        Method::Get if path == "/run" => {
-            let secrets = secret_context(config, request)?;
-            compute::run(config, &query, &secrets)
-        }
         Method::Get if path.starts_with("/status/") => {
             status::serve(config, path.trim_start_matches("/status/"), &query)
         }

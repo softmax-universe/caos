@@ -528,23 +528,97 @@ pub(crate) fn run(
     config: &Config,
     query: &str,
     secrets: &crate::secrets::Context,
-) -> Result<Vec<u8>, HttpError> {
+) -> Result<RunResponse, HttpError> {
+    run_with(config, query, |arg_tree| {
+        run_work_request_receipt(
+            config,
+            &WorkRequest {
+                arg_tree,
+                stack: &[],
+                secrets,
+            },
+        )
+    })
+}
+
+fn run_with(
+    config: &Config,
+    query: &str,
+    execute: impl FnOnce(&str) -> Result<(String, Origin), HttpError>,
+) -> Result<RunResponse, HttpError> {
     let arg_tree = parse_arg_tree(query)?;
     // An HTTP run is by definition top-level: the run stack (cycle detection)
     // exists only inside the server, threaded through promise sub-runs.
-    let result = run_work_request(
-        config,
-        &WorkRequest {
-            arg_tree: &arg_tree,
-            stack: &[],
-            secrets,
-        },
-    );
+    let result = execute(&arg_tree);
     // Top-level publication is part of `run_work_request`: a flight owner pins
     // before releasing its ownership, and waiters receive that combined
     // compute-and-publication outcome.
-    let result = result?;
-    Ok(format!("{result}\n").into_bytes())
+    let (result, origin) = result?;
+    // Reporting must never convert or push an image, even if its independently
+    // evictable image memo disappeared while the result memo survived.
+    let image = read_arg_tree(config, &arg_tree)
+        .ok()
+        .and_then(|(image, _)| {
+            receipt_image(&image, |key| {
+                if std::env::var("CAOS_IMAGE_RESOLVE").as_deref() == Ok("none") {
+                    return None;
+                }
+                cache_get(&config.redis_addr, key)
+                    .ok()
+                    .flatten()
+                    .map(|digest| image_ref(config, &digest))
+            })
+        });
+    Ok(RunResponse::new(result, origin, image))
+}
+
+fn receipt_image(image: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+    if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
+        return validate_docker_reference(reference, true)
+            .ok()
+            .map(|_| reference.to_string());
+    }
+    lookup(&format!("caos:image:{image}"))
+}
+
+/// Whether a run's result came from executing the worker or from a result that
+/// was already there, for ONE invocation (README, "Run receipts").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// This invocation ran the worker. `X-Caos-Cache: miss`.
+    Executed,
+    /// This invocation did not run the worker: the result was in the cache, or
+    /// it waited on an identical in-flight invocation that did run it.
+    /// `X-Caos-Cache: hit`.
+    CacheHit,
+}
+
+/// The header carrying [`Origin`].
+pub(crate) const CACHE_HEADER: &str = "X-Caos-Cache";
+/// The header carrying the resolved worker image reference.
+pub(crate) const IMAGE_HEADER: &str = "X-Caos-Image";
+
+/// A `GET /run` answer: the result line and the receipt for this invocation.
+pub(crate) struct RunResponse {
+    pub(crate) body: Vec<u8>,
+    pub(crate) headers: Vec<(&'static str, String)>,
+}
+
+impl RunResponse {
+    fn new(result: String, origin: Origin, image: Option<String>) -> RunResponse {
+        let cache = match origin {
+            Origin::Executed => "miss",
+            Origin::CacheHit => "hit",
+        };
+        let mut headers = vec![(CACHE_HEADER, cache.to_string())];
+        if let Some(image) = image {
+            headers.push((IMAGE_HEADER, image));
+        }
+        RunResponse {
+            body: format!("{result}\n").into_bytes(),
+            headers,
+        }
+    }
 }
 
 /// Parse and validate the request identity.
@@ -582,6 +656,15 @@ fn result_key(config: &Config, arg_tree: &str) -> String {
 }
 
 fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, HttpError> {
+    run_work_request_receipt(config, request).map(|(result, _)| result)
+}
+
+/// [`run_work_request`], also saying whether THIS invocation executed the
+/// worker or was served a result someone else (or an earlier call) produced.
+fn run_work_request_receipt(
+    config: &Config,
+    request: &WorkRequest,
+) -> Result<(String, Origin), HttpError> {
     let WorkRequest {
         arg_tree,
         stack,
@@ -604,16 +687,52 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
     // so a hit never re-resolves. A hit skips image conversion and the container
     // run. Redis is best-effort: a lookup error just means we run uncached.
     let key = &result_key(config, arg_tree);
-    match cache_get(&config.redis_addr, key) {
-        Ok(Some(result)) => {
-            eprintln!("cache hit: arg_tree={arg_tree} -> {result}");
-            let outcome = complete_cache_hit(arg_tree, stack, result, |result| {
-                pin_result(config, arg_tree, result)
-            });
-            return outcome.map_err(|(status, msg)| HttpError::new(status, msg));
-        }
-        Ok(None) => eprintln!("cache miss: arg_tree={arg_tree} (image={image}); running worker"),
-        Err(e) => eprintln!("cache lookup failed ({e}); running worker: arg_tree={arg_tree}"),
+    serve_request(
+        arg_tree,
+        stack,
+        || match cache_get(&config.redis_addr, key) {
+            Ok(Some(result)) => {
+                eprintln!("cache hit: arg_tree={arg_tree} -> {result}");
+                Ok(Some(result))
+            }
+            Ok(None) => {
+                eprintln!("cache miss: arg_tree={arg_tree} (image={image}); running worker");
+                Ok(None)
+            }
+            Err(e) => {
+                eprintln!("cache lookup failed ({e}); running worker: arg_tree={arg_tree}");
+                Err(e)
+            }
+        },
+        || cache_get(&config.redis_addr, key),
+        || run_dispatch(config, request, &image, &salt, key),
+        |result| pin_result(config, arg_tree, result),
+    )
+    .map_err(|(status, msg)| HttpError::new(status, msg))
+}
+
+/// The single-flight pipeline behind [`run_work_request_receipt`], with its
+/// effects passed in so the receipt it reports can be tested without a redis,
+/// registry or runner: `lookup` is the first cache read, `reread` the one
+/// after claiming the flight, `execute` the worker run plus cache store,
+/// `publish` the top-level result pin.
+///
+/// The returned [`Origin`] is a property of THIS call. `Executed` is reported
+/// only by the arrival whose `execute` ran; a cache hit, a post-claim re-read
+/// hit, and a waiter on an in-flight run all report `CacheHit`, so of N
+/// identical concurrent calls that start one run exactly one reports
+/// `Executed`.
+fn serve_request(
+    arg_tree: &str,
+    stack: &[String],
+    lookup: impl FnOnce() -> Result<Option<String>, String>,
+    reread: impl FnOnce() -> Result<Option<String>, String>,
+    execute: impl FnOnce() -> Result<String, (u16, String)>,
+    publish: impl FnOnce(&str) -> Result<(), HttpError>,
+) -> Result<(String, Origin), (u16, String)> {
+    if let Ok(Some(result)) = lookup() {
+        return complete_cache_hit(arg_tree, stack, result, publish)
+            .map(|result| (result, Origin::CacheHit));
     }
 
     // Re-entering an ArgTree already on the stack has no fixpoint — fail, listing
@@ -625,10 +744,7 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
         cycle.push(arg_tree);
         let listing = cycle.join("\n  -> ");
         eprintln!("run cycle detected:\n  {listing}");
-        return Err(HttpError::new(
-            400,
-            format!("run cycle detected:\n  {listing}"),
-        ));
+        return Err((400, format!("run cycle detected:\n  {listing}")));
     }
 
     // Single-flight: identical concurrent requests share one run. A diamond
@@ -648,10 +764,8 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
     // errors cleanly. An owner guard clears and broadcasts if its thread
     // unwinds; a waiter never promotes itself merely because a valid run is
     // slow, since duplicate execution may repeat external side effects.
-    let (outcome, owner) = match claim_flight_after_miss(arg_tree, stack, || {
-        cache_get(&config.redis_addr, key)
-    }) {
-        FlightDisposition::Run(owner) => (run_dispatch(config, request, &image, &salt, key), owner),
+    let (outcome, owner, origin) = match claim_flight_after_miss(arg_tree, stack, reread) {
+        FlightDisposition::Run(owner) => (execute(), owner, Origin::Executed),
         FlightDisposition::Complete {
             outcome,
             cache_hit,
@@ -666,20 +780,22 @@ fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, Ht
             if cache_hit {
                 eprintln!("cache hit after claiming the flight: arg_tree={arg_tree}");
             }
-            (outcome, owner)
+            // Either way this arrival ran nothing: it re-read a result, or it
+            // waited on the owner's run. The owner alone reports `Executed`.
+            (outcome, owner, Origin::CacheHit)
         }
     };
     let outcome = match owner {
         // Any top-level participant marks the shared flight for publication,
         // even when its executor entered as a promise sub-run. The owner keeps
         // the flight fenced until that publication finishes.
-        Some(owner) => owner.finish_with(outcome, |result| pin_result(config, arg_tree, result)),
+        Some(owner) => owner.finish_with(outcome, publish),
         // A waiter receives the owner's already-published outcome. The only
         // ownerless executor is a cycle-breaking sub-run: an external request
         // has no ancestors, so it can never take the unsafe path.
         None => outcome,
     };
-    outcome.map_err(|(status, msg)| HttpError::new(status, msg))
+    outcome.map(|result| (result, origin))
 }
 
 /// The dispatch + promise-resolution + cache-store tail of [`run_work_request`],
@@ -4237,5 +4353,239 @@ mod continuation_shape_tests {
         assert!(pinned.status.success());
         assert_eq!(String::from_utf8(pinned.stdout).unwrap().trim(), hash);
         std::fs::remove_dir_all(git_dir).unwrap();
+    }
+}
+
+/// What a `GET /run` reports about ONE invocation (README, "Run receipts"):
+/// whether it executed or was served a result, and the image it ran on. Driven
+/// through [`serve_request`] with an in-memory cache and a counting executor, so
+/// no redis, registry or runner is needed — the receipt is decided entirely by
+/// the cache/flight logic, which is what these exercise.
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// One in-memory "redis" plus a count of worker runs.
+    #[derive(Default)]
+    struct World {
+        cache: Mutex<HashMap<String, String>>,
+        runs: AtomicUsize,
+    }
+
+    impl World {
+        /// An invocation of `arg_tree` like `run_work_request_receipt`'s: the
+        /// cache is the lookup, the re-read AND the executor's store target.
+        /// `cacheable` false models a result that is not stored.
+        fn call(
+            &self,
+            arg_tree: &str,
+            cacheable: bool,
+            during_run: impl FnOnce(),
+        ) -> (String, Origin) {
+            let get = || Ok(self.cache.lock().unwrap().get(arg_tree).cloned());
+            serve_request(
+                arg_tree,
+                &[],
+                get,
+                get,
+                || {
+                    self.runs.fetch_add(1, Ordering::SeqCst);
+                    during_run();
+                    let result = format!("tree {}", "e".repeat(40));
+                    if cacheable {
+                        self.cache
+                            .lock()
+                            .unwrap()
+                            .insert(arg_tree.to_string(), result.clone());
+                    }
+                    Ok(result)
+                },
+                |_| Ok(()),
+            )
+            .expect("run")
+        }
+    }
+
+    fn response(origin: Origin) -> RunResponse {
+        // Real ArgTree decoding and production response assembly, with only
+        // the worker/cache pipeline injected (no registry or runner required).
+        let dir = std::env::temp_dir().join(format!(
+            "caos-receipt-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let repo = gix::open(&dir).unwrap();
+        let base = repo
+            .write_blob(format!("docker://registry:5000/caos/img@{DIGEST}"))
+            .unwrap()
+            .detach();
+        let tree = gix::objs::Tree {
+            entries: vec![gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: "base".into(),
+                oid: base,
+            }],
+        };
+        let arg_tree = repo.write_object(&tree).unwrap().to_string();
+        let config = Config {
+            registry_push_url: "http://127.0.0.1:1".into(),
+            registry_pull_host: "registry:5000".into(),
+            redis_addr: "127.0.0.1:1".into(),
+            cache_namespace: "receipt-test".into(),
+            git_dir: dir.to_str().unwrap().into(),
+            secrets_git: dir.to_str().unwrap().into(),
+            repo: repo.into_sync(),
+        };
+        let answer = run_with(&config, &format!("req={arg_tree}"), |actual| {
+            assert_eq!(actual, arg_tree);
+            Ok(("tree x".into(), origin))
+        })
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        answer
+    }
+
+    #[test]
+    fn receipt_image_cache_eviction_never_converts() {
+        let image = "a".repeat(40);
+        assert_eq!(
+            receipt_image(&image, |key| {
+                assert_eq!(key, format!("caos:image:{image}"));
+                None
+            }),
+            None
+        );
+        let reference = format!("registry:5000/caos/img@{DIGEST}");
+        assert_eq!(
+            receipt_image(&image, |_| Some(reference.clone())),
+            Some(reference)
+        );
+    }
+
+    fn header<'a>(response: &'a RunResponse, name: &str) -> Option<&'a str> {
+        response
+            .headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn assert_receipt(response: &RunResponse, cache: &str) {
+        assert_eq!(header(response, "X-Caos-Cache"), Some(cache));
+        let wire = crate::run_http_response(RunResponse {
+            body: response.body.clone(),
+            headers: response.headers.clone(),
+        });
+        assert_eq!(wire.status_code().0, 200);
+        for (name, expected) in [
+            (CACHE_HEADER, cache.to_string()),
+            (IMAGE_HEADER, format!("registry:5000/caos/img@{DIGEST}")),
+        ] {
+            assert_eq!(
+                wire.headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str()),
+                Some(expected.as_str())
+            );
+        }
+        let image = header(response, "X-Caos-Image").expect("image header");
+        assert!(
+            image.ends_with(&format!("@{DIGEST}")),
+            "image is not digest-pinned: {image}"
+        );
+    }
+
+    #[test]
+    fn receipt_cold_call_reports_executed_with_image_digest() {
+        let world = World::default();
+        let (_, origin) = world.call(&format!("{:f<40}", "receipt1"), true, || {});
+        assert_eq!(origin, Origin::Executed);
+        assert_eq!(world.runs.load(Ordering::SeqCst), 1);
+        assert_receipt(&response(origin), "miss");
+    }
+
+    #[test]
+    fn receipt_warm_call_reports_cache_hit_with_image_digest() {
+        let world = World::default();
+        let key = format!("{:f<40}", "receipt2");
+        world.call(&key, true, || {});
+        let (_, origin) = world.call(&key, true, || {});
+        assert_eq!(origin, Origin::CacheHit);
+        assert_eq!(world.runs.load(Ordering::SeqCst), 1, "the hit ran nothing");
+        assert_receipt(&response(origin), "hit");
+    }
+
+    #[test]
+    fn receipt_concurrent_identical_calls_one_executed_one_hit() {
+        let world = Arc::new(World::default());
+        let key = format!("{:f<40}", "receipt3");
+        let (owner_world, owner_key) = (world.clone(), key.clone());
+        let owner = std::thread::spawn(move || {
+            let waiting = owner_key.clone();
+            owner_world.call(&owner_key, true, move || {
+                // Hold the run open until the second call has parked on it.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !flights()
+                    .lock()
+                    .unwrap()
+                    .get(&waiting)
+                    .is_some_and(|flight| flight.waiters.len() == 1)
+                {
+                    assert!(std::time::Instant::now() < deadline, "no waiter joined");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        });
+        // The second call arrives only once the first is in flight.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !flights().lock().unwrap().contains_key(&key) {
+            assert!(std::time::Instant::now() < deadline, "owner never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (_, waiter) = world.call(&key, true, || panic!("the waiter must not run"));
+        let (_, owner) = owner.join().unwrap();
+        assert_eq!(world.runs.load(Ordering::SeqCst), 1);
+        assert_eq!((owner, waiter), (Origin::Executed, Origin::CacheHit));
+        assert_receipt(&response(owner), "miss");
+        assert_receipt(&response(waiter), "hit");
+    }
+
+    #[test]
+    fn receipt_nocache_call_reports_executed() {
+        // A call that must not be answered from the cache is one whose ArgTree
+        // is new (a fresh `salt`), or whose result is not stored (a caught
+        // failure). Either way every call runs, and each says so.
+        let world = World::default();
+        let key = format!("{:f<40}", "receipt4");
+        for _ in 0..2 {
+            let (_, origin) = world.call(&key, false, || {});
+            assert_eq!(origin, Origin::Executed);
+            assert_receipt(&response(origin), "miss");
+        }
+        let salted = format!("{:f<40}", "receipt5");
+        world.call(&format!("{:f<40}", "receipt6"), true, || {});
+        let (_, origin) = world.call(&salted, true, || {});
+        assert_eq!(origin, Origin::Executed);
+        assert_eq!(world.runs.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn an_unresolvable_image_omits_only_the_image_header() {
+        let response = RunResponse::new("tree x".into(), Origin::Executed, None);
+        assert_eq!(header(&response, "X-Caos-Cache"), Some("miss"));
+        assert_eq!(header(&response, "X-Caos-Image"), None);
+        assert_eq!(response.body, b"tree x\n");
     }
 }

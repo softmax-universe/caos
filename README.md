@@ -368,6 +368,41 @@ the same per-key pattern. A request runs independently only when the waits-for
 graph proves that joining would form a cycle. Losing an owner fails and wakes
 its waiters so a later arrival can become the new owner.
 
+#### Run receipts
+
+`GET /run` says, in response headers, what THIS invocation did. The body is
+unchanged (`"<type> <hash>"`), so existing clients are unaffected.
+
+| Header | Value |
+|---|---|
+| `X-Caos-Cache` | `miss` — this invocation executed the worker. `hit` — it did not: the result came from the cache, or it waited on an identical in-flight invocation that executed. |
+| `X-Caos-Image` | The resolved worker image reference the result was produced on, e.g. `registry:5000/caos/<name>@sha256:…`. |
+
+- **Per invocation, not per result.** The headers describe the call they are
+  on. A result executed once and read ten times is `miss` once and `hit` nine
+  times.
+- **Single-flight.** When identical calls overlap, exactly one owns the run and
+  reports `miss`; every call that parks on it reports `hit`, and receives the
+  same result and the same `X-Caos-Image`. A call that re-reads the cache after
+  claiming the flight and finds the result there also reports `hit`.
+  The one exception is the cycle-breaking duplicate (design/map-then.md), which
+  really does run the worker again and so reports `miss`.
+- **Not cacheable / no-cache.** CAOS has no per-call "skip cache" switch: a call
+  is re-run by changing its ArgTree (a new `salt`), and a result that must not
+  be memoized (a `catch` that folded in a sub-run failure) is never stored.
+  Both execute on every call, so both report `miss`. `hit` always means the
+  worker did not run for this call.
+- **Image.** The reference is the one the server resolves for the ArgTree's
+  `base` (a git image is converted and pushed, giving a digest reference; a
+  `docker://` base is passed through as given). It is part of the cache key, so
+  a `hit` reports the image that produced the cached result. CAOS does not
+  resolve unpinned Docker tags: a `docker://repo:tag` base is reported as
+  written, with no `@sha256:`, and resolving it is the caller's job. If the
+  image cannot be resolved the call still succeeds and `X-Caos-Image` is
+  omitted; `X-Caos-Cache` is always present on success.
+- **Errors** carry neither header. Promise sub-runs and `/eval/*` / `/wait`
+  tickets report nothing; only a top-level `GET /run` does.
+
 ### Git images
 
 A non-`docker://` image is the git hash of an image in **git-docker form** — a

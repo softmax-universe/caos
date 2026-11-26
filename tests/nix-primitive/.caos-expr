@@ -1,0 +1,4 @@
+# tests/nix-primitive, as an ENTRY: a WORKER test of `--base:nix=v1`
+# (design/nix-bootstrap.md). It needs the stack under test, because the
+# primitive is run by THAT stack's server in THAT stack's flake-builder.
+curry --base:@=DEEP-DEPS/bash --worker1:@=worker.sh

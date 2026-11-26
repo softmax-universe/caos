@@ -444,6 +444,7 @@ fn form_bundle(
         }
         Some("hash") => base_value,
         Some("docker") => format!("docker://{base_value}"),
+        Some("nix") => caos_eval::nix_base(&base_value).map_err(bad)?,
         other => return Err(bad(format!("unknown base type {other:?}"))),
     };
 
@@ -2306,6 +2307,9 @@ fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), 
 /// git images (the default): convert it to a real image, push it to the registry,
 /// and return a digest reference into the registry.
 fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
+    if image.starts_with(caos_eval::NIX_SCHEME) {
+        return resolve_image(config, &nix_image(image)?);
+    }
     if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
         validate_docker_reference(reference, true).map_err(|e| HttpError::new(400, e))?;
         return Ok(reference.to_string());
@@ -2332,6 +2336,37 @@ fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
     // evaluates it, so what arrives here is already an image (design/caos-expr.md).
     convert_git_image(config, image)
         .map_err(|e| HttpError::new(500, format!("converting git image {image}: {e}")))
+}
+
+/// The image that runs the nix primitive `base` (`nix:v1`): THIS STACK'S
+/// `caos-worker-nix`, whose /worker (`stack/nix-worker`) builds a flake
+/// attribute and adds nothing (design/nix-bootstrap.md).
+///
+/// Which stack ran it is deliberately not part of the job's key — that is the
+/// point of the primitive — so the image is looked up here, at dispatch, and
+/// never written into an ArgTree. `stack/serve` names the file
+/// (`CAOS_NIX_IMAGE_FILE`) and `build-builtins.sh` writes the git image hash
+/// into it; it is read per job, so a re-publish takes effect without a
+/// restart.
+fn nix_image(base: &str) -> Result<String, HttpError> {
+    let version = &base[caos_eval::NIX_SCHEME.len()..];
+    caos_eval::nix_base(version).map_err(|e| HttpError::new(400, e))?;
+    let Ok(file) = std::env::var("CAOS_NIX_IMAGE_FILE") else {
+        return Err(HttpError::new(
+            503,
+            format!("{base}: this stack runs no nix primitive (CAOS_NIX_IMAGE_FILE is unset)"),
+        ));
+    };
+    let image = std::fs::read_to_string(&file)
+        .map_err(|e| HttpError::new(503, format!("{base}: reading {file}: {e}")))?;
+    let image = image.trim();
+    if image.len() != 40 || !image.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(HttpError::new(
+            503,
+            format!("{base}: {file} holds {image:?}, not a git image hash"),
+        ));
+    }
+    Ok(image.to_string())
 }
 
 /// The lock for one cache key, minted on first use. A redis cache read followed

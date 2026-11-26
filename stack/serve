@@ -299,8 +299,14 @@ YML
 fi
 
 # --- server ------------------------------------------------------------------
+# Where the nix primitive's image is recorded (design/nix-bootstrap.md): the
+# publish below writes this stack's flake-builder into it, and the server reads
+# it for every `nix:v1` job. Per stack, under its own state, because it names
+# THIS stack's build.
+export CAOS_NIX_IMAGE_FILE="$CAOS_STACK_STATE/nix-image"
 start server env \
   CAOS_GIT_DIR="$CAOS_STACK_STATE/git" \
+  CAOS_NIX_IMAGE_FILE="$CAOS_NIX_IMAGE_FILE" \
   CAOS_REDIS_ADDR="$REDIS_ADDR" \
   CAOS_CACHE_NAMESPACE="${CAOS_CACHE_NAMESPACE:-}" \
   CAOS_PENDING_TIMEOUT_SECS="${CAOS_PENDING_TIMEOUT_SECS:-900}" \

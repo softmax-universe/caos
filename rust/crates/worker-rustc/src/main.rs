@@ -98,14 +98,14 @@ fn start() -> Result<(), String> {
             return Err(format!("--{required} is required"));
         }
     }
-    // The cargo worker's image ref rides as a literal (a hash string, read as
-    // content): rustc is a SEEDED core item, so bootstrap hand-builds its curry
-    // binding `--cargo=<cargo image hash>` (design/caos-expr.md, Phase 3).
+    // The cargo worker's image rides bound into rustc's own curry: as a tree
+    // (the root expression's `--cargo=$CARGO`) or as a hash string read as
+    // content.
     let cargo = read_image("cargo")?;
     // The default runner arrives the SAME way and is not normally a caller's
     // argument: rustc DEPENDS on it and curries onto it itself. A tool that
     // needs extra runtime capabilities can pass the distinct `output-runner`
-    // arg; do not rebind `runner`, which is already part of the seeded rustc
+    // arg; do not rebind `runner`, which is already part of rustc's own
     // curry and also determines where this factory executes.
     let runner = read_image("runner")?;
 

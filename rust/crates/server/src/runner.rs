@@ -51,27 +51,6 @@ fn pending_timeout() -> Duration {
     }))
 }
 
-/// How long a SEEDED sentinel waits before the server is willing to call a
-/// same-sentinel disagreement permanent (see [`seeded_verdict`]).
-///
-/// It exists only to cover the two windows in which a parked seeder poll is
-/// legitimately out of date: the core-seeder-runner rescans `refs/caos/seed`
-/// every 5s (`RESCAN`), and a poll it parked before a republish keeps
-/// advertising the OLD `required` until its 20s TTL turns over (`POLL_TTL`).
-/// Inside those 25s a mismatch is transient and failing would be wrong;
-/// outside them it never resolves on its own. Default 45s — most of a factor
-/// of two over the turnover, and a twentieth of the 900s pending timeout a
-/// stack sets. Raise it if you lengthen either seeder constant.
-fn seeded_grace() -> Duration {
-    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    Duration::from_secs(*SECS.get_or_init(|| {
-        std::env::var("CAOS_SEEDED_GRACE_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(45)
-    }))
-}
-
 /// How long an owner's lease lasts after its runner last renewed it. The runner
 /// renews every third of this, so three missed renewals are a lapse. Liveness
 /// is the runner's own traffic and is never inferred from a job being slow.
@@ -311,28 +290,6 @@ fn new_nonce(id: u64) -> String {
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The git blob oid of a pool NAME — what a `required-pool` arg's entry is, and
-/// so what the rendezvous compares. Memoized per name: the names are a fixed
-/// tiny set and this is read under the dispatch path.
-pub(crate) fn pool_oid(name: &str) -> String {
-    static MEMO: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(known) = memo.lock().expect("pool oid memo").get(name) {
-        return known.clone();
-    }
-    let oid = gix::objs::compute_hash(
-        gix::hash::Kind::Sha1,
-        gix::objs::Kind::Blob,
-        name.as_bytes(),
-    )
-    .expect("hashing a pool name")
-    .to_string();
-    memo.lock()
-        .expect("pool oid memo")
-        .insert(name.to_string(), oid.clone());
-    oid
-}
-
 /// Does `required` match a job with `arg_entries`? The rendezvous is SYMMETRIC,
 /// and both halves are pure oid equality:
 ///
@@ -346,7 +303,7 @@ pub(crate) fn pool_oid(name: &str) -> String {
 /// requires nothing, so the first half alone matches it against everything,
 /// including work that wanted a specific pool; a `required*` arg excludes it,
 /// because it advertises no entry of that name. Nothing here knows what any
-/// particular pool is FOR — `required-pool=seeded` is just a name both sides
+/// particular pool is FOR — a pool is just a name both sides
 /// happen to agree on.
 ///
 /// A job whose pool is absent therefore matches nothing and fails at its
@@ -360,78 +317,6 @@ fn matches(required: &ArgTree, arg_entries: &ArgTree) -> bool {
             .iter()
             .filter(|(name, _)| name.starts_with(caos_world::REQUIRED_ARG_PREFIX))
             .all(|(name, oid)| required.get(name) == Some(oid))
-}
-
-/// Why a seeded job is unanswerable, if that is PROVABLE right now.
-///
-/// A `docker://seeded…` job's `image` arg is the blob of the sentinel string
-/// itself, and the seed record `build-builtins.sh` publishes for that sentinel
-/// carries the same blob in its `required` — so a parked poll whose
-/// `required["base"]` equals the job's `base` IS this sentinel's seeder, and
-/// nobody else's. If that poll is parked and does not match the job, the two
-/// sides disagree about the rest of the key and no amount of waiting fixes it:
-/// the seeder answers one arg tree and the caller formed another.
-///
-/// That is the whole failure this exists for. It is not hypothetical — merging
-/// main changed the seeded-core contract (`strip_caos_expr`) while two
-/// hand-rolled `run-then` call sites still passed the directory whole, so
-/// build.sh's `docker://seeded` job asked for `in=1fa8ec14` against a seeder
-/// offering `in=229fc9ba`. The symptom was a TEN MINUTE hang on an idle
-/// machine and then `no runner for arg_tree …`, which points at capacity —
-/// the one thing that was not wrong. The information to say so exactly was in
-/// this table the entire time.
-///
-/// `None` means "not provable": no seeder for this sentinel is parked (it may
-/// not have registered yet, or its poll is between TTLs), so keep waiting.
-fn seeded_verdict(st: &State, id: u64) -> Option<String> {
-    let now = Instant::now();
-    let entries = &st.jobs.get(&id)?.arg_entries;
-    let live = st
-        .parked
-        .iter()
-        .filter(|p| now < p.matchable_until)
-        .map(|p| &p.required);
-    disagreeing_seeder(entries, live)
-}
-
-/// [`seeded_verdict`] over plain values: the job's arg entries, and the
-/// required set of every currently-matchable poll. The closest disagreement
-/// wins, so the message names the one that shares the most of the key.
-fn disagreeing_seeder<'a>(
-    entries: &ArgTree,
-    polls: impl Iterator<Item = &'a ArgTree>,
-) -> Option<String> {
-    let image = entries.get("base")?;
-    let mut closest: Option<Vec<String>> = None;
-    for required in polls {
-        if required.get("base") != Some(image) {
-            continue;
-        }
-        // A matching poll would have been claimed by `offer_job`; if one is
-        // somehow here the job is about to run, so diagnose nothing.
-        if matches(required, entries) {
-            return None;
-        }
-        let diffs: Vec<String> = required
-            .iter()
-            .filter(|(name, oid)| entries.get(*name) != Some(*oid))
-            .map(|(name, oid)| match entries.get(name) {
-                Some(got) => format!("{name}: seeder answers {oid}, the job asks {got}"),
-                None => format!("{name}: seeder answers {oid}, the job has no such arg"),
-            })
-            .collect();
-        if closest.as_ref().is_none_or(|best| diffs.len() < best.len()) {
-            closest = Some(diffs);
-        }
-    }
-    closest.map(|diffs| {
-        format!(
-            "its seeder IS registered and requires a different arg tree ({}). \
-             The seed record and the caller disagree about the key: one of them \
-             is stale, so republish the seed (caosd up) or fix the caller.",
-            diffs.join("; ")
-        )
-    })
 }
 
 /// The job payload a matched poll is answered with.
@@ -474,7 +359,6 @@ pub(crate) fn dispatch(
     arg_tree: &str,
     arg_entries: ArgTree,
     image_ref: &str,
-    seeded: bool,
     secrets: Vec<(String, String)>,
     mut start_sub_run: impl FnMut(&str) -> Result<(), HttpError>,
     mut on_note: impl FnMut(Note),
@@ -487,21 +371,6 @@ pub(crate) fn dispatch(
         let nonce = new_nonce(id);
         st.by_nonce.insert(nonce.clone(), id);
         let deadline = Instant::now() + pending_timeout();
-        // A SEEDED SENTINEL IS FOR A SEEDER, AND FOR NOBODY ELSE. `docker://seeded…`
-        // names no registry image; it is a key a core-seeder-runner answers with a
-        // pre-built result (design/caos-expr.md, Phase 3). A generic runner that
-        // claims one cannot do anything but `docker run seeded-deep-deps` and die
-        // — and `offer_job` prefers the most specific poll, so the ONLY way that
-        // happens is a seeder that has not parked its polls yet. That window is
-        // real: a stack whose seed ref is published after boot answers nothing
-        // until the seeder's next rescan, and the caller sees a docker error
-        // pointing nowhere near the cause (observed, from caos-tools/build/worker.sh
-        // publishing std and resolving it moments later).
-        //
-        // Deferring generic polls for the WHOLE pending window makes the sentinel
-        // contract what it always claimed to be: it waits for an answerer, and if
-        // none ever comes it fails loudly on the pending timeout.
-        let defer_generic_until = if seeded { Some(deadline) } else { None };
         let key = job_key(&arg_entries);
         st.jobs.insert(
             id,
@@ -513,7 +382,7 @@ pub(crate) fn dispatch(
                 nonce,
                 phase: Phase::Pending {
                     deadline,
-                    defer_generic_until,
+                    defer_generic_until: None,
                 },
                 enqueued: Instant::now(),
                 events: event_tx,
@@ -525,19 +394,9 @@ pub(crate) fn dispatch(
         id
     };
 
-    // A seeded sentinel defers generic runners for its whole pending window, so
-    // when it goes unanswered NOTHING happens — no container starts, no log
-    // line appears, and the machine sits idle for 900s before a 503 that blames
-    // capacity. Wake once at the grace point to say what is actually true.
-    let mut seeded_check = if seeded {
-        Some(Instant::now() + seeded_grace())
-    } else {
-        None
-    };
-
     loop {
         // Sleep until the job's current phase deadline (the result sender wakes
-        // us early through the channel), or the seeded grace point if sooner.
+        // us early through the channel).
         let wait = {
             let st = lock();
             match st.jobs.get(&id).map(|j| &j.phase) {
@@ -555,10 +414,6 @@ pub(crate) fn dispatch(
                 None => Duration::ZERO,
             }
         };
-        let wait = match seeded_check {
-            Some(at) => wait.min(at.saturating_duration_since(Instant::now())),
-            None => wait,
-        };
         match event_rx.recv_timeout(wait.max(Duration::from_millis(10))) {
             Ok(DispatchEvent::Note(note)) => on_note(note),
             Ok(DispatchEvent::Outcome(Outcome::Done(result))) => return Ok(result),
@@ -572,81 +427,19 @@ pub(crate) fn dispatch(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let mut st = lock();
-                // A bool, not a borrow of the job: the grace block below needs
-                // `st` mutably, and `arg_tree` is the dispatch parameter anyway
-                // (a Job's copy of it never changes).
-                let Some(pending) = st
-                    .jobs
-                    .get(&id)
-                    .map(|j| matches!(j.phase, Phase::Pending { .. }))
-                else {
+                let Some(job) = st.jobs.get(&id) else {
                     // Resolved between the timeout and the lock; loop to drain
                     // the channel (the sender removed the job before sending).
                     continue;
                 };
-                let now = Instant::now();
-                // The grace point: still pending, and long enough past enqueue
-                // that a same-sentinel disagreement can no longer be a seeder
-                // mid-turnover. Fires at most once.
-                if pending && seeded_check.is_some_and(|at| now >= at) {
-                    seeded_check = None;
-                    match seeded_verdict(&st, id) {
-                        Some(why) => {
-                            remove_job(&mut st, id);
-                            drop(st);
-                            return Err(HttpError::new(
-                                503,
-                                // `docker://` back on the front: `image_ref` is
-                                // post-resolution and the scheme is stripped by
-                                // then, so the bare name reads as an image.
-                                format!(
-                                    "seeded sentinel docker://{image_ref} \
-                                     (arg_tree {arg_tree}) cannot be answered: {why}"
-                                ),
-                            ));
-                        }
-                        // Not provable — no seeder for this sentinel is parked
-                        // at all. Still worth SAYING so, because the alternative
-                        // is an idle machine and no output until the timeout.
-                        None => eprintln!(
-                            "caos-server: docker://{image_ref} (arg_tree {arg_tree}) has waited \
-                             {:?} with no seeder registered for it; waiting up to {:?}",
-                            seeded_grace(),
-                            pending_timeout()
-                        ),
-                    }
-                    continue;
-                }
-                let Some(job) = st.jobs.get(&id) else {
-                    continue;
-                };
                 match job.phase {
-                    Phase::Pending { deadline, .. } if now >= deadline => {
-                        // ONLY for a seeded job. A `required["base"]` match is
-                        // evidence of a seeder only when the image is a
-                        // sentinel; on an ordinary job it is just a warm runner
-                        // holding the same image, and calling that "the seeder"
-                        // would be a new wrong answer in place of the old one.
-                        let detail = if !seeded {
-                            String::new()
-                        } else {
-                            match seeded_verdict(&st, id) {
-                                Some(why) => format!(", the docker://{image_ref} sentinel: {why}"),
-                                // A seeded sentinel never reaches a generic
-                                // runner, so "no runner" is a misleading way to
-                                // say "nobody published a record under this key".
-                                None => format!(
-                                    ": no seeder ever registered the \
-                                     docker://{image_ref} sentinel"
-                                ),
-                            }
-                        };
+                    Phase::Pending { deadline, .. } if Instant::now() >= deadline => {
                         let job = remove_job(&mut st, id);
                         drop(st);
                         return Err(HttpError::new(
                             503,
                             format!(
-                                "no runner for arg_tree {} (waited {:?}){detail}",
+                                "no runner for arg_tree {} (waited {:?})",
                                 job.arg_tree,
                                 pending_timeout()
                             ),
@@ -1298,51 +1091,6 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
-    }
-
-    /// The merge failure, in miniature: the seeder for `docker://seeded` (image
-    /// blob `sent`) answers `in=aaa`, and the caller formed `in=bbb`.
-    #[test]
-    fn a_parked_seeder_that_disagrees_is_a_verdict() {
-        let job = args(&[("base", "sent"), ("in", "bbb"), ("std", "s")]);
-        let seeder = args(&[("base", "sent"), ("in", "aaa")]);
-        let why = disagreeing_seeder(&job, [&seeder].into_iter()).expect("a verdict");
-        assert!(
-            why.contains("in: seeder answers aaa, the job asks bbb"),
-            "{why}"
-        );
-    }
-
-    /// No seeder for THIS sentinel is parked — another sentinel's seeder and a
-    /// generic runnerd poll are not evidence about this key, so keep waiting.
-    #[test]
-    fn only_the_same_sentinel_counts() {
-        let job = args(&[("base", "sent"), ("in", "bbb")]);
-        let other = args(&[("base", "other-sent"), ("in", "aaa")]);
-        let generic = args(&[]);
-        assert!(disagreeing_seeder(&job, [&other, &generic].into_iter()).is_none());
-        // …and with nothing parked at all.
-        assert!(disagreeing_seeder(&job, [].into_iter()).is_none());
-    }
-
-    /// `matches` is a SUBSET match, so a seeder pinning only what it cares
-    /// about (no `std`, no `salt` — build-builtins.sh omits them) matches, and
-    /// a matching poll is never a verdict.
-    #[test]
-    fn a_matching_seeder_is_not_a_verdict() {
-        let job = args(&[("base", "sent"), ("in", "aaa"), ("std", "s"), ("salt", "x")]);
-        let seeder = args(&[("base", "sent"), ("in", "aaa")]);
-        assert!(disagreeing_seeder(&job, [&seeder].into_iter()).is_none());
-    }
-
-    /// Two seeders disagree; the message names the one sharing more of the key.
-    #[test]
-    fn the_closest_disagreement_is_reported() {
-        let job = args(&[("base", "sent"), ("in", "bbb"), ("worker1", "w")]);
-        let far = args(&[("base", "sent"), ("in", "aaa"), ("worker1", "zzz")]);
-        let near = args(&[("base", "sent"), ("in", "aaa"), ("worker1", "w")]);
-        let why = disagreeing_seeder(&job, [&far, &near].into_iter()).expect("a verdict");
-        assert!(!why.contains("worker1"), "{why}");
     }
 
     /// A job that names a pool is invisible to the generic runner, which is the

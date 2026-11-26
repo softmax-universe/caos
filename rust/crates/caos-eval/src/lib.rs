@@ -860,12 +860,7 @@ fn eval_expr_base(
     }
     match ty {
         // `:docker=<ref>` — a registry image, carried as the blob
-        // `docker://<ref>`. This is how a core item breaks a resolution-time
-        // cycle: `flake-builder`'s `.caos-expr` names its own image as the
-        // sentinel `--base:docker=seeded`, so evaluating it never re-enters
-        // flake-builder's own entry (design/caos-expr.md, "Breaking the
-        // cycles"). The formed arg-tree carries the ref as a blob, exactly what
-        // the seeder registers.
+        // `docker://<ref>`. The formed arg-tree carries the ref as a blob.
         ArgType::Docker => Ok(format!("{DOCKER_SCHEME}{value}")),
         // `:nix=v1` — the nix primitive: nothing to resolve here, the server
         // runs it.
@@ -890,9 +885,9 @@ fn eval_expr_base(
             // Evaluate the subtree's own `.caos-expr` (if any) to the image it
             // builds — so a path to an EVALUABLE dependency (a `DEEP-DEPS/<name>`
             // mount) resolves to its image, not its raw source; a subtree with no
-            // `.caos-expr` evaluates to itself. For a seeded worker this
-            // dispatches its build — which is why forming a `run` expr's key
-            // needs that worker already seeded (design/caos-expr.md).
+            // `.caos-expr` evaluates to itself. For a worker built here this
+            // dispatches its build, so forming a `run` expr's key needs that
+            // worker built first (design/caos-expr.md).
             let (_kind, hash) = eval_path(host, &oid.to_string(), "")?;
             Ok(hash)
         }

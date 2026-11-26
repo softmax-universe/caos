@@ -740,19 +740,6 @@ fn run_dispatch_inner(
     let result = {
         let image_ref = resolve_image(config, image).map_err(fail)?;
         let arg_entries = args_entries(config, arg_tree).map_err(fail)?;
-        // Whether this job SAYS it is answered by a seeder, which it does by
-        // carrying `required-pool=seeded` — the same arg that keeps the generic
-        // pool away from it (`runner::matches`). It used to be sniffed from the
-        // image being a `docker://seeded…` sentinel, which named only three of
-        // the five seeded entries: `cargo`'s image is the flake-builder delta
-        // and `flake-builder`'s own is a plain sentinel, so a cargo job whose
-        // key had drifted looked like ordinary work. It was then handed to a
-        // generic runner, which really tried to `nix build` a flake that
-        // deliberately exposes no `caosImage` — a failure naming nix, three
-        // layers from the stale key that caused it.
-        let seeded = arg_entries
-            .get(caos_world::REQUIRED_POOL_ARG)
-            .is_some_and(|oid| *oid == crate::runner::pool_oid(caos_world::SEEDED_POOL));
         // Find the secrets this job's identity is entitled to (SPEC, "Secrets"):
         // those of every image evaluation granted that ours contains. They ride
         // out of band in the job payload — never in the ArgTree, so never in the
@@ -763,7 +750,6 @@ fn run_dispatch_inner(
             arg_tree,
             arg_entries,
             &image_ref,
-            seeded,
             granted,
             |sub_request| start_sub_run(config, sub_request, &child_stack, secrets),
             |note| match note {
@@ -2269,10 +2255,7 @@ fn pin_result_in(git_dir: &str, refname: &str, hash: &str) -> Result<(), HttpErr
 /// accepted because Docker resolves by the digest; a bare tag or digest-like
 /// image id is not a registry locator pinned by the manifest digest required by
 /// the spec.
-fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), String> {
-    if allow_seeded && (reference == "seeded" || reference.starts_with("seeded-")) {
-        return Ok(());
-    }
+fn validate_docker_reference(reference: &str) -> Result<(), String> {
     if reference.is_empty() || reference.starts_with('-') {
         return Err(format!("invalid docker image: {reference:?}"));
     }
@@ -2301,17 +2284,15 @@ fn validate_docker_reference(reference: &str, allow_seeded: bool) -> Result<(), 
 
 /// Resolve the `image` parameter to a reference the host docker daemon can run.
 ///
-/// `docker://<ref>` is a digest-pinned docker reference, used as-is. The only
-/// non-digest exceptions are the internal `seeded*` rendezvous sentinels, which
-/// are answered by seed runners and never pulled. Anything else is one of our
-/// git images (the default): convert it to a real image, push it to the registry,
+/// `docker://<ref>` is a digest-pinned docker reference, used as-is. Anything
+/// else is one of our git images (the default): convert it to a real image, push it to the registry,
 /// and return a digest reference into the registry.
 fn resolve_image(config: &Config, image: &str) -> Result<String, HttpError> {
     if image.starts_with(caos_eval::NIX_SCHEME) {
         return resolve_image(config, &nix_image(image)?);
     }
     if let Some(reference) = image.strip_prefix(DOCKER_SCHEME) {
-        validate_docker_reference(reference, true).map_err(|e| HttpError::new(400, e))?;
+        validate_docker_reference(reference).map_err(|e| HttpError::new(400, e))?;
         return Ok(reference.to_string());
     }
     if !image.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -2454,7 +2435,7 @@ fn convert_git_image(config: &Config, git_hash: &str) -> Result<String, String> 
             .map_err(|e| format!("base ref not UTF-8: {e}"))?;
         let base_ref = base_ref.trim();
         let base_ref = base_ref.strip_prefix(DOCKER_SCHEME).unwrap_or(base_ref);
-        validate_docker_reference(base_ref, false)?;
+        validate_docker_reference(base_ref)?;
         let (base_layers, base_diff_ids) = fetch_base(config, base_ref)?;
         diff_ids.extend(base_diff_ids);
         manifest_layers.extend(base_layers);

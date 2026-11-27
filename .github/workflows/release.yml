@@ -462,9 +462,6 @@ jobs:
             cat "$out/stdout"
             ! test -e "$out/failed"
           else
-            # A server from before `/version` existed. Remove this branch once
-            # prod has been redeployed with it: it is the behavior that cannot
-            # test a branch using newer expression verbs.
-            echo "::warning::the prod server cannot report its version ($(tr '\n' ' ' <"$err")); testing with the checkout's own std/caos-test"
-            caos-cli run-tool caos-test
+            echo "the prod server cannot report its version, so there is no std to pin (is it deployed from a build with /version?): $(tr '\n' ' ' <"$err")" >&2
+            exit 1
           fi

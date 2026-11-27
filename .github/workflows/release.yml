@@ -438,4 +438,31 @@ jobs:
           set -euo pipefail
           test -n "$CAOS_TICKET" || { echo "secret CAOS_TICKET is not set" >&2; exit 1; }
           git remote add caos "caos://$CAOS_TICKET"
-          caos-cli run-tool caos-test
+
+          # THE TEST TOOL COMES FROM THE PROD SERVER'S OWN VERSION, not from
+          # this branch. `run-tool caos-test` would resolve std/caos-test from
+          # the checkout and have the server's evaluator read it, so a branch
+          # whose `.caos-expr` uses a verb prod does not know yet fails to
+          # parse before any test runs. The tree under test is still this
+          # checkout (`--root:@=.`); only the tool that builds and tests it is
+          # pinned to the std the server was started from.
+          if rev="$(caos-cli get-version 2>get-version.err)"; then
+            [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "the prod server reports version '$rev', which is not a commit; it was started from a build with no clean revision (caosd up from a dirty tree?), so there is no std to pin" >&2
+              exit 1
+            }
+            tool="git+https://github.com/$GITHUB_REPOSITORY?rev=$rev&dir=std/caos-test"
+            echo "running caos-test from the prod server's version: $tool"
+            out="$(mktemp -d)/result"
+            caos-cli run "$out" --base:@@="$tool" --root:@=.
+            # What `run-tool` does with a tool's answer: print the report, and
+            # fail on the tool's `failed` marker.
+            cat "$out/stdout"
+            ! test -e "$out/failed"
+          else
+            # A server from before `/version` existed. Remove this branch once
+            # prod has been redeployed with it: it is the behavior that cannot
+            # test a branch using newer expression verbs.
+            echo "::warning::the prod server cannot report its version ($(tr '\n' ' ' <get-version.err)); testing with the checkout's own std/caos-test"
+            caos-cli run-tool caos-test
+          fi

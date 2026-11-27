@@ -213,5 +213,14 @@ func main() {
 		w.True(code == 404, "unknown ticket: expected 404, got %d: %s", code, body)
 		code, body = call("GET", "/result/not-a-ticket", "")
 		w.True(code == 400, "malformed ticket: expected 400, got %d: %s", code, body)
+
+		w.Step("GET /version names the revision the server was started from")
+		// A test stack is started without one, so `unknown` is the expected answer
+		// here; a deploy answers its commit. Either way it is one word, never
+		// empty, which is what a CI job pinning std from it relies on.
+		code, body = call("GET", "/version", "")
+		w.True(code == 200, "version: HTTP %d: %s", code, body)
+		w.True(body != "" && len(strings.Fields(body)) == 1, "version should be one word, got %q", body)
+		fmt.Fprintf(os.Stderr, "  ok: %s\n", body)
 	})
 }

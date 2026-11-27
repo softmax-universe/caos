@@ -409,6 +409,48 @@ unchanged (`"<type> <hash>"`), so existing clients are unaffected.
 - **Errors** carry neither header. Promise sub-runs and `/eval/*` / `/wait`
   tickets report nothing; only a top-level `GET /run` does.
 
+### Native Unforged identity
+
+An `unforged@sha256:…` base (also accepted with a `docker://` prefix) is
+**only a rendezvous sentinel**, never the hash of an executable. A native runner
+advertises `worker_image: "native@sha256:<64 lowercase hex digits>"` on
+`POST /runner/poll` and repeats that exact value on `/runner/result`. Unforged
+computes it by hashing its running executable. Like other runner claims, this is
+trusted runner-supplied provenance, not remote attestation; configure
+`CAOS_RUNNER_TOKEN` outside a trusted single-tenant stack.
+
+Before **any result-cache lookup or single-flight join**, CAOS selects a matching
+known native identity and forms a new ArgTree with the digest in the reserved
+`required-native-worker-image` blob. Caller-supplied values of this reserved arg
+are replaced by discovery. This bound tree is the cache key and dispatch `req`;
+the original base remains available in its `base` entry. The selected digest is
+also the job's `image_ref`. Poll matching adds this capability from `worker_image`
+server-side; a generic runner or a different binary cannot claim it. Native
+affinity ownership is digest-scoped. A result missing or disagreeing with the
+bound digest fails the flight and is not cached (HTTP 409 to the producer).
+
+Advertisements are retained per required-argument set and digest. Selection is
+most-specific required set first, then most recently advertised. Multiple
+binaries may coexist; the latest matching advertisement wins, so deployments
+wanting one stable identity should keep only that binary polling. Each poll
+renews its identity for `max(ttl_ms, 30000)` milliseconds, and a matching in-flight
+job keeps its capability scope live while busy. Its result renews that scope for
+at least 30 seconds. An unknown poll does not erase another worker's identity.
+Expired advertisements are not eligible. With **no known matching identity**,
+`/run` and `/resolve-image?image=<sentinel>` return 503, even if an old sentinel
+cache entry exists: there is no sentinel fallback. Resolve-image checks base-only
+requirements; `/run` uses the complete request for capability selection.
+
+Cold and warm `X-Caos-Image` headers always report the **bound native executable
+digest**, not the sentinel or a later advertisement. A binary change makes a
+different bound tree and cannot reuse the former binary's result. Identical
+concurrent calls binding the same digest share the existing server single-flight:
+one executed `miss`, the others `hit`. Flights and caches are separate for
+different digests. Promise handlers bind their own identity; the parent's native
+identity is not inherited by a Docker/Git handler. Docker/Git receipts are
+unchanged. Native identity discovery is in-process; after a server restart workers
+must advertise again before native requests can be served.
+
 ### Git images
 
 A non-`docker://` image is the git hash of an image in **git-docker form** — a

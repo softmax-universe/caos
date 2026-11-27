@@ -36,6 +36,76 @@ use crate::HttpError;
 /// A runner's required args / a job's ArgTree top level: name → git oid.
 type ArgTree = BTreeMap<String, String>;
 
+/// Server-bound native executable identity, distinct from the base rendezvous.
+pub(crate) const NATIVE_IDENTITY_ARG: &str = "required-native-worker-image";
+
+pub(crate) fn is_native_base(image: &str) -> bool {
+    image
+        .strip_prefix("docker://")
+        .unwrap_or(image)
+        .starts_with("unforged@sha256:")
+}
+
+pub(crate) fn valid_native_image(image: &str) -> bool {
+    image
+        .strip_prefix("native@sha256:")
+        .is_some_and(|digest| valid_hex(digest, 64))
+}
+
+struct NativeIdentity {
+    required: ArgTree,
+    image: String,
+    until: Instant,
+    sequence: u64,
+}
+
+fn native_scope_matches(required: &ArgTree, entries: &ArgTree) -> bool {
+    let mut unbound = entries.clone();
+    unbound.remove(NATIVE_IDENTITY_ARG);
+    matches(required, &unbound)
+}
+
+/// Resolve before cache access. Advertisements are leases, not permanent names.
+/// Busy workers remain discoverable so overlapping calls can join their flight.
+pub(crate) fn native_identity(entries: &ArgTree) -> Result<String, HttpError> {
+    let st = lock();
+    discover_native(&st, entries)
+}
+
+fn discover_native(st: &State, entries: &ArgTree) -> Result<String, HttpError> {
+    let now = Instant::now();
+    st.native_identities
+        .iter()
+        .filter(|identity| {
+            identity.until > now
+                || st.jobs.values().any(|job| {
+                    matches!(job.phase, Phase::Inflight)
+                        && job.image_ref == identity.image
+                        && native_scope_matches(&identity.required, &job.arg_entries)
+                })
+        })
+        .filter(|identity| native_scope_matches(&identity.required, entries))
+        .max_by_key(|identity| (identity.required.len(), identity.sequence))
+        .map(|identity| identity.image.clone())
+        .ok_or_else(|| {
+            HttpError::new(
+                503,
+                "no native worker with a known executable digest; refusing sentinel fallback",
+            )
+        })
+}
+
+fn poll_identity(value: &serde_json::Value) -> Result<Option<String>, HttpError> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(image) if valid_native_image(image) => Ok(Some(image.clone())),
+        _ => Err(HttpError::new(
+            400,
+            "worker_image must be native@sha256:<64 lowercase hex digits>",
+        )),
+    }
+}
+
 /// How long a job may sit unclaimed before the dispatch fails 503. New capacity
 /// may register meanwhile (a kicked runner's parent, a fresh runnerd slot).
 /// Default 60s; a deployment whose pool is deliberately small relative to its
@@ -252,6 +322,7 @@ struct Owner {
 /// The rendezvous state: parked polls and dispatched jobs, one lock.
 #[derive(Default)]
 struct State {
+    native_identities: Vec<NativeIdentity>,
     parked: Vec<ParkedPoll>,
     /// Jobs by dispatch id (stable across requeues, unlike the nonce).
     jobs: HashMap<u64, Job>,
@@ -272,7 +343,10 @@ struct State {
 fn job_key(arg_entries: &ArgTree) -> Option<String> {
     let affinity = arg_entries.get(caos_world::AFFINITY_ARG)?;
     let base = arg_entries.get("base").map(String::as_str).unwrap_or("");
-    Some(format!("{base}/{affinity}"))
+    Some(match arg_entries.get(NATIVE_IDENTITY_ARG) {
+        Some(identity) => format!("{base}/{affinity}/{identity}"),
+        None => format!("{base}/{affinity}"),
+    })
 }
 
 fn state() -> &'static Mutex<State> {
@@ -1061,8 +1135,16 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
     check_auth(authorization)?;
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| HttpError::new(400, format!("invalid poll json: {e}")))?;
-    let required = arg_tree(&v["required"])?;
-    let lineage = match &v["lineage"] {
+    let mut required = arg_tree(&v["required"])?;
+    // Only the authenticated worker advertisement can supply this capability.
+    if required.contains_key(NATIVE_IDENTITY_ARG) {
+        return Err(HttpError::new(
+            400,
+            "native identity is supplied via worker_image, not required",
+        ));
+    }
+    let worker_image = poll_identity(&v["worker_image"])?;
+    let mut lineage = match &v["lineage"] {
         serde_json::Value::Null => Vec::new(),
         serde_json::Value::Array(sets) => {
             sets.iter().map(arg_tree).collect::<Result<Vec<_>, _>>()?
@@ -1079,6 +1161,37 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
     let (reply_tx, reply_rx) = mpsc::channel();
     let poll_id = {
         let mut st = lock();
+        let now = Instant::now();
+        let busy: Vec<_> = st
+            .jobs
+            .values()
+            .filter(|job| matches!(job.phase, Phase::Inflight))
+            .map(|job| (job.image_ref.clone(), job.arg_entries.clone()))
+            .collect();
+        st.native_identities.retain(|identity| {
+            !(identity.required == required && worker_image.as_ref() == Some(&identity.image))
+                && (identity.until > now
+                    || busy.iter().any(|(image, entries)| {
+                        *image == identity.image
+                            && native_scope_matches(&identity.required, entries)
+                    }))
+        });
+        if let Some(image) = worker_image {
+            let sequence = st.next_id;
+            st.next_id += 1;
+            st.native_identities.push(NativeIdentity {
+                required: required.clone(),
+                image: image.clone(),
+                until: now + ttl.max(Duration::from_secs(30)),
+                sequence,
+            });
+            required.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(&image));
+            // Native ancestors execute the same binary; do not grant this to
+            // generic polls, but preserve native lineage's eviction cascade.
+            for ancestor in &mut lineage {
+                ancestor.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(&image));
+            }
+        }
         if let Some(tenure) = &tenure {
             // An owner polls for ITS queue and nothing else: never the pending
             // table, which holds only jobs nobody owns.
@@ -1158,6 +1271,16 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
 /// error rather than a wait: its owner lapsed or was evicted, the key may
 /// already belong to someone else, and the runner must stop.
 fn owner_poll(st: &mut State, tenure: &str, poll: ParkedPoll) -> Result<bool, HttpError> {
+    if let Some(owner) = st.owners.get(tenure) {
+        if let Some(identity) = owner.key.split('/').nth(2) {
+            if poll.required.get(NATIVE_IDENTITY_ARG).map(String::as_str) != Some(identity) {
+                return Err(HttpError::new(
+                    409,
+                    "native tenure belongs to a different executable digest",
+                ));
+            }
+        }
+    }
     let Some(owner) = st.owners.get_mut(tenure) else {
         return Err(HttpError::new(410, "unknown or lapsed tenure"));
     };
@@ -1239,6 +1362,23 @@ pub(crate) fn result(authorization: Option<&str>, body: &str) -> Result<Vec<u8>,
         return Err(HttpError::new(410, "nonce does not belong to this req"));
     }
 
+    if valid_native_image(&st.jobs[&id].image_ref)
+        && v["worker_image"].as_str() != Some(st.jobs[&id].image_ref.as_str())
+    {
+        // End the flight rather than letting a bad producer hang its waiters.
+        let job = remove_job(&mut st, id);
+        if let Some(tenure) = &job.tenure {
+            release_owner(&mut st, tenure);
+        }
+        let _ = job.events.send(DispatchEvent::Outcome(Outcome::Failed(
+            "native result worker_image does not match bound executable digest".to_string(),
+        )));
+        return Err(HttpError::new(
+            409,
+            "native result worker_image does not match bound executable digest",
+        ));
+    }
+
     if v["requeue"].as_bool() == Some(true) {
         let defer = Duration::from_millis(
             v["defer_generic_ms"]
@@ -1253,6 +1393,15 @@ pub(crate) fn result(authorization: Option<&str>, body: &str) -> Result<Vec<u8>,
         return Ok(b"{}".to_vec());
     }
 
+    let image = st.jobs[&id].image_ref.clone();
+    let entries = st.jobs[&id].arg_entries.clone();
+    if valid_native_image(&image) {
+        for identity in &mut st.native_identities {
+            if identity.image == image && native_scope_matches(&identity.required, &entries) {
+                identity.until = identity.until.max(Instant::now() + Duration::from_secs(30));
+            }
+        }
+    }
     let job = remove_job(&mut st, id);
     // Whether its runner stays the owner is the runner's word, not a guess: a
     // resident worker's `caos next` posts with `keep` and then polls for its
@@ -1298,6 +1447,61 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn native_expired_capability_is_not_revived_by_an_unrelated_busy_worker() {
+        let mut st = State::default();
+        let image = format!("native@sha256:{}", "a".repeat(64));
+        let required = args(&[("base", "native"), ("required-zone", "one")]);
+        st.native_identities.push(NativeIdentity {
+            required: required.clone(),
+            image: image.clone(),
+            until: Instant::now() - Duration::from_secs(1),
+            sequence: 0,
+        });
+        let entries = args(&[
+            ("base", "native"),
+            ("required-zone", "two"),
+            (NATIVE_IDENTITY_ARG, &pool_oid(&image)),
+        ]);
+        let (id, _events) = submit(&mut st, entries, "unrelated");
+        st.jobs.get_mut(&id).unwrap().image_ref = image;
+        st.jobs.get_mut(&id).unwrap().phase = Phase::Inflight;
+        assert!(discover_native(&st, &required).is_err());
+        st.jobs
+            .get_mut(&id)
+            .unwrap()
+            .arg_entries
+            .insert("required-zone".into(), "one".into());
+        assert!(
+            discover_native(&st, &required).is_ok(),
+            "matching busy scope keeps identity live"
+        );
+        st.jobs.remove(&id);
+        assert!(discover_native(&st, &required).is_err());
+    }
+
+    #[test]
+    fn native_digest_capability_fences_generic_other_binary_and_affinity() {
+        let image = format!("native@sha256:{}", "b".repeat(64));
+        let other = format!("native@sha256:{}", "c".repeat(64));
+        let job = args(&[
+            ("base", "native"),
+            ("affinity", "instance"),
+            (NATIVE_IDENTITY_ARG, &pool_oid(&image)),
+        ]);
+        assert!(!matches(&ArgTree::new(), &job));
+        assert!(!matches(
+            &args(&[(NATIVE_IDENTITY_ARG, &pool_oid(&other))]),
+            &job
+        ));
+        let mut runner = args(&[("base", "native"), (NATIVE_IDENTITY_ARG, &pool_oid(&image))]);
+        assert!(matches(&runner, &job));
+        let first = job_key(&job);
+        runner.insert("affinity".into(), "instance".into());
+        runner.insert(NATIVE_IDENTITY_ARG.into(), pool_oid(&other));
+        assert_ne!(first, job_key(&runner));
     }
 
     /// The merge failure, in miniature: the seeder for `docker://seeded` (image

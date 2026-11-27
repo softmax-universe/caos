@@ -267,6 +267,18 @@ pub fn cli_status(t: &dyn Transport, arg_tree: &str, all: bool) -> Result<(), St
     Ok(())
 }
 
+/// `get-version` — print the caos revision the server was started from.
+///
+/// A fact the server reports (`GET /version`), for a caller that needs to name
+/// the std that matches the deploy: a CI job builds a pinned `:@@=` locator from
+/// it. It resolves nothing itself. Prints `unknown` when the server was not told
+/// its revision, and fails against a server too old to have the route.
+pub fn cli_get_version(t: &dyn Transport) -> Result<(), String> {
+    let body = server_get(&t.server_url()?, "/version")?;
+    println!("{}", String::from_utf8_lossy(&body).trim());
+    Ok(())
+}
+
 /// `watch <ticket>` — follow a run until it has no current work.
 ///
 /// The live display `run` and `run-tool` draw while they wait, for a run you are

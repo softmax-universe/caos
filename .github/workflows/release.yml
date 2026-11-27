@@ -446,7 +446,9 @@ jobs:
           # parse before any test runs. The tree under test is still this
           # checkout (`--root:@=.`); only the tool that builds and tests it is
           # pinned to the std the server was started from.
-          if rev="$(caos-cli get-version 2>get-version.err)"; then
+          # Scratch outside the checkout: `--root:@=.` ships everything in it.
+          err="$(mktemp)"
+          if rev="$(caos-cli get-version 2>"$err")"; then
             [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || {
               echo "the prod server reports version '$rev', which is not a commit; it was started from a build with no clean revision (caosd up from a dirty tree?), so there is no std to pin" >&2
               exit 1

@@ -901,6 +901,14 @@ fn git_token(request: &Request) -> Result<Option<String>, HttpError> {
     Ok(tokens.into_iter().next())
 }
 
+/// The revision this server was started from (`CAOS_REV`), or `unknown`.
+fn server_rev() -> String {
+    match std::env::var("CAOS_REV") {
+        Ok(rev) if !rev.trim().is_empty() => rev.trim().to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
 /// Match the request to a handler and produce the response body. Serves the
 /// storage endpoints (`/object*`), compute (`/run`, `/sub-run`), and the runner
 /// protocol (`/runner/poll`, `/runner/result`).

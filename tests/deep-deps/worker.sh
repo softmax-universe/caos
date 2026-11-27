@@ -7,7 +7,8 @@
 # relative to the DEPS file's OWN directory (so `../..` reaches parents), and
 # the name is the mount. There is no special `packages` root — it is a
 # whole-tree transform. We check the deepened shape, DAG sharing, incremental
-# recompute, FILE deps, cycle detection, and its use THROUGH evaluation.
+# recompute, FILE deps, cycle detection, its use THROUGH evaluation, and that a
+# MOUNT (listed in `.caos-mounts`) is carried across untouched.
 #
 # THE FIXTURE IS BUILT AND PUBLISHED, not committed: a worker has no git, and
 # `caos put` is how it makes a tree nameable. Each stage builds exactly the
@@ -44,6 +45,16 @@ fixture() { # <variant> -> a /cas path
       echo "root manifest" > "$r/Manifest.toml"
       printf '../lib/foo foo\n../lib/bar bar\n../Manifest.toml Manifest.toml\n' > "$r/app/DEPS" ;;
     cycle)   printf '../../app loop\n' > "$r/lib/bar/DEPS" ;;
+    mounted)
+      # `vendor/core` is a MOUNT: a finished tree, listed in `.caos-mounts`.
+      # Its own DEPS names a path that does not exist HERE (as a mounted std's
+      # `../../rust/crates/...` does in a consumer), so walking it would fail.
+      # `app` depends on something INSIDE it, which must arrive as-is.
+      mkdir -p "$r/vendor/core/tool"
+      echo "built tool" > "$r/vendor/core/tool/bin"
+      printf '../../../nowhere x\n' > "$r/vendor/core/tool/DEPS"
+      printf 'vendor/core\n' > "$r/.caos-mounts"
+      printf '../lib/foo foo\n../vendor/core/tool tool\n' > "$r/app/DEPS" ;;
     evtree)
       # A `.caos-expr` at the tree root deepens the whole tree; evaluating a
       # path then descends into the deepened result. The worker is named by a
@@ -160,6 +171,23 @@ evaluated)
   [ -e "$F/foo.txt" ] || fail "deepened foo missing foo.txt"
   [ -e "$F/DEEP-DEPS/shared/bar.txt" ] || fail "deepened foo missing its shared dep"
   echo "  ok: evaluation deepened the tree and dug into a package's node" >&2
+
+  echo "== a mount listed in .caos-mounts is carried across, never walked ==" >&2
+  deepen mounted mounts
+  ;;
+
+mounts)
+  M=/cas/args/result; caos get -r "$M" || fail "reading the deepened tree"
+  IN=$(fixture mounted); caos get -r "$IN"
+  [ "$(caos hash "$M/vendor/core")" = "$(caos hash "$IN/vendor/core")" ] \
+    || fail "the mount was rewritten"
+  [ -e "$M/vendor/core/tool/DEPS" ] || fail "the mount's own DEPS was consumed"
+  [ "$(caos hash "$M/app/DEEP-DEPS/tool")" = "$(caos hash "$IN/vendor/core/tool")" ] \
+    || fail "a dep inside the mount was not mounted as-is"
+  [ -e "$M/app/DEEP-DEPS/foo/DEEP-DEPS/shared/bar.txt" ] \
+    || fail "the rest of the tree stopped deepening"
+  [ "$(cat "$M/.caos-mounts")" = "vendor/core" ] || fail ".caos-mounts was lost"
+  echo "  ok: mount untouched, a dep inside it mounted by oid, the rest deepened" >&2
 
   printf 'deep-deps: ALL PASS\n' > /tmp/report
   cat /tmp/report >&2

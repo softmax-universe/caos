@@ -174,6 +174,31 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.dir).unwrap();
     }
 }
+#[test]
+fn native_identity_rejected_tenure_poll_does_not_change_binding() {
+    let fixture = Fixture::new();
+    let good = digest('a');
+    let worker = fixture.worker(Some(good.clone()), None);
+    fixture.ready(&good);
+    fixture.call().unwrap();
+    worker.join().unwrap();
+    let error = crate::runner::poll(
+        None,
+        &serde_json::json!({
+            "required": fixture.required, "worker_image": digest('f'),
+            "tenure": "already-lapsed-tenure", "ttl_ms": 10
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(error.status(), 410);
+    let (_, selected) = bind_native_request(&fixture.config, &fixture.request, SENTINEL)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected, good);
+    assert_receipt(&fixture.call().unwrap(), "hit", &good);
+}
+
 fn assert_receipt(answer: &RunResponse, cache: &str, image: &str) {
     let wire = crate::run_http_response(RunResponse {
         body: answer.body.clone(),

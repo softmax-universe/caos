@@ -1161,35 +1161,43 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
     let (reply_tx, reply_rx) = mpsc::channel();
     let poll_id = {
         let mut st = lock();
-        let now = Instant::now();
-        let busy: Vec<_> = st
-            .jobs
-            .values()
-            .filter(|job| matches!(job.phase, Phase::Inflight))
-            .map(|job| (job.image_ref.clone(), job.arg_entries.clone()))
-            .collect();
-        st.native_identities.retain(|identity| {
-            !(identity.required == required && worker_image.as_ref() == Some(&identity.image))
-                && (identity.until > now
-                    || busy.iter().any(|(image, entries)| {
-                        *image == identity.image
-                            && native_scope_matches(&identity.required, entries)
-                    }))
-        });
-        if let Some(image) = worker_image {
-            let sequence = st.next_id;
-            st.next_id += 1;
-            st.native_identities.push(NativeIdentity {
-                required: required.clone(),
-                image: image.clone(),
-                until: now + ttl.max(Duration::from_secs(30)),
-                sequence,
+        // Keep the unbound scope for discovery, but publish it only after
+        // admission succeeds, under this same lock. Rejected owner polls must
+        // neither replace nor renew a selectable executable identity.
+        let scope = required.clone();
+        let publish = |st: &mut State| {
+            let now = Instant::now();
+            let busy: Vec<_> = st
+                .jobs
+                .values()
+                .filter(|job| matches!(job.phase, Phase::Inflight))
+                .map(|job| (job.image_ref.clone(), job.arg_entries.clone()))
+                .collect();
+            st.native_identities.retain(|identity| {
+                !(identity.required == scope && worker_image.as_ref() == Some(&identity.image))
+                    && (identity.until > now
+                        || busy.iter().any(|(image, entries)| {
+                            *image == identity.image
+                                && native_scope_matches(&identity.required, entries)
+                        }))
             });
-            required.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(&image));
+            if let Some(image) = &worker_image {
+                let sequence = st.next_id;
+                st.next_id += 1;
+                st.native_identities.push(NativeIdentity {
+                    required: scope.clone(),
+                    image: image.clone(),
+                    until: now + ttl.max(Duration::from_secs(30)),
+                    sequence,
+                });
+            }
+        };
+        if let Some(image) = &worker_image {
+            required.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(image));
             // Native ancestors execute the same binary; do not grant this to
             // generic polls, but preserve native lineage's eviction cascade.
             for ancestor in &mut lineage {
-                ancestor.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(&image));
+                ancestor.insert(NATIVE_IDENTITY_ARG.to_string(), pool_oid(image));
             }
         }
         if let Some(tenure) = &tenure {
@@ -1205,7 +1213,9 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
                 reply: reply_tx,
                 tenure: Some(tenure.clone()),
             };
-            if !owner_poll(&mut st, tenure, poll)? {
+            let parked = owner_poll(&mut st, tenure, poll)?;
+            publish(&mut st);
+            if !parked {
                 // Answered from the queue at once.
                 return match reply_rx.recv() {
                     Ok(PollReply::Job(payload)) => reply_job(&payload),
@@ -1214,6 +1224,7 @@ pub(crate) fn poll(authorization: Option<&str>, body: &str) -> Result<Vec<u8>, H
             }
             id
         } else {
+            publish(&mut st);
             // A pending job may already be waiting for exactly this runner.
             if let Some(id) = best_pending(&st, &required) {
                 claim(&mut st, id, &reply_tx);
@@ -1447,6 +1458,73 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn native_identity_owner_admission_precedes_publication_and_renewal() {
+        let required = args(&[("base", &"9".repeat(40))]);
+        let good = format!("native@sha256:{}", "1".repeat(64));
+        let wrong = format!("native@sha256:{}", "2".repeat(64));
+        let tenure = "native-admission-test";
+        let call = |image: &str| {
+            poll(
+                None,
+                &serde_json::json!({
+                    "required": required, "worker_image": image,
+                    "tenure": tenure, "ttl_ms": 10
+                })
+                .to_string(),
+            )
+        };
+        // No owner: a rejected advertisement cannot create discovery state.
+        assert_eq!(call(&good).unwrap_err().status(), 410);
+        assert!(native_identity(&required).is_err());
+        {
+            let mut st = lock();
+            st.owners.insert(
+                tenure.into(),
+                Owner {
+                    key: format!("base/affinity/{}", pool_oid(&good)),
+                    lease_until: Instant::now() + Duration::from_secs(60),
+                    queue: VecDeque::new(),
+                    current: None,
+                    parked: None,
+                },
+            );
+        }
+        // Live tenure with the wrong digest must not publish either.
+        assert_eq!(call(&wrong).unwrap_err().status(), 409);
+        assert!(native_identity(&required).is_err());
+        call(&good).unwrap();
+        assert_eq!(native_identity(&required).unwrap(), good);
+        let snapshot = || {
+            let st = lock();
+            let identity = st
+                .native_identities
+                .iter()
+                .find(|i| i.required == required)
+                .unwrap();
+            (identity.sequence, identity.until)
+        };
+        let before = snapshot();
+        assert_eq!(call(&wrong).unwrap_err().status(), 409);
+        assert_eq!(snapshot(), before);
+        // Even a matching digest cannot renew while its owner is busy.
+        lock().owners.get_mut(tenure).unwrap().current = Some(u64::MAX);
+        assert_eq!(call(&good).unwrap_err().status(), 409);
+        assert_eq!(snapshot(), before);
+        lock().owners.get_mut(tenure).unwrap().current = None;
+        call(&good).unwrap();
+        let renewed = snapshot();
+        assert!(renewed.0 > before.0 && renewed.1 > before.1);
+        {
+            let mut st = lock();
+            release_owner(&mut st, tenure);
+        }
+        assert_eq!(call(&good).unwrap_err().status(), 410);
+        assert_eq!(snapshot(), renewed);
+        assert_eq!(native_identity(&required).unwrap(), good);
+        lock().native_identities.retain(|i| i.required != required);
     }
 
     #[test]

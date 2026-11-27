@@ -1503,6 +1503,7 @@ sandbox = false''
                 --mount "type=bind,source=$engine_socket,target=$engine_socket" \
                 -e "DOCKER_HOST=unix://$engine_socket" \
                 -e CAOS_STACK_TREE=/state/tree \
+                -e "CAOS_REV=$CAOS_REV" \
                 -e CAOS_STACK_INPUTS_ATTR=caos-stack-inputs \
                 -e CAOS_STACK_STORE=/mounted-nix \
                 -e CAOS_STACK_STATE=/state \

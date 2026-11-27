@@ -175,6 +175,13 @@ fn run(args: &[String]) -> Result<(), String> {
             [flag, arg_tree] if flag == "--all" => caos::cli_status(&transport()?, arg_tree, true),
             _ => Err(usage(args)),
         },
+        // `get-version` — the caos revision the server was started from, as
+        // text. For a CI job to build a pinned `:@@=` locator for the std
+        // that matches the deploy; it is not a `run-tool` feature.
+        Some("get-version") => match &args[2..] {
+            [] => caos::cli_get_version(&transport()?),
+            _ => Err(usage(args)),
+        },
         // `watch <ticket>` — the live view `run`/`run-tool` draw while they
         // wait, for a run you are not attached to. The ticket is the one they
         // print, and the one an agent's `start` returns. (An ArgTree hash
@@ -230,6 +237,7 @@ fn usage(args: &[String]) -> String {
          {prog} eval-path [--tree=<oid>] <path>\n  \
          {prog} get <hash> <path>\n  \
          {prog} status [--all] <arg tree hash>\n  \
+         {prog} get-version\n  \
          {prog} watch <ticket>\n  \
          {prog} secrets-init --dir=<d>\n  \
          {prog} secrets-push --dir=<d> [--server=<url>]"

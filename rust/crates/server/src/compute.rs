@@ -3296,7 +3296,7 @@ pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
 
 /// Percent-decode a URL component. `%XX` becomes its byte; `+` is left as-is
 /// (we never encode spaces as `+`). Invalid escapes are passed through verbatim.
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

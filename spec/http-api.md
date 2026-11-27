@@ -231,6 +231,7 @@ Documented elsewhere; listed here so the surface is in one place.
 | `GET /eval?root:hash=<oid>&path=<p>` or `root:@@=<locator>` | evaluate a path under `.caos-expr` | SPEC "Evaluating a path" |
 | `GET /status/<ticket or arg tree hash>[?all=1]` | trace of a run | SPEC "Tracing" |
 | `GET\|HEAD /object/<hash>`, `POST /object` | content-addressed storage | `design/commits.md` |
+| `GET /ref?name=<ref>`, `POST /ref`, `GET\|POST /ref/wait` | read, compare-and-swap, or wait for changes on mutable refs under `refs/heads/` | `design/refs.md` |
 | `POST /git/import`, `POST /git/push` | import / publish Git history (`push` takes `allow_ignored`; an ignored-files rejection is a `422` listing the paths) | `design/git-import.md`, `design/agent-publish.md` |
 | `/info/refs`, `/git-upload-pack`, `/git-receive-pack` | Git smart-HTTP | `rust/crates/server/src/git.rs` |
 | `POST /runner/poll`, `/runner/result`, `/runner/lease`, `POST /sub-run`, `POST /trace/child` | worker protocol | `design/runner-protocol.md` |

@@ -840,6 +840,22 @@ and completion markers do not root them.
 See [Git import endpoint](design/git-import.md) for the request flow and
 limits of commit-based fetch negotiation.
 
+## The server's revision: GET /version
+
+`GET /version` answers the caos revision the server was started from, as plain
+text: the commit `caosd up` was built at, handed to the server as `CAOS_REV`, or
+`unknown` when its starter did not say (a dev or test stack; a build with no
+clean revision reports its dirty rev, which is not a commit). It is a fact
+about the deploy and resolves nothing: `caos-cli get-version` prints it.
+
+Its one caller is CI, which needs "the std that matches the prod stack": it
+builds an ordinary pinned `:@@=` locator from the answer
+(`git+https://github.com/<repo>?rev=<version>&dir=std/caos-test`) and runs that.
+The pin is a normal immutable locator, so every cache key downstream is
+unchanged. There is deliberately no argument type that means "the server's
+std": its meaning would change with the server, which a committed expression
+must not.
+
 ## Evaluating a path: GET /eval
 
 GET /eval walks `.caos-expr` from a root down to a path and returns what falls

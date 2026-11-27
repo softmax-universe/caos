@@ -43,6 +43,10 @@ use crate::{Config, HttpError};
 /// digest, so the name is arbitrary and fixed.
 const REGISTRY_REPO: &str = "caos";
 
+#[cfg(test)]
+#[path = "native_identity_tests.rs"]
+mod native_identity_tests;
+
 /// Prefix marking the `image` parameter as an ordinary docker reference rather
 /// than one of our git images (the default).
 const DOCKER_SCHEME: &str = "docker://";
@@ -113,7 +117,15 @@ struct WorkRequest<'a> {
 pub(crate) fn resolve_image_endpoint(config: &Config, query: &str) -> Result<Vec<u8>, HttpError> {
     let image = query_param(query, "image")
         .ok_or_else(|| HttpError::new(400, "resolve-image needs ?image=<hash|docker://ref>"))?;
-    let reference = resolve_image(config, &image)?;
+    let reference = if crate::runner::is_native_base(&image) {
+        let entries = std::collections::BTreeMap::from([(
+            "base".to_string(),
+            crate::runner::pool_oid(&image),
+        )]);
+        crate::runner::native_identity(&entries)?
+    } else {
+        resolve_image(config, &image)?
+    };
     Ok(reference.into_bytes())
 }
 
@@ -544,7 +556,7 @@ pub(crate) fn run(
 fn run_with(
     config: &Config,
     query: &str,
-    execute: impl FnOnce(&str) -> Result<(String, Origin), HttpError>,
+    execute: impl FnOnce(&str) -> Result<(String, Origin, Option<String>), HttpError>,
 ) -> Result<RunResponse, HttpError> {
     let arg_tree = parse_arg_tree(query)?;
     // An HTTP run is by definition top-level: the run stack (cycle detection)
@@ -553,22 +565,24 @@ fn run_with(
     // Top-level publication is part of `run_work_request`: a flight owner pins
     // before releasing its ownership, and waiters receive that combined
     // compute-and-publication outcome.
-    let (result, origin) = result?;
+    let (result, origin, native_image) = result?;
     // Reporting must never convert or push an image, even if its independently
     // evictable image memo disappeared while the result memo survived.
-    let image = read_arg_tree(config, &arg_tree)
-        .ok()
-        .and_then(|(image, _)| {
-            receipt_image(&image, |key| {
-                if std::env::var("CAOS_IMAGE_RESOLVE").as_deref() == Ok("none") {
-                    return None;
-                }
-                cache_get(&config.redis_addr, key)
-                    .ok()
-                    .flatten()
-                    .map(|digest| image_ref(config, &digest))
+    let image = native_image.or_else(|| {
+        read_arg_tree(config, &arg_tree)
+            .ok()
+            .and_then(|(image, _)| {
+                receipt_image(&image, |key| {
+                    if std::env::var("CAOS_IMAGE_RESOLVE").as_deref() == Ok("none") {
+                        return None;
+                    }
+                    cache_get(&config.redis_addr, key)
+                        .ok()
+                        .flatten()
+                        .map(|digest| image_ref(config, &digest))
+                })
             })
-        });
+    });
     Ok(RunResponse::new(result, origin, image))
 }
 
@@ -656,12 +670,61 @@ fn result_key(config: &Config, arg_tree: &str) -> String {
 }
 
 fn run_work_request(config: &Config, request: &WorkRequest) -> Result<String, HttpError> {
-    run_work_request_receipt(config, request).map(|(result, _)| result)
+    run_work_request_receipt(config, request).map(|(result, _, _)| result)
+}
+
+/// Bind executable content before any cache/flight lookup. Never trust a caller
+/// supplied identity arg: discovery selects from live worker advertisements.
+fn bind_native_request(
+    config: &Config,
+    arg_tree: &str,
+    image: &str,
+) -> Result<Option<(String, String)>, HttpError> {
+    if !crate::runner::is_native_base(image) {
+        return Ok(None);
+    }
+    let mut entries = args_entries(config, arg_tree)?;
+    entries.remove(crate::runner::NATIVE_IDENTITY_ARG);
+    let digest = crate::runner::native_identity(&entries)?;
+    let oid = store_git_blob(config, digest.as_bytes()).map_err(|e| HttpError::new(500, e))?;
+    let mut tree: Vec<_> = fetch_tree(config, arg_tree)
+        .map_err(|e| HttpError::new(400, e))?
+        .into_iter()
+        .filter(|e| e.name != crate::runner::NATIVE_IDENTITY_ARG)
+        .map(|e| named_entry(&e.name, e.mode, e.oid))
+        .collect();
+    tree.push(named_entry(
+        crate::runner::NATIVE_IDENTITY_ARG,
+        gix::objs::tree::EntryKind::Blob.into(),
+        oid,
+    ));
+    let bound = store_git_tree(config, tree).map_err(|e| HttpError::new(500, e))?;
+    Ok(Some((bound.to_string(), digest)))
 }
 
 /// [`run_work_request`], also saying whether THIS invocation executed the
 /// worker or was served a result someone else (or an earlier call) produced.
 fn run_work_request_receipt(
+    config: &Config,
+    request: &WorkRequest,
+) -> Result<(String, Origin, Option<String>), HttpError> {
+    let (image, _) = read_arg_tree(config, request.arg_tree)?;
+    let binding = bind_native_request(config, request.arg_tree, &image)?;
+    let bound_request = WorkRequest {
+        arg_tree: binding
+            .as_ref()
+            .map(|(bound, _)| bound.as_str())
+            .unwrap_or(request.arg_tree),
+        ..*request
+    };
+    let (result, origin) = run_prepared_request(config, &bound_request)?;
+    if binding.is_some() && request.stack.is_empty() {
+        pin_result(config, request.arg_tree, &result)?;
+    }
+    Ok((result, origin, binding.map(|(_, digest)| digest)))
+}
+
+fn run_prepared_request(
     config: &Config,
     request: &WorkRequest,
 ) -> Result<(String, Origin), HttpError> {
@@ -853,8 +916,19 @@ fn run_dispatch_inner(
     // server thread until a runner posts the result; capacity is runner-side
     // (the set of parked polls), so there's no server-side slot to hold.
     let result = {
-        let image_ref = resolve_image(config, image).map_err(fail)?;
         let arg_entries = args_entries(config, arg_tree).map_err(fail)?;
+        let image_ref = if crate::runner::is_native_base(image) {
+            let oid = arg_entries
+                .get(crate::runner::NATIVE_IDENTITY_ARG)
+                .ok_or_else(|| (503, "native request has no bound identity".to_string()))?;
+            let digest = blob_string(config, oid).map_err(fail)?;
+            if !crate::runner::valid_native_image(&digest) {
+                return Err((400, "invalid bound native digest".to_string()));
+            }
+            digest
+        } else {
+            resolve_image(config, image).map_err(fail)?
+        };
         // Whether this job SAYS it is answered by a seeder, which it does by
         // carrying `required-pool=seeded` — the same arg that keeps the generic
         // pool away from it (`runner::matches`). It used to be sniffed from the
@@ -1992,7 +2066,8 @@ fn validate_continuation_shape(
 /// parameter, because that is where the answer already is: `required-pool` is
 /// an ordinary arg, and a job that has one has it in its entries.
 ///
-/// Returns every `required*` entry, not `required-pool` specifically. The prefix
+/// Returns caller `required*` entries, not `required-pool` specifically. Native
+/// executable identity is server-bound per handler, never inherited. The prefix
 /// is the reserved namespace for runner selection (`caos_world`), so a second
 /// pool dimension added later inherits without touching this.
 fn inherited_pool_entries(
@@ -2003,7 +2078,10 @@ fn inherited_pool_entries(
 
     entries
         .into_iter()
-        .filter(|(name, _)| name.starts_with(caos_world::REQUIRED_ARG_PREFIX))
+        .filter(|(name, _)| {
+            name.starts_with(caos_world::REQUIRED_ARG_PREFIX)
+                && name != crate::runner::NATIVE_IDENTITY_ARG
+        })
         .map(|(name, oid)| {
             let oid = gix::ObjectId::from_hex(oid.as_bytes())
                 .map_err(|e| HttpError::new(500, format!("invalid {name} oid: {e}")))?;
@@ -4449,7 +4527,7 @@ mod receipt_tests {
         };
         let answer = run_with(&config, &format!("req={arg_tree}"), |actual| {
             assert_eq!(actual, arg_tree);
-            Ok(("tree x".into(), origin))
+            Ok(("tree x".into(), origin, None))
         })
         .unwrap();
         std::fs::remove_dir_all(dir).unwrap();

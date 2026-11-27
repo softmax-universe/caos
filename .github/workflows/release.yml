@@ -465,6 +465,6 @@ jobs:
             # A server from before `/version` existed. Remove this branch once
             # prod has been redeployed with it: it is the behavior that cannot
             # test a branch using newer expression verbs.
-            echo "::warning::the prod server cannot report its version ($(tr '\n' ' ' <get-version.err)); testing with the checkout's own std/caos-test"
+            echo "::warning::the prod server cannot report its version ($(tr '\n' ' ' <"$err")); testing with the checkout's own std/caos-test"
             caos-cli run-tool caos-test
           fi

@@ -915,6 +915,12 @@ fn route(config: &Arc<Config>, request: &mut Request) -> Result<Vec<u8>, HttpErr
         Method::Get if path.starts_with("/status/") => {
             status::serve(config, path.trim_start_matches("/status/"), &query)
         }
+        // Which caos revision this server was started from: the commit its
+        // `caosd up` was built at, handed in as `CAOS_REV`. A FACT about the
+        // deploy and nothing more: it resolves and fetches nothing. `unknown`
+        // when the starter did not say (a dev or test stack), so a caller can
+        // tell "not told" from "empty".
+        Method::Get if path == "/version" => Ok(server_rev().into_bytes()),
         Method::Get if path == "/resolve-image" => compute::resolve_image_endpoint(config, &query),
         Method::Get if path == "/eval" => {
             let secrets = secret_context(config, request)?;

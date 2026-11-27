@@ -16,6 +16,13 @@
 //! The caller says WHICH input, WHAT of it to load, and WHERE to put it. This
 //! worker checks the pin and does the splice.
 //!
+//! `--mounts=<from>:<to>,…` instead of `--output-path` mounts several
+//! directories of the one input in one call — `std:caos-std,caos-core:caos-core`
+//! gives a consumer caos' std beside its built core (design/nix-bootstrap.md).
+//! `<from>` is a path in `--input-tree` (`.` for all of it). Either way the
+//! result's `.caos-mounts` lists what was mounted, so a later deep-deps over
+//! the consumer's tree treats each mount as the finished tree it is.
+//!
 //! `--output-path=.` puts it HERE: the result is the input tree itself, in
 //! place of `--in`. That is for an expression kept in a directory of its own
 //! (`caos-std/`, holding the expression, `flake.nix` and `flake.lock`): the
@@ -49,7 +56,15 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use worker_common::{arg, caos, entries, file_name, link, path, read_arg, run_worker, scratch};
+use worker_common::{
+    arg, caos, entries, file_name, link, path, read_arg, read_arg_opt, run_worker, scratch,
+};
+
+/// The file at a tree's root listing the paths in it that were MOUNTED rather
+/// than checked in — the same file and format the evaluator's `graft` writes
+/// (`caos_eval::MOUNTS_FILE`; not imported, because this tool is built from its
+/// own directory and links only worker-common).
+const MOUNTS_FILE: &str = ".caos-mounts";
 
 fn main() -> ExitCode {
     run_worker("flake-input-loader", run)
@@ -57,7 +72,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let input = read_arg("input")?;
-    let output_path = read_arg("output-path")?;
+    let output_path = read_arg_opt("output-path")?;
+    let mount_spec = read_arg_opt("mounts")?;
     let expr = read_arg("expr")?;
 
     let in_dir = PathBuf::from(arg("in"));
@@ -83,74 +99,189 @@ fn run() -> Result<(), String> {
     check_expr(&expr, &input, &url, &rev)?;
 
     let out = scratch("loaded")?;
-    // `.` mounts the input AT the consumer's own directory: the result IS the
-    // input tree, replacing the tree that was handed in. That is what lets the
-    // expression live in a small directory of its own (`caos-std/`) whose
-    // evaluation does not change as the rest of the session does. Only a bare
-    // `.` means this; every other spelling that names no component is still
-    // refused below.
-    if output_path.trim() == "." {
-        let mounted = out.join("mounted");
-        link(PathBuf::from(arg("input-tree")), &mounted)?;
-        return caos(["put", path(&mounted), "/cas/out"]);
+    let input_tree = PathBuf::from(arg("input-tree"));
+    let mounts = match (output_path, mount_spec) {
+        (Some(_), Some(_)) => {
+            return Err("give --output-path or --mounts, not both".to_string());
+        }
+        (None, None) => {
+            return Err(
+                "say where the input goes: --output-path=<path>, or --mounts=<from>:<to>,…"
+                    .to_string(),
+            );
+        }
+        // `.` mounts the input AT the consumer's own directory: the result IS
+        // the input tree, replacing the tree that was handed in. That is what
+        // lets the expression live in a small directory of its own
+        // (`caos-std/`) whose evaluation does not change as the rest of the
+        // session does. Only a bare `.` means this; every other spelling that
+        // names no component is still refused below.
+        (Some(output_path), None) if output_path.trim() == "." => {
+            let mounted = out.join("mounted");
+            link(&input_tree, &mounted)?;
+            return caos(["put", path(&mounted), "/cas/out"]);
+        }
+        (Some(output_path), None) => {
+            let to = components(&output_path);
+            if to.is_empty() {
+                return Err(format!("--output-path={output_path:?} names no path"));
+            }
+            vec![(Vec::new(), to)]
+        }
+        (None, Some(spec)) => parse_mounts(&spec)?,
+    };
+
+    let mut sources = Vec::new();
+    for (from, to) in &mounts {
+        sources.push((to.as_slice(), descend(&input_tree, from)?));
     }
-    let comps: Vec<String> = output_path
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != ".")
-        .map(String::from)
-        .collect();
-    if comps.is_empty() {
-        return Err(format!("--output-path={output_path:?} names no path"));
-    }
-    splice(Some(in_dir), &out, &comps, &PathBuf::from(arg("input-tree")))?;
+    let plan: Vec<(&[String], &Path)> = sources.iter().map(|(to, p)| (*to, p.as_path())).collect();
+    splice(Some(in_dir.clone()), &out, &plan)?;
+    record_mounts(&in_dir, &out, &mounts)?;
     caos(["put", path(&out), "/cas/out"])
 }
 
-/// Build `dst` as `src` with `tree` spliced in at `comps`.
+/// The non-empty components of a `/`-separated path, `.` dropped.
+fn components(p: &str) -> Vec<String> {
+    p.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(String::from)
+        .collect()
+}
+
+/// `--mounts=<from>:<to>,…` as `(from, to)` component lists. `<from>` is a
+/// path in the input tree (`.` for all of it), `<to>` a path in the result.
+/// Mounting several directories of ONE input in one call is what gives a
+/// consumer `caos-core/` beside `caos-std/` from a single pin
+/// (design/nix-bootstrap.md).
+fn parse_mounts(spec: &str) -> Result<Vec<(Vec<String>, Vec<String>)>, String> {
+    let mut mounts: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (from, to) = item
+            .split_once(':')
+            .ok_or_else(|| format!("--mounts entry {item:?} is not <from>:<to>"))?;
+        if from.split('/').any(|c| c == "..") || to.split('/').any(|c| c == "..") {
+            return Err(format!("--mounts entry {item:?} uses `..`"));
+        }
+        let to = components(to);
+        if to.is_empty() {
+            return Err(format!(
+                "--mounts entry {item:?} names no destination (`.` is --output-path=.)"
+            ));
+        }
+        for (_, other) in &mounts {
+            let shorter = other.len().min(to.len());
+            if other[..shorter] == to[..shorter] {
+                return Err(format!(
+                    "--mounts puts {} and {} one inside the other",
+                    other.join("/"),
+                    to.join("/")
+                ));
+            }
+        }
+        mounts.push((components(from), to));
+    }
+    if mounts.is_empty() {
+        return Err("--mounts names nothing to mount".to_string());
+    }
+    Ok(mounts)
+}
+
+/// The `/cas` path of `from` inside the input tree, fetching each level on the
+/// way down (and nothing below it).
+fn descend(tree: &Path, from: &[String]) -> Result<PathBuf, String> {
+    let mut at = tree.to_path_buf();
+    for comp in from {
+        caos(["get", path(&at)])?;
+        at = at.join(comp);
+        if !at.exists() {
+            return Err(format!("the input has no {}", from.join("/")));
+        }
+    }
+    Ok(at)
+}
+
+/// Write the result's `.caos-mounts`: whatever `--in` already listed, plus every
+/// destination this call mounted. A mounted tree is FINISHED — it was
+/// evaluated (deepened) where it came from — and this is how a later transform
+/// of the consumer's tree (deep-deps) knows not to walk into it.
+fn record_mounts(
+    in_dir: &Path,
+    out: &Path,
+    mounts: &[(Vec<String>, Vec<String>)],
+) -> Result<(), String> {
+    let mut listed = std::collections::BTreeSet::new();
+    let existing = in_dir.join(MOUNTS_FILE);
+    if existing.exists() {
+        caos(["get", path(&existing)])?;
+        let text = std::fs::read_to_string(&existing)
+            .map_err(|e| format!("reading {MOUNTS_FILE}: {e}"))?;
+        listed.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from));
+    }
+    listed.extend(mounts.iter().map(|(_, to)| to.join("/")));
+    let at = out.join(MOUNTS_FILE);
+    if at.symlink_metadata().is_ok() {
+        std::fs::remove_file(&at).map_err(|e| format!("replacing {MOUNTS_FILE}: {e}"))?;
+    }
+    let body: String = listed.iter().map(|m| format!("{m}\n")).collect();
+    std::fs::write(&at, body).map_err(|e| format!("writing {MOUNTS_FILE}: {e}"))
+}
+
+/// Build `dst` as `src` with each `(path, tree)` of `plan` spliced in.
 ///
 /// Every sibling is carried across BY REFERENCE: `caos put` resolves a symlink
 /// into `/cas` to the content's recorded hash, so an untouched subtree is never
 /// read, copied or re-uploaded however large it is. Only the directories along
-/// `comps` are materialized, one level at a time.
-fn splice(src: Option<PathBuf>, dst: &Path, comps: &[String], tree: &Path) -> Result<(), String> {
-    let head = &comps[0];
-    let mut collides = false;
+/// the mount paths are materialized, one level at a time.
+fn splice(src: Option<PathBuf>, dst: &Path, plan: &[(&[String], &Path)]) -> Result<(), String> {
+    let heads: std::collections::BTreeSet<&str> =
+        plan.iter().map(|(to, _)| to[0].as_str()).collect();
+    let mut present = std::collections::BTreeSet::new();
     if let Some(src) = &src {
         caos(["get", path(src)])?;
         for entry in entries(path(src))? {
-            if file_name(&entry) == *head {
-                collides = true;
-                continue; // replaced (last component) or merged into (below)
+            let name = file_name(&entry);
+            if heads.contains(name.as_str()) {
+                present.insert(name);
+                continue; // replaced (a leaf) or merged into (below)
             }
-            link(&entry, dst.join(file_name(&entry)))?;
+            link(&entry, dst.join(&name))?;
         }
     }
 
-    if comps.len() == 1 {
-        // Refuse to overwrite. The mount point is meant to be absent from the
-        // tree (gitignored in the consumer), so a collision means the caller
-        // aimed at something real — silently replacing it would lose it.
-        if collides {
-            return Err(format!(
-                "--output-path would overwrite {head:?}, which already exists in --in"
-            ));
+    for head in heads {
+        let here: Vec<&(&[String], &Path)> =
+            plan.iter().filter(|(to, _)| to[0] == head).collect();
+        if let Some((_, tree)) = here.iter().find(|(to, _)| to.len() == 1) {
+            // Refuse to overwrite. The mount point is meant to be absent from
+            // the tree (gitignored in the consumer), so a collision means the
+            // caller aimed at something real — silently replacing it would lose
+            // it.
+            if present.contains(head) {
+                return Err(format!(
+                    "mounting would overwrite {head:?}, which already exists in --in"
+                ));
+            }
+            link(tree, dst.join(head))?;
+            continue;
         }
-        return link(tree, dst.join(head));
+        let next_dst = dst.join(head);
+        std::fs::create_dir(&next_dst)
+            .map_err(|e| format!("creating {}: {e}", next_dst.display()))?;
+        let next_src = match src.as_ref().map(|s| s.join(head)) {
+            Some(p) if p.is_dir() => Some(p),
+            Some(p) if p.exists() => {
+                return Err(format!(
+                    "a mount path descends through {}, which is a file",
+                    file_name(&p)
+                ))
+            }
+            _ => None, // a fresh directory the consumer's tree does not have
+        };
+        let rest: Vec<(&[String], &Path)> = here.iter().map(|(to, t)| (&to[1..], *t)).collect();
+        splice(next_src, &next_dst, &rest)?;
     }
-
-    let next_dst = dst.join(head);
-    std::fs::create_dir(&next_dst).map_err(|e| format!("creating {}: {e}", next_dst.display()))?;
-    let next_src = match src.map(|s| s.join(head)) {
-        Some(p) if p.is_dir() => Some(p),
-        Some(p) if p.exists() => {
-            return Err(format!(
-                "--output-path descends through {}, which is a file",
-                file_name(&p)
-            ))
-        }
-        _ => None, // a fresh directory the consumer's tree does not have
-    };
-    splice(next_src, &next_dst, &comps[1..], tree)
+    Ok(())
 }
 
 /// The `(url, rev)` `flake.lock` locks for the root flake's `input`.

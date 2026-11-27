@@ -424,6 +424,61 @@
           };
         };
 
+        # The `nix=v1` PRIMITIVE's image (design/nix-bootstrap.md): nix and
+        # the one script that builds a flake attribute and adds nothing to it.
+        # HOST-BUILT and streamed like the runner, and deliberately NOT a std
+        # entry: the server finds it through the file CAOS_NIX_IMAGE_FILE names
+        # (build-builtins writes it), never through a key, so nothing evaluates
+        # it and it has no seed record. The same userland std/flake-builder
+        # carries, for the same reasons (its flake.nix says why each is there).
+        workerNixImage =
+          let
+            script = linuxPkgs.writeTextFile {
+              name = "caos-worker-nix-script";
+              executable = true;
+              destination = "/worker";
+              text = builtins.readFile ./stack/nix-worker;
+            };
+          in
+          pkgs.dockerTools.buildLayeredImage {
+            name = "caos-worker-nix";
+            tag = "latest";
+            contents = [
+              (linuxPkgs.buildEnv {
+                name = "caos-worker-nix-root";
+                paths = [
+                  script
+                  linuxPkgs.nix
+                  linuxPkgs.cacert
+                  linuxPkgs.bashInteractive
+                  linuxPkgs.coreutils
+                  linuxPkgs.gnugrep
+                  linuxPkgs.gzip
+                  linuxPkgs.gnutar
+                  linuxPkgs.skopeo
+                  linuxPkgs.jq
+                ];
+              })
+            ];
+            config = {
+              Entrypoint = [
+                "/bin/caos"
+                "runner"
+              ];
+              Env = [
+                "PATH=/bin"
+                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                # Root: the nix store is root-owned.
+                "CAOS_WORKER_UID=0"
+                "CAOS_WORKER_GID=0"
+              ];
+            };
+            # An in-image `nix build` needs the closure REGISTERED, not merely
+            # present.
+            includeNixDB = true;
+          };
+
         # The cargo toolchain + workspace-deps bake (design/cargo-workers.md,
         # phases 0–1): ONE definition in std/cargo/bake.nix, called with THIS
         # flake's `src` and toolchain. That is what makes `cargoBake.deps` and
@@ -939,6 +994,8 @@ sandbox = false''
           workerFlakeBuilderImage
           workerRunnerImage
           workerCargoImage
+          # Not a std entry: the nix primitive's image (see workerNixImage).
+          workerNixImage
         ];
 
         # The worker binaries build-builtins.sh needs at publish, to curry onto
@@ -1830,6 +1887,8 @@ sandbox = false''
           # and the runner: std/cargo is no longer a published flake tree, so
           # its image comes from here (see the cargoDef call above).
           caos-worker-cargo-docker = workerCargoImage;
+          # The nix primitive's image (design/nix-bootstrap.md).
+          caos-worker-nix-docker = workerNixImage;
 
           # The flake-builder contract (design/flake-images.md): handed a tree,
           # the builder builds `#caosImage`. What this flake defines under that

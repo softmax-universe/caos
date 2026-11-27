@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# The `nix=v1` PRIMITIVE's /worker (design/nix-bootstrap.md): build `--attr` of
+# the flake `--in` with this image's nix, and return what nix built with
+# NOTHING ADDED — no /bin/caos, no layer, no entrypoint rewrite.
+#
+# A job whose base is the blob `nix:v1` is run by the server in this stack's
+# `caos-worker-nix` image, named by the file CAOS_NIX_IMAGE_FILE. That image
+# is HOST-BUILT and streamed like the runner, and it is no std entry: nothing
+# evaluates it, so it has no seed record and a change to this script re-keys
+# nothing. Which stack ran a job is deliberately not in the job's key
+# ({base: nix:v1, in, attr}); that is sound only because the output is a
+# function of the flake and its lock, so this script must never add to it.
+#
+#   a docker-archive tarball (an image attr) -> a CLEAN git-docker delta
+#     {base: docker://<pushed>, config.json}, config verbatim;
+#   a directory (a package)                 -> its store path as a tree;
+#   any other single file                   -> that file, as a blob.
+set -euo pipefail
+
+# skopeo and nix resolve $HOME; set it to the /tmp this worker owns.
+export HOME=/tmp
+# skopeo stages pulled blobs under /var/tmp, which this image does not have.
+mkdir -p /var/tmp
+
+fail() { echo "NIX PRIMITIVE FAIL: $*" >&2; exit 1; }
+
+# Single-user, unsandboxed nix: root in a container with no nixbld group and no
+# privilege to build a sandbox (the same settings std/flake-builder uses).
+nixf() {
+  nix --extra-experimental-features "nix-command flakes" \
+    --option build-users-group "" --option sandbox false "$@"
+}
+# Unsandboxed builders that write $HOME leave /homeless-shelter behind, and nix
+# then refuses to start the next build. Retry, removing the litter, but only on
+# that exact error (std/flake-builder/worker has the full story).
+nix_build_flake() { # <attr> <out-link>
+  while :; do
+    rm -rf /homeless-shelter
+    if nixf build -L "path:/tmp/ws#$1" -o "$2" 2>&1 | tee /tmp/nix-err >&2; then
+      return 0
+    fi
+    grep -q "homeless-shelter" /tmp/nix-err || return 1
+    echo "nix: homeless-shelter litter; resuming $1" >&2
+  done
+}
+sk() { skopeo --insecure-policy "$@"; }
+
+caos get /cas/args/attr || fail "no --attr: name the flake attribute to build"
+attr=$(cat /cas/args/attr)
+case "$attr" in
+  "" | -* | *[!A-Za-z0-9._+-]*) fail "--attr must be a flake attribute path, got: $attr" ;;
+esac
+caos get -r /cas/args/in || fail "no --in: name the flake to build"
+[ -e /cas/args/in/flake.nix ] || fail "no flake.nix in --in"
+# A LOCKED flake only: an unlocked input would make the output depend on when
+# it ran, and the key could not say so.
+[ -e /cas/args/in/flake.lock ] || fail "no flake.lock in --in: nix=v1 builds only a locked flake"
+mkdir /tmp/ws
+cp -rL /cas/args/in/. /tmp/ws/
+chmod -R u+w /tmp/ws
+
+# An image attr already pushed for this exact flake tree is answered from the
+# registry; the tag says which tree and attr it came from.
+H=$(printf '%s %s' "$(caos hash /cas/args/in)" "$attr" | sha1sum | cut -d' ' -f1)
+tag="caos-registry:5000/caos:nix-$H"
+emit_image() {
+  local digest
+  digest=$(sk inspect --tls-verify=false --format '{{.Digest}}' "docker://$tag") \
+    || fail "reading the pushed digest"
+  mkdir -p /tmp/res
+  # The on-network registry name: the SERVER pulls this base at convert time.
+  printf 'docker://caos-registry:5000/caos@%s' "$digest" > /tmp/res/base
+  sk inspect --tls-verify=false --config "docker://$tag" > /tmp/res/config.json \
+    || fail "reading the image config"
+  caos put /tmp/res /cas/out
+}
+if sk inspect --tls-verify=false "docker://$tag" >/dev/null 2>&1; then
+  echo "nix: registry hit for $tag" >&2
+  emit_image
+  exit 0
+fi
+
+nix_build_flake "$attr" /tmp/built || fail "nix build of path:/tmp/ws#$attr"
+built=$(readlink -f /tmp/built)
+if [ -d "$built" ]; then
+  # The store path, dereferenced: plain files and directories, exec bits kept,
+  # nothing pointing back into this container's store.
+  cp -rL "$built" /tmp/res
+  caos put /tmp/res /cas/out
+  exit 0
+fi
+case "$built" in
+  *.tar.gz) gunzip -c "$built" > /tmp/img.tar ;;
+  *.tar) cp "$built" /tmp/img.tar ;;
+  *)
+    cp -L "$built" /tmp/res
+    caos put /tmp/res /cas/out
+    exit 0
+    ;;
+esac
+sk copy --dest-tls-verify=false "docker-archive:/tmp/img.tar" "docker://$tag" >&2 \
+  || fail "pushing $tag"
+emit_image

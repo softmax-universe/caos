@@ -3081,6 +3081,11 @@ fn build_arg_entries(
             // indistinguishable from a local path arg.
             ArgType::Remote => eval_remote_arg(t, value, &Secrets::default())
                 .map_err(|e| format!("`{name}`: {e}"))?,
+            ArgType::Nix => {
+                return Err(format!(
+                    "`{name}`: :nix= names the nix primitive and is only a --base"
+                ))
+            }
         };
 
         entries.push(Entry {
@@ -3250,6 +3255,8 @@ fn eval_base_with(
         // server and `base_arg_entry` expect. The scheme is added here, so the
         // value a caller writes is the plain ref.
         ArgType::Docker => Ok(format!("{DOCKER_SCHEME}{value}")),
+        // `:nix=v1` — the nix primitive, run by the server (design/nix-bootstrap.md).
+        ArgType::Nix => caos_eval::nix_base(value),
         // `:hash=<oid>` — a git image or a curry node already in the store (e.g.
         // what `caos curry` printed). Location-independent, so it survives being
         // passed through an arg into a worker, which a `/cas` path would not.

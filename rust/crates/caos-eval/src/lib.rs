@@ -128,6 +128,27 @@ pub enum ArgType {
     /// path because that is the common case, and `:@@=` carries the full ref
     /// grammar for the rare one.
     Remote,
+    /// `--base:nix=v1` — the NIX PRIMITIVE (design/nix-bootstrap.md): build a
+    /// flake attribute (`--in`, `--attr`) with the stack's own nix, adding
+    /// nothing. Only a base. Stored as the blob `nix:v1`, which the server
+    /// runs in its configured nix image; the stack is deliberately NOT in the
+    /// key, and `v1` versions the output format so a change misses cleanly.
+    Nix,
+}
+
+/// The prefix of the base blob that names the nix primitive (`nix:v1`).
+pub const NIX_SCHEME: &str = "nix:";
+
+/// The base ref for `--base:nix=<version>`, refusing a version this caos
+/// does not know: an unknown one would be run with today's format and answer
+/// wrongly rather than miss.
+pub fn nix_base(version: &str) -> Result<String, String> {
+    match version {
+        "v1" => Ok(format!("{NIX_SCHEME}{version}")),
+        other => Err(format!(
+            "--base:nix={other:?} is not a nix primitive this caos knows; use --base:nix=v1"
+        )),
+    }
 }
 
 /// Split a `--name[:type]=value` argument into its name, [`ArgType`] and raw
@@ -149,11 +170,12 @@ pub fn parse_arg(kv: &str) -> Result<(&str, ArgType, &str), String> {
         Some((name, "commit")) => (name, ArgType::Commit),
         Some((name, "hash")) => (name, ArgType::Hash),
         Some((name, "docker")) => (name, ArgType::Docker),
+        Some((name, "nix")) => (name, ArgType::Nix),
         Some((_, ty)) => {
             return Err(format!(
                 "unknown argument type {ty:?} in {kv:?}; use --name=value (literal), \
                  --name:@=path, --name:@@=<git ref>, --name:commit=rev, --name:hash=oid \
-                 (a tree/blob the server holds), or --name:docker=ref"
+                 (a tree/blob the server holds), --name:docker=ref, or --base:nix=v1"
             ))
         }
     };
@@ -845,6 +867,9 @@ fn eval_expr_base(
         // cycles"). The formed arg-tree carries the ref as a blob, exactly what
         // the seeder registers.
         ArgType::Docker => Ok(format!("{DOCKER_SCHEME}{value}")),
+        // `:nix=v1` — the nix primitive: nothing to resolve here, the server
+        // runs it.
+        ArgType::Nix => nix_base(value),
         // `:hash=<oid>` — an object already in the store (a git image or a curry
         // node), referenced as-is. Location-independent.
         ArgType::Hash => {
@@ -984,6 +1009,11 @@ fn eval_expr_args(
                 ArgType::Commit => {
                     return Err(format!(
                         "eval-path: :commit= is not supported in .caos-expr yet: {tok:?}"
+                    ))
+                }
+                ArgType::Nix => {
+                    return Err(format!(
+                        "eval-path: :nix= names the nix primitive and is only a --base: {tok:?}"
                     ))
                 }
             }
@@ -1339,6 +1369,12 @@ mod tests {
             parse_arg("--help=$HELP").unwrap(),
             ("help", ArgType::Literal, "$HELP")
         );
+        assert_eq!(
+            parse_arg("--base:nix=v1").unwrap(),
+            ("base", ArgType::Nix, "v1")
+        );
+        assert_eq!(super::nix_base("v1").unwrap(), "nix:v1");
+        assert!(super::nix_base("v2").is_err());
         assert!(parse_arg("--k:nope=v").is_err());
         assert!(parse_arg("--a/b=v").is_err());
         assert!(parse_arg("no-dashes=v").is_err());
@@ -1595,6 +1631,24 @@ mod evaluated_tests {
             let err = eval_in(&host, &[("a", "A")], expr).unwrap_err();
             assert!(err.contains(why), "{expr:?}: {err}");
         }
+    }
+
+    #[test]
+    fn nix_is_only_a_base() {
+        let host = Memory::default();
+        let err = eval_in(&host, &[], "graft --x:nix=v1\n").unwrap_err();
+        assert!(err.contains("only a --base"), "{err}");
+        let err = eval_in(&host, &[], "curry --base:nix=v9 --x=1\n").unwrap_err();
+        assert!(err.contains("use --base:nix=v1"), "{err}");
+        // A curry over the primitive keeps the `nix:v1` blob as its base, which
+        // is what the server dispatches on.
+        let out = eval_in(&host, &[], "curry --base:nix=v1 --attr=hello\n").unwrap();
+        let base = listing(&host, &out)
+            .into_iter()
+            .find(|(n, _)| n == "base")
+            .unwrap()
+            .1;
+        assert_eq!(base, "nix:v1");
     }
 
     #[test]
